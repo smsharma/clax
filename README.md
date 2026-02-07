@@ -2,6 +2,8 @@
 
 **A complete, differentiable reimplementation of the CLASS Boltzmann solver in JAX.**
 
+This codebase is being written entirely by Claude Code (Opus 4.6). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
+
 jaxCLASS solves the coupled Einstein-Boltzmann equations for cosmological perturbations from first principles: background cosmology, hydrogen recombination, the full photon-baryon-neutrino Boltzmann hierarchy in synchronous gauge, line-of-sight integration for CMB angular power spectra, HaloFit for nonlinear matter power, gravitational lensing, and a shooting method for theta_s parametrization. The entire pipeline -- from cosmological parameters to P(k), C_l^TT/EE/TE/BB, and lensed C_l -- is end-to-end differentiable via JAX automatic differentiation.
 
 The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_public) that enables gradient-based cosmological inference (HMC, variational methods) on CMB and large-scale structure data.
@@ -160,10 +162,6 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 - **SymBoltz.jl**: Li & Millea (2024). Symbolic Boltzmann solver in Julia. [arXiv:2411.18620](https://arxiv.org/abs/2411.18620)
 - Seljak & Zaldarriaga (1996). Line-of-sight integration approach. [arXiv:astro-ph/9603033](https://arxiv.org/abs/astro-ph/9603033)
 - Ma & Bertschinger (1995). Cosmological perturbation theory. [arXiv:astro-ph/9506072](https://arxiv.org/abs/astro-ph/9506072)
-
-## Development
-
-This codebase is being written entirely by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## License
 
