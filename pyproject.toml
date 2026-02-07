@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxclass"
+version = "0.1.0"
+description = "Fully differentiable CLASS Boltzmann solver in JAX"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.20",
+    "jaxlib>=0.4.20",
+    "diffrax>=0.5.0",
+    "equinox>=0.11.0",
+    "jaxtyping>=0.2.20",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-xdist",
+]
+reference = [
+    "classy",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jaxclass*"]
