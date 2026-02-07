@@ -161,6 +161,10 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 - Seljak & Zaldarriaga (1996). Line-of-sight integration approach. [arXiv:astro-ph/9603033](https://arxiv.org/abs/astro-ph/9603033)
 - Ma & Bertschinger (1995). Cosmological perturbation theory. [arXiv:astro-ph/9506072](https://arxiv.org/abs/astro-ph/9506072)
 
+## Development
+
+This codebase is being written entirely by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) (Anthropic's AI coding agent), with physics direction and review from [Siddharth Mishra-Sharma](https://github.com/smsharma). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
+
 ## License
 
 Research code. Not yet released under a formal license.
