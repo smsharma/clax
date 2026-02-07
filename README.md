@@ -163,7 +163,7 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 
 ## Development
 
-This codebase is being written entirely by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) (Anthropic's AI coding agent), with physics direction and review from [Siddharth Mishra-Sharma](https://github.com/smsharma). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
+This codebase is being written entirely by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) (Anthropic's AI coding agent). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## License
 
