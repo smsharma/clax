@@ -21,8 +21,9 @@ from jaxclass.constants import *  # noqa: F401,F403
 from jaxclass.params import CosmoParams, PrecisionParams  # noqa: F401
 from jaxclass.background import background_solve, BackgroundResult, H_of_z, angular_diameter_distance  # noqa: F401
 from jaxclass.thermodynamics import thermodynamics_solve, ThermoResult  # noqa: F401
-from jaxclass.perturbations import PerturbationResult  # noqa: F401
-from jaxclass.primordial import primordial_scalar_pk  # noqa: F401
+from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult, tensor_perturbations_solve  # noqa: F401
+from jaxclass.primordial import primordial_scalar_pk, primordial_tensor_pk  # noqa: F401
+from jaxclass.harmonic import compute_cl_bb  # noqa: F401
 
 from dataclasses import dataclass
 import jax.numpy as jnp

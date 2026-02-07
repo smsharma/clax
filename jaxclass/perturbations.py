@@ -806,3 +806,449 @@ def perturbations_solve(
         source_lens=all_sources[4],
         delta_m=all_sources[5],
     )
+
+
+# ===========================================================================
+# TENSOR PERTURBATIONS (gravitational waves → B-mode polarization)
+# ===========================================================================
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class TensorPerturbationResult:
+    """Output of the tensor perturbation module.
+
+    Contains tensor source function tables on a (k, tau) grid for
+    computing C_l^BB (and tensor contributions to TT, EE).
+    """
+    k_grid: Float[Array, "Nk"]
+    tau_grid: Float[Array, "Ntau"]
+
+    # Tensor source functions: shape (Nk, Ntau)
+    source_t: Float[Array, "Nk Ntau"]   # Tensor temperature source
+    source_p: Float[Array, "Nk Ntau"]   # Tensor polarization source (for BB)
+
+    def tree_flatten(self):
+        return [self.k_grid, self.tau_grid, self.source_t, self.source_p], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, fields):
+        return cls(*fields)
+
+
+def _build_tensor_indices(l_max_g: int, l_max_pol: int, l_max_ur: int):
+    """Build index mapping for the tensor perturbation state vector.
+
+    The tensor state vector contains:
+        - GW metric perturbation: h, h'
+        - Tensor photon hierarchy: F_g,0 through F_g,l_max (intensity)
+        - Tensor photon polarization: G_g,0 through G_g,l_max
+        - Tensor massless neutrino hierarchy: F_ur,0 through F_ur,l_max
+
+    cf. CLASS perturbations.c: index_pt_gw, index_pt_gwdot, etc.
+    """
+    idx = {}
+    i = 0
+
+    # GW metric perturbation
+    idx['gw'] = i; i += 1         # h tensor
+    idx['gw_dot'] = i; i += 1     # h' tensor
+
+    # Tensor photon hierarchy (temperature/intensity)
+    idx['F_g_start'] = i
+    for l in range(l_max_g + 1):
+        idx[f'F_g_{l}'] = i; i += 1
+    idx['F_g_end'] = i
+
+    # Tensor photon polarization hierarchy
+    idx['G_g_start'] = i
+    for l in range(l_max_pol + 1):
+        idx[f'G_g_{l}'] = i; i += 1
+    idx['G_g_end'] = i
+
+    # Tensor massless neutrino hierarchy
+    idx['F_ur_start'] = i
+    for l in range(l_max_ur + 1):
+        idx[f'F_ur_{l}'] = i; i += 1
+    idx['F_ur_end'] = i
+
+    idx['n_eq'] = i
+    return idx
+
+
+_SQRT6 = math.sqrt(6.0)
+_SQRT2 = math.sqrt(2.0)
+
+
+def _tensor_ic(k, tau_ini, bg, idx, n_eq):
+    """Tensor initial conditions.
+
+    cf. CLASS perturbations.c:5957:
+        y[index_pt_gw] = gw_ini / sqrt(6)
+    where gw_ini = 1 (default).
+
+    For flat space (K=0), the GW initial condition is h = 1/sqrt(6),
+    and the correction at order tau^2 gives:
+        h_corr = -h * k^2 / (6 + 8/5 * rho_fs/rho_r) * tau^2
+    where rho_fs = rho_ur (free-streaming radiation).
+
+    cf. CLASS perturbations.c:6009-6014
+    """
+    y0 = jnp.zeros(n_eq)
+
+    loga_ini = bg.loga_of_tau.evaluate(tau_ini)
+    a_ini = jnp.exp(loga_ini)
+
+    rho_g = bg.rho_g_of_loga.evaluate(loga_ini)
+    rho_ur = bg.rho_ur_of_loga.evaluate(loga_ini)
+    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga_ini)
+    rho_r = rho_g + rho_ur + rho_ncdm
+    rho_fs = rho_ur + rho_ncdm  # free-streaming species
+
+    k2 = k * k
+
+    # Leading order: h = 1/sqrt(6) (normalized to unit primordial tensor)
+    h0 = 1.0 / _SQRT6
+
+    # Second-order correction (CLASS perturbations.c:6012-6014)
+    h_corr = -h0 * k2 / (6.0 + 8.0 / 5.0 * rho_fs / rho_r) * tau_ini**2
+    h_val = h0 + h_corr
+    hdot_val = 2.0 * h_corr / tau_ini
+
+    y0 = y0.at[idx['gw']].set(h_val)
+    y0 = y0.at[idx['gw_dot']].set(hdot_val)
+
+    # Photon/neutrino quadrupoles start at order tau^2 (set by CLASS at 6016-6032)
+    # F_g_0 (tensor delta_g) at leading order: proportional to h' * tau
+    # For simplicity, start all hierarchy moments at zero (they build up quickly)
+
+    return y0
+
+
+def _tensor_rhs(tau, y, args):
+    """Right-hand side of the tensor perturbation ODE system.
+
+    Implements the full tensor Boltzmann hierarchy in synchronous gauge.
+
+    The GW equation (CLASS perturbations.c:6744, flat space K=0):
+        h'' + 2*aH*h' + k^2*h = gw_source
+
+    where gw_source = tensor anisotropic stress from photons + neutrinos.
+
+    The tensor photon Boltzmann hierarchy (CLASS perturbations.c:9815-9868):
+        F'_0 = -4/3*theta_g - kappa'*(F_0 + sqrt(6)*P^(2)) + sqrt(6)*h'
+        F'_1 (theta_g) = k^2*(F_0/4 - s2*sigma_g) - kappa'*theta_g
+        F'_2 (sigma_g) = 4/15*s2*theta_g - 3/10*k*s3*F_3 - kappa'*sigma_g
+        F'_l = k/(2l+1)*(l*s_l*F_{l-1} - (l+1)*s_{l+1}*F_{l+1}) - kappa'*F_l
+
+    Tensor polarization hierarchy (CLASS perturbations.c:9851-9868):
+        G'_0 = -k*G_1 - kappa'*(G_0 - sqrt(6)*P^(2))
+        G'_l = k/(2l+1)*(l*s_l*G_{l-1} - (l+1)*s_{l+1}*G_{l+1}) - kappa'*G_l
+
+    where P^(2) is the tensor polarization term (CLASS perturbations.c:9795-9802):
+        P^(2) = -1/sqrt(6) * (1/10*F_0 + 2/7*sigma_g + 3/70*F_4
+                               - 3/5*G_0 + 6/7*G_2 - 3/70*G_4)
+
+    Tensor neutrino hierarchy (CLASS perturbations.c:9873-9893):
+        F'_ur_0 = -4/3*theta_ur + sqrt(6)*h'
+        F'_ur_1 = k^2*(F_ur_0/4 - s2*sigma_ur)
+        F'_ur_2 = 4/15*theta_ur - 3/10*k*s3/s2*F_ur_3
+        F'_ur_l = k/(2l+1)*(l*s_l*F_ur_{l-1} - (l+1)*s_{l+1}*F_ur_{l+1})
+
+    For flat space, all s_l factors = 1.
+    """
+    (k, bg, th, idx, l_max_g, l_max_pol, l_max_ur) = args
+
+    loga = bg.loga_of_tau.evaluate(tau)
+    a = jnp.exp(loga)
+    H = bg.H_of_loga.evaluate(loga)
+    a_prime_over_a = a * H
+    a2 = a * a
+    k2 = k * k
+
+    rho_g = bg.rho_g_of_loga.evaluate(loga)
+    rho_ur = bg.rho_ur_of_loga.evaluate(loga)
+    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
+
+    kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
+
+    # Unpack GW state
+    gw = y[idx['gw']]
+    gw_dot = y[idx['gw_dot']]
+
+    # Photon tensor hierarchy
+    F_g = y[idx['F_g_start']:idx['F_g_end']]
+    delta_g = F_g[0]
+    theta_g = F_g[1]  # NOTE: In tensor mode, theta_g = (3k/4)*F_1, but CLASS stores theta_g directly
+    # Actually CLASS stores F_0, theta_g (= 3k/4 * F_1), shear_g (= F_2/2), F_3, ...
+    # For simplicity, we store all F_l in our hierarchy and use them directly.
+    # theta_g in CLASS = 3k/4 * F_1_ours; sigma_g in CLASS = F_2_ours / 2.
+
+    # Polarization tensor hierarchy
+    G_g = y[idx['G_g_start']:idx['G_g_end']]
+
+    # Neutrino tensor hierarchy
+    F_ur = y[idx['F_ur_start']:idx['F_ur_end']]
+
+    # === GW ANISOTROPIC STRESS SOURCE ===
+    # cf. CLASS perturbations.c:7322-7358
+    # gw_source from photons: -sqrt(6)*4*a^2*rho_g * (1/15*F_0 + 4/21*sigma_g + 1/35*F_4)
+    # where sigma_g = F_2/2 in our convention
+    F_g_4 = jnp.where(l_max_g >= 4, F_g[jnp.minimum(4, l_max_g)], 0.0)
+    sigma_g = F_g[jnp.minimum(2, l_max_g)] / 2.0
+
+    gw_source = -_SQRT6 * 4.0 * a2 * rho_g * (
+        1.0/15.0 * delta_g + 4.0/21.0 * sigma_g + 1.0/35.0 * F_g_4
+    )
+
+    # Neutrino contribution
+    F_ur_4 = jnp.where(l_max_ur >= 4, F_ur[jnp.minimum(4, l_max_ur)], 0.0)
+    sigma_ur = F_ur[jnp.minimum(2, l_max_ur)] / 2.0
+
+    rho_relativistic = rho_ur + rho_ncdm
+    gw_source += -_SQRT6 * 4.0 * a2 * rho_relativistic * (
+        1.0/15.0 * F_ur[0] + 4.0/21.0 * sigma_ur + 1.0/35.0 * F_ur_4
+    )
+
+    # === GW EQUATION ===
+    # h'' = -2*aH*h' - k^2*h + gw_source
+    gw_prime_prime = -2.0 * a_prime_over_a * gw_dot - k2 * gw + gw_source
+
+    dy = jnp.zeros_like(y)
+    dy = dy.at[idx['gw']].set(gw_dot)
+    dy = dy.at[idx['gw_dot']].set(gw_prime_prime)
+
+    # === P^(2) TENSOR POLARIZATION TERM ===
+    # cf. CLASS perturbations.c:9795-9802
+    G_g_2 = G_g[jnp.minimum(2, l_max_pol)]
+    G_g_4 = jnp.where(l_max_pol >= 4, G_g[jnp.minimum(4, l_max_pol)], 0.0)
+    P2 = -1.0 / _SQRT6 * (
+        1.0/10.0 * delta_g
+        + 2.0/7.0 * sigma_g
+        + 3.0/70.0 * F_g_4
+        - 3.0/5.0 * G_g[0]
+        + 6.0/7.0 * G_g_2
+        - 3.0/70.0 * G_g_4
+    )
+
+    # === PHOTON TENSOR HIERARCHY ===
+    # l=0: F'_0 = -4/3*theta_g - kappa'*(F_0 + sqrt(6)*P2) + sqrt(6)*h'
+    # cf. CLASS perturbations.c:9816-9820 (synchronous gauge)
+    dy = dy.at[idx['F_g_0']].set(
+        -4.0/3.0 * theta_g - kappa_dot * (delta_g + _SQRT6 * P2) + _SQRT6 * gw_dot
+    )
+
+    # l=1: theta'_g = k^2*(F_0/4 - sigma_g) - kappa'*theta_g
+    # cf. CLASS perturbations.c:9822-9825 (synchronous gauge)
+    dy = dy.at[idx['F_g_1']].set(
+        k2 * (delta_g / 4.0 - sigma_g) - kappa_dot * theta_g
+    )
+
+    # l=2: sigma'_g = 4/15*theta_g - 3/10*k*F_3 - kappa'*sigma_g
+    # cf. CLASS perturbations.c:9827-9830
+    # sigma_g = F_2/2, so F'_2 = 2*sigma'_g
+    F_g_3 = F_g[jnp.minimum(3, l_max_g)]
+    sigma_g_prime = 4.0/15.0 * theta_g - 3.0/10.0 * k * F_g_3 - kappa_dot * sigma_g
+    dy = dy.at[idx['F_g_2']].set(2.0 * sigma_g_prime)
+
+    # l=3: F'_3 = k/7*(6*sigma_g - 4*F_4) - kappa'*F_3
+    # cf. CLASS perturbations.c:9832-9835 (with F_2 = 2*sigma_g)
+    dy = dy.at[idx['F_g_3']].set(
+        k/7.0 * (6.0 * sigma_g - 4.0 * F_g_4) - kappa_dot * F_g_3
+    )
+
+    # l=4 to l_max-1
+    def photon_tensor_step(l, dy_acc):
+        Fl_prime = k/(2.0*l+1.0) * (l*F_g[l-1] - (l+1.0)*F_g[jnp.minimum(l+1, l_max_g)]) - kappa_dot*F_g[l]
+        return dy_acc.at[idx['F_g_start'] + l].set(Fl_prime)
+    dy = jax.lax.fori_loop(4, l_max_g, photon_tensor_step, dy)
+
+    # l=l_max truncation
+    tau0_minus_tau = jnp.maximum(bg.conformal_age - tau, 1e-10)
+    dy = dy.at[idx['F_g_start'] + l_max_g].set(
+        k * F_g[l_max_g - 1] - (l_max_g + 1.0) / tau0_minus_tau * F_g[l_max_g] - kappa_dot * F_g[l_max_g]
+    )
+
+    # === POLARIZATION TENSOR HIERARCHY ===
+    # l=0: G'_0 = -k*G_1 - kappa'*(G_0 - sqrt(6)*P2)
+    # cf. CLASS perturbations.c:9851-9854
+    dy = dy.at[idx['G_g_0']].set(
+        -k * G_g[jnp.minimum(1, l_max_pol)] - kappa_dot * (G_g[0] - _SQRT6 * P2)
+    )
+
+    # l >= 1 to l_max-1
+    def pol_tensor_step(l, dy_acc):
+        Gl_prime = k/(2.0*l+1.0) * (l*G_g[l-1] - (l+1.0)*G_g[jnp.minimum(l+1, l_max_pol)]) - kappa_dot*G_g[l]
+        return dy_acc.at[idx['G_g_start'] + l].set(Gl_prime)
+    dy = jax.lax.fori_loop(1, l_max_pol, pol_tensor_step, dy)
+
+    # l=l_max truncation
+    dy = dy.at[idx['G_g_start'] + l_max_pol].set(
+        k * G_g[l_max_pol - 1] - (l_max_pol + 1.0) / tau0_minus_tau * G_g[l_max_pol] - kappa_dot * G_g[l_max_pol]
+    )
+
+    # === NEUTRINO TENSOR HIERARCHY ===
+    # l=0: F'_ur_0 = -4/3*theta_ur + sqrt(6)*h'
+    # cf. CLASS perturbations.c:9875
+    theta_ur = F_ur[jnp.minimum(1, l_max_ur)]
+    dy = dy.at[idx['F_ur_0']].set(-4.0/3.0 * theta_ur + _SQRT6 * gw_dot)
+
+    # l=1: theta'_ur = k^2*(F_ur_0/4 - sigma_ur)
+    # cf. CLASS perturbations.c:9877
+    dy = dy.at[idx['F_ur_1']].set(k2 * (F_ur[0] / 4.0 - sigma_ur))
+
+    # l=2: sigma'_ur = 4/15*theta_ur - 3/10*k*F_ur_3
+    # cf. CLASS perturbations.c:9879-9880
+    F_ur_3 = F_ur[jnp.minimum(3, l_max_ur)]
+    sigma_ur_prime = 4.0/15.0 * theta_ur - 3.0/10.0 * k * F_ur_3
+    dy = dy.at[idx['F_ur_2']].set(2.0 * sigma_ur_prime)
+
+    # l=3
+    dy = dy.at[idx['F_ur_3']].set(
+        k/7.0 * (6.0 * sigma_ur - 4.0 * F_ur_4)
+    )
+
+    # l=4 to l_max-1
+    def ur_tensor_step(l, dy_acc):
+        Fl_prime = k/(2.0*l+1.0) * (l*F_ur[l-1] - (l+1.0)*F_ur[jnp.minimum(l+1, l_max_ur)])
+        return dy_acc.at[idx['F_ur_start'] + l].set(Fl_prime)
+    dy = jax.lax.fori_loop(4, l_max_ur, ur_tensor_step, dy)
+
+    # l=l_max truncation
+    dy = dy.at[idx['F_ur_start'] + l_max_ur].set(
+        k * F_ur[l_max_ur - 1] - (l_max_ur + 1.0) / tau0_minus_tau * F_ur[l_max_ur]
+    )
+
+    return dy
+
+
+def _extract_tensor_sources(y, k, tau, bg, th, idx, l_max_g, l_max_pol):
+    """Extract tensor CMB source functions from the tensor perturbation state.
+
+    Tensor temperature source (CLASS perturbations.c:8055-8056):
+        S_t = -h' * e^{-kappa} + g * P
+
+    Tensor polarization source (CLASS perturbations.c:8067):
+        S_p = sqrt(6) * g * P
+
+    where P = P^(2) is the tensor polarization term.
+
+    cf. CLASS perturbations.c:8036-8067
+    """
+    loga = bg.loga_of_tau.evaluate(tau)
+    exp_m_kappa = th.exp_m_kappa_of_loga.evaluate(loga)
+    g = th.g_of_loga.evaluate(loga)
+    kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
+
+    gw_dot = y[idx['gw_dot']]
+
+    F_g = y[idx['F_g_start']:idx['F_g_end']]
+    G_g = y[idx['G_g_start']:idx['G_g_end']]
+    delta_g = F_g[0]
+    sigma_g = F_g[jnp.minimum(2, l_max_g)] / 2.0
+
+    # P^(2) (CLASS perturbations.c:8036-8042)
+    F_g_4 = jnp.where(l_max_g >= 4, F_g[jnp.minimum(4, l_max_g)], 0.0)
+    G_g_2 = G_g[jnp.minimum(2, l_max_pol)]
+    G_g_4 = jnp.where(l_max_pol >= 4, G_g[jnp.minimum(4, l_max_pol)], 0.0)
+
+    P = -(1.0/10.0 * delta_g
+          + 2.0/7.0 * sigma_g
+          + 3.0/70.0 * F_g_4
+          - 3.0/5.0 * G_g[0]
+          + 6.0/7.0 * G_g_2
+          - 3.0/70.0 * G_g_4) / _SQRT6
+
+    # During tight coupling, use TCA expression:
+    # P_tca = -1/3 * h' / kappa'  (CLASS perturbations.c:8046-8047)
+    P_tca = -1.0/3.0 * gw_dot / jnp.maximum(kappa_dot, 1e-30)
+    tau_c = 1.0 / jnp.maximum(kappa_dot, 1e-30)
+    is_tca = jax.nn.sigmoid(-5.0 * (jnp.log(tau_c * k + 1e-30) - jnp.log(0.01)))
+    P = jnp.where(is_tca > 0.5, P_tca, P)
+
+    # Temperature source: -h' * e^{-kappa} + g * P
+    source_t = -gw_dot * exp_m_kappa + g * P
+
+    # Polarization source: sqrt(6) * g * P (CMBFAST/CAMB sign convention)
+    # cf. CLASS perturbations.c:8067
+    source_p = _SQRT6 * g * P
+
+    return source_t, source_p
+
+
+def tensor_perturbations_solve(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+    th: ThermoResult,
+) -> TensorPerturbationResult:
+    """Solve tensor perturbations (gravitational waves) for all k-modes.
+
+    Integrates the tensor GW equation coupled with the tensor photon
+    and neutrino Boltzmann hierarchies for each k-mode.
+
+    The tensor power spectrum uses:
+        P_T(k) = A_s * r * (k/k_pivot)^{n_t}
+    which is applied in the C_l computation (harmonic module).
+
+    Args:
+        params: cosmological parameters (r_t > 0 needed for nonzero BB)
+        prec: precision parameters
+        bg: background result
+        th: thermodynamics result
+
+    Returns:
+        TensorPerturbationResult with tensor source function tables
+    """
+    l_max_g = prec.pt_l_max_g
+    l_max_pol = prec.pt_l_max_pol_g
+    l_max_ur = prec.pt_l_max_ur
+
+    idx = _build_tensor_indices(l_max_g, l_max_pol, l_max_ur)
+    n_eq = idx['n_eq']
+
+    # k-grid for tensor modes (use same grid as scalars up to k_max_cl)
+    k_grid = _k_grid(prec)
+
+    # tau grid (same approach as scalar)
+    tau_ini = 0.1 / prec.pt_k_max_cl
+    tau_min = max(float(bg.tau_table[0]) * 1.1, tau_ini * 1.01)
+    tau_max = float(bg.conformal_age) * 0.999
+    tau_star = th.tau_star
+    tau_grid = _make_tau_grid(tau_min, tau_max, tau_star, prec.pt_tau_n_points)
+
+    def solve_single_k(k):
+        y0 = _tensor_ic(k, jnp.array(tau_ini), bg, idx, n_eq)
+        ode_args = (k, bg, th, idx, l_max_g, l_max_pol, l_max_ur)
+
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(_tensor_rhs),
+            solver=diffrax.Kvaerno5(),
+            t0=tau_ini,
+            t1=float(bg.conformal_age) * 0.999,
+            dt0=tau_ini * 0.1,
+            y0=y0,
+            saveat=diffrax.SaveAt(ts=tau_grid),
+            stepsize_controller=diffrax.PIDController(
+                rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol,
+            ),
+            adjoint=diffrax.RecursiveCheckpointAdjoint(),
+            max_steps=prec.ode_max_steps,
+            args=ode_args,
+        )
+
+        def extract_at_tau(i):
+            y_i = sol.ys[i]
+            tau_i = tau_grid[i]
+            return _extract_tensor_sources(y_i, k, tau_i, bg, th, idx, l_max_g, l_max_pol)
+
+        sources = jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
+        return sources  # tuple of 2 arrays, each shape (n_tau,)
+
+    all_sources = jax.vmap(solve_single_k)(k_grid)
+
+    return TensorPerturbationResult(
+        k_grid=k_grid,
+        tau_grid=tau_grid,
+        source_t=all_sources[0],
+        source_p=all_sources[1],
+    )
