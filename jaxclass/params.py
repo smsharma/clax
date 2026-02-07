@@ -182,3 +182,22 @@ class PrecisionParams:
             pt_ode_atol=1e-8,
             ode_max_steps=65536,
         )
+
+    @staticmethod
+    def medium_cl():
+        """Medium precision preset for C_l computation.
+
+        l_max=50 reduces hierarchy truncation artifacts at high multipoles.
+        k_max=0.3 extends to smaller scales. More expensive than fast_cl.
+        """
+        return PrecisionParams(
+            pt_k_max_cl=0.3,         # extend to smaller scales
+            pt_k_per_decade=20,
+            pt_tau_n_points=3000,
+            pt_l_max_g=50,           # reduce truncation artifacts
+            pt_l_max_pol_g=50,
+            pt_l_max_ur=50,
+            pt_ode_rtol=1e-5,
+            pt_ode_atol=1e-10,
+            ode_max_steps=65536,
+        )

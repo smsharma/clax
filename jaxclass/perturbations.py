@@ -659,7 +659,11 @@ def _extract_sources(y, k, tau, bg, th, idx):
     source_T2 = g * Pi
 
     # E-polarization source
-    source_E = g * Pi / (4.0 * k2)
+    # CLASS perturbations.c:7690: source_p = sqrt(6)*g*P where P = Pi/8
+    # CLASS transfer.c:4197: radial factor = sqrt(3/8*(l+2)(l+1)l(l-1))
+    # Combined factor: sqrt(6)*sqrt(3/8)/8 = 3/16 (no k² dependence!)
+    # Our harmonic.py has E_l = sqrt((l+2)(l+1)l(l-1)) * int source_E * j_l/(kchi)^2 dtau
+    source_E = 3.0 * g * Pi / 16.0
 
     # Lensing potential source
     source_lens = exp_m_kappa * 2.0 * phi_newt
