@@ -1,12 +1,16 @@
 # jaxCLASS Development Progress
 
-## Status: Full C_l pipeline (TT/EE/TE/BB/lensing) validated, 95 tests passing
+## Status: Differentiable Boltzmann solver — P(k) at 1-4%, C_l^TT at 4%, 95 tests
 
-**Key achievement: End-to-end differentiable pipeline from cosmological
-parameters to P(k), C_l^TT/EE/TE/BB, and lensed C_l. P(k) matches CLASS
-to 1-4% at all k. C_l^EE/TE at l=100 within 50%. Tensor BB within factor
-2.3. Lensing algorithm within 5% when given exact inputs. AD gradients
-matching finite differences to 0.03%.**
+**Key results with best settings (40 k/decade, l_max=25, GPU-verified):**
+- **P(k)**: 1-4% at all k (0.001 to 0.3 Mpc⁻¹)
+- **C_l^TT(l=100)**: **4%** | C_l^EE(l=100): **13%** | C_l^TE(l=100): **3%**
+- **AD gradients**: 0.03% agreement with finite differences through full pipeline
+- **Lensing algorithm**: <5% when given exact inputs
+- 95 tests passing, 16 source modules (~4500 lines), 12 test files (~1750 lines)
+
+k-grid resolution confirmed as the dominant factor for C_l accuracy.
+Path to <1% at l=2-2500 is clear: higher k_per_decade + l_max=50 via science_cl.
 
 ---
 
