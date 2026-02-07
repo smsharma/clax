@@ -101,17 +101,13 @@ and verified AD gradients matching finite differences to 0.03%.**
 13. a_ini=1e-7 for high-k perturbation ICs
 14. **METRIC SHEAR in l=2**: 8/15*(h'+6η')/2 source → P(k) from 60% to 4%!
 
-### Known Limitations & Path to Full Parity
-- **C_l accuracy limited by hierarchy truncation**: l_max=25 photon hierarchy limits
-  k_max to ~0.08 Mpc⁻¹ before truncation artifacts appear. For accurate C_l at all l,
-  need TCA (tight coupling approx) + RSA (radiation streaming approx) to efficiently
-  handle large effective l_max. This is the main blocker for C_l parity.
-  - IBP Doppler has 1/k² sensitivity at low k → SW plateau ~30% off
-  - Need ~100 k-modes for convergent k-integration at acoustic peaks
-- **No full ncdm perturbation hierarchy**: Massive neutrinos are approximated as massless
-  in the Einstein constraints. Adds ~270 equations to the state vector (15 q-bins × 18 multipoles).
-- **No tensor perturbations**: Needed for B-mode polarization.
-- **No full lensing**: Simple exponential damping only. Need correlation function method.
+### Remaining v1 Work
+- **C_l accuracy (MAIN BLOCKER)**: IBP source + 4π normalization is correct framework.
+  C_l(l=100) within 2% of CLASS. SW plateau ~30% off due to IBP 1/k² sensitivity.
+  High l (>200) affected by hierarchy truncation at l_max=25.
+  **Fix**: Increase l_max to 50+ (accept slower ODE) or implement proper TCA/RSA.
+- **Test new features**: C_l^EE/TE/BB, lensing, tensor modes need validation tests.
+  Code is written (harmonic.py, lensing.py, tensor in perturbations.py) but untested.
+- **Validate at other parameter points**: Test with massive_nu_015, w0wa reference data.
+- **No full ncdm perturbation hierarchy**: Approximated as massless in Einstein constraints.
 - **Float64 required**: Recombination numerics overflow in float32.
-- **C_l^EE, TE, BB**: Source functions computed but integration not yet wired up (in progress).
-- **Full lensing**: Proper C_l^φφ + lensing convolution in progress (replacing exponential damping).
