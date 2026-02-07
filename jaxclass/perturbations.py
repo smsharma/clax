@@ -250,10 +250,19 @@ def _perturbation_rhs(tau, y, args):
     00 Einstein CONSTRAINT equation. Only η is evolved as a metric variable.
     This is critical for getting the correct growth rate.
 
+    Implements Tight Coupling Approximation (TCA) for early times when
+    Thomson scattering is fast (κ' >> k). During TCA:
+    - Photon-baryon system evolves as a single fluid
+    - Photon shear σ_g = (16/45) * τ_c * (θ_g + metric_shear)
+    - Higher photon multipoles (l>=3) are damped to zero
+    - Photon-baryon slip Δ = θ_b - θ_g expanded to first order in τ_c
+    Uses jnp.where for smooth switching (JAX-traceable, no branching).
+
     State: y = [η, h'(dummy), δ_cdm, δ_b, θ_b, F_g_0..l_max, G_g_0..l_max, F_ur_0..l_max]
     (h' slot exists for compatibility but its evolution equation is not used)
 
     cf. CLASS perturbations.c: perturbations_derivs() + perturbations_einstein()
+    cf. CLASS perturbations.c:9960-10200: perturbations_tca_slip_and_shear()
     cf. Ma & Bertschinger (1995) Eqs. (25)-(56)
     """
     (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur) = args
@@ -294,6 +303,21 @@ def _perturbation_rhs(tau, y, args):
 
     Pi = F_g[2] + G_g[0] + G_g[2]
 
+    # === TCA CRITERION ===
+    # τ_c = 1/κ' is the photon mean free time.
+    # TCA is valid when τ_c * k << 1, i.e., κ'/k >> 1.
+    # CLASS uses: tca_on when τ_c/τ_h < 0.005 AND τ_c/τ_k < 0.01
+    #   where τ_h = 1/aH, τ_k = 1/k → τ_c*k < 0.01 → κ'/k > 100
+    # We use a softer threshold with smooth sigmoid for JAX compatibility.
+    # cf. CLASS perturbations.c:6178-6179
+    tau_c = 1.0 / jnp.maximum(kappa_dot, 1e-30)  # photon mean free time
+    tca_ratio = tau_c * k  # small when tightly coupled
+    # Smooth sigmoid: 1 when tca_ratio << threshold, 0 when tca_ratio >> threshold
+    # CLASS uses threshold ~0.01; we use 0.01 with transition width
+    _TCA_THRESHOLD = 0.01
+    _TCA_WIDTH = 5.0  # steepness of sigmoid transition
+    is_tca = jax.nn.sigmoid(-_TCA_WIDTH * (jnp.log(tca_ratio + 1e-30) - jnp.log(_TCA_THRESHOLD)))
+
     # === EINSTEIN EQUATIONS (constraint approach, matching CLASS) ===
     # cf. CLASS perturbations.c:6611-6644
 
@@ -322,66 +346,154 @@ def _perturbation_rhs(tau, y, args):
     # α = (h' + 6η') / (2k²) -- gauge variable
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
 
+    # metric_shear = k²α = (h' + 6η')/2, source for l=2 equations
+    # cf. CLASS perturbations.c:8984
+    metric_shear = k2 * alpha
+    # metric_continuity = h'/2 in synchronous gauge
+    metric_continuity = h_prime / 2.0
+
     # === CDM ===
     # cf. CLASS: δ'_cdm = -h'/2 (θ_cdm = 0 in synchronous gauge)
     delta_cdm_prime = -h_prime / 2.0
 
-    # === BARYONS ===
+    # === TCA PHOTON SHEAR ===
+    # cf. CLASS perturbations.c:10193
+    # shear_g = 16/45 * tau_c * (theta_g + metric_shear)
+    # In F_l notation: F_g_2 = 2*sigma_g, and CLASS sigma_g = shear_g/2
+    # so F_g_2^{tca} = 2 * (16/45) * tau_c * (theta_g + metric_shear)
+    # Note: includes contribution from G_g0 and G_g2 (cf. CLASS comment at line 10194)
+    tca_shear_g = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
+    # tca_shear_g is σ_g in CLASS convention; F_g_2 = 2*σ_g
+    tca_F_g_2 = 2.0 * tca_shear_g
+
+    # === TCA SLIP ===
+    # Photon-baryon slip: Δ = θ_b - θ_g at first order in τ_c
+    # cf. CLASS perturbations.c:10144-10176 (first_order_CLASS approximation)
+    # F = tau_c / (1+R) where R = (4/3)*rho_g/rho_b
+    R = 4.0 * rho_g / (3.0 * rho_b)  # photon-baryon momentum ratio
+    F_tca = tau_c / (1.0 + R)
+
+    # dtau_c = -κ''/κ'^2 (derivative of τ_c w.r.t. conformal time)
+    # We approximate dtau_c/tau_c ≈ -κ''/κ' which for κ'~a^{-2} gives ~2*aH
+    # For the first_order_CAMB/compromise_CLASS form:
+    # slip = (dtau_c/tau_c - 2*aH/(1+R))*(theta_b - theta_g)
+    #        + F * (-a''_prime_over_a * theta_b + k2*(...) - aH*metric_euler)
+    # In synchronous gauge metric_euler = 0.
+    # Approximate dtau_c/tau_c ≈ 2*aH (Thomson ~ a^{-2})
+    dtau_c_over_tau_c = 2.0 * a_prime_over_a
+    tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
+        + F_tca * (
+            -(a_prime_over_a**2 + a_prime_over_a**2) * theta_b  # -a''/a * theta_b (approx a''/a ≈ 2(a'/a)^2 in RD)
+            + k2 * (
+                -a_prime_over_a * delta_g / 2.0
+                + cs2 * (-theta_b - metric_continuity)
+                - (1.0/3.0) * (-theta_g - metric_continuity)
+            )
+        )
+    # Note: a''/a = H'^conformal + 2*(a'/a)^2 but approximating as 2*(a'/a)^2 in RD is sufficient
+    # for first-order TCA accuracy. Cleaner: use background spline for H'.
+    dH_dloga_rhs = bg.H_of_loga.derivative(loga)
+    a_primeprime_over_a = a_prime_over_a * (a_prime_over_a + a * dH_dloga_rhs)
+    tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
+        + F_tca * (
+            -a_primeprime_over_a * theta_b
+            + k2 * (
+                -a_prime_over_a * delta_g / 2.0
+                + cs2 * (-theta_b - metric_continuity)
+                - (1.0/3.0) * (-theta_g - metric_continuity)
+            )
+        )
+
+    # === TCA BARYON VELOCITY ===
+    # cf. CLASS perturbations.c:9100-9103
+    # theta_b' = (-aH*theta_b + k2*(cs2*delta_b + R*(delta_g/4 - s2*shear_g)) + R*slip) / (1+R)
+    # In synchronous gauge: metric_euler = 0
+    theta_b_tca = (-a_prime_over_a * theta_b
+                   + k2 * (cs2 * delta_b + R * (delta_g / 4.0 - tca_shear_g))
+                   + R * tca_slip) / (1.0 + R)
+
+    # === TCA PHOTON VELOCITY ===
+    # cf. CLASS perturbations.c:9204-9206
+    # theta_g' = -(theta_b' + aH*theta_b - k2*cs2*delta_b)/R + k2*(delta_g/4 - shear_g) + (1+R)/R*metric_euler
+    # Synchronous gauge: metric_euler = 0
+    theta_g_tca = -(theta_b_tca + a_prime_over_a * theta_b - k2 * cs2 * delta_b) / R \
+        + k2 * (0.25 * delta_g - tca_shear_g)
+    # Convert to F_1 derivative: theta_g = 3k*F_1/4 → F_1' = 4*theta_g'/(3k)
+    F1_prime_tca = 4.0 * theta_g_tca / (3.0 * k)
+
+    # === FULL (non-TCA) BARYONS ===
     # cf. Ma & Bertschinger Eqs. (30)-(31)
     delta_b_prime = -theta_b - h_prime / 2.0
-    R = 4.0 * rho_g / (3.0 * rho_b)  # photon-baryon momentum ratio
-    theta_b_prime = -a_prime_over_a * theta_b + cs2 * k2 * delta_b + R * kappa_dot * (theta_g - theta_b)
+    theta_b_full = -a_prime_over_a * theta_b + cs2 * k2 * delta_b + R * kappa_dot * (theta_g - theta_b)
+
+    # Blend TCA and full baryon velocity
+    theta_b_prime = jnp.where(is_tca > 0.5, theta_b_tca, theta_b_full)
 
     # === PHOTON HIERARCHY ===
     dy = jnp.zeros_like(y)
 
     # l=0 (monopole): δ'_γ = -4/3 θ_γ - 2/3 h'
     # In F_l convention: F'_0 = -k F_1 - 2/3 h'
+    # Same in both TCA and full (monopole equation is identical)
     dy = dy.at[idx['F_g_0']].set(-k * F_g[1] - 2.0/3.0 * h_prime)
 
-    # l=1 (dipole): F'_1 = k/3 (F_0 - 2F_2) - κ'(F_1 - 4θ_b/(3k))
+    # l=1 (dipole): different in TCA vs full
+    # Full: F'_1 = k/3 (F_0 - 2F_2) - κ'(F_1 - 4θ_b/(3k))
     # cf. CLASS perturbations.c:9127-9130
-    # The scattering term brings θ_γ toward θ_b: κ'(θ_b - θ_γ)
-    # In F notation: -κ'*(F_1 - 4θ_b/(3k)) [NOTE THE MINUS SIGN]
     F1_source = -kappa_dot * (F_g[1] - 4.0 * theta_b / (3.0 * k))
-    dy = dy.at[idx['F_g_1']].set(k/3.0 * (F_g[0] - 2.0*F_g[2]) + F1_source)
-
-    # metric_shear = k²α = (h' + 6η')/2, source for l=2 equations
-    # cf. CLASS perturbations.c:8984
-    metric_shear = k2 * alpha
+    F1_prime_full = k/3.0 * (F_g[0] - 2.0*F_g[2]) + F1_source
+    F1_prime = jnp.where(is_tca > 0.5, F1_prime_tca, F1_prime_full)
+    dy = dy.at[idx['F_g_1']].set(F1_prime)
 
     # l=2 to l_max-1
     def photon_hierarchy_step(l, dy_acc):
         Fl_prime = k/(2.0*l+1.0) * (l*F_g[l-1] - (l+1.0)*F_g[jnp.minimum(l+1, l_max_g)]) - kappa_dot*F_g[l]
         # For l=2: add metric shear source 8/15*metric_shear (divided by the F_l normalization)
         # cf. CLASS perturbations.c:9137-9140
-        # CLASS: σ'_g = 0.5*(8/15*(θ_g+metric_shear) - ...) where σ_g = F_2/2
-        # So F'_2 = 8/15*(θ_g+metric_shear) - ... = 8/15*metric_shear + standard terms
-        # The 8/15*θ_g is already in the standard recurrence as 2k/5*F_1
-        # The NEW term is 8/15*metric_shear = 8/15*(h'+6η')/2 = 4/15*(h'+6η')
         Fl_prime = Fl_prime + jnp.where(l == 2, 8.0/15.0 * metric_shear + kappa_dot * Pi / 10.0, 0.0)
+
+        # TCA for l=2: drive F_g_2 toward tca_F_g_2 = 2*sigma_g^{tca}
+        # F'_2^{tca} = (tca_F_g_2 - F_g_2) / tau_c  (relax toward TCA value)
+        # For l>=3: drive F_g_l toward zero: F'_l^{tca} = -F_g_l / tau_c
+        F2_prime_tca = (tca_F_g_2 - F_g[2]) / tau_c
+        Fl_prime_tca = jnp.where(l == 2, F2_prime_tca, -F_g[l] / tau_c)
+
+        Fl_prime = jnp.where(is_tca > 0.5, Fl_prime_tca, Fl_prime)
         return dy_acc.at[idx['F_g_start'] + l].set(Fl_prime)
     dy = jax.lax.fori_loop(2, l_max_g, photon_hierarchy_step, dy)
 
     # l=l_max (truncation)
     tau0_minus_tau = jnp.maximum(bg.conformal_age - tau, 1e-10)
-    F_lmax_prime = k*F_g[l_max_g-1] - (l_max_g+1.0)/tau0_minus_tau*F_g[l_max_g] - kappa_dot*F_g[l_max_g]
+    F_lmax_prime_full = k*F_g[l_max_g-1] - (l_max_g+1.0)/tau0_minus_tau*F_g[l_max_g] - kappa_dot*F_g[l_max_g]
+    F_lmax_prime_tca = -F_g[l_max_g] / tau_c
+    F_lmax_prime = jnp.where(is_tca > 0.5, F_lmax_prime_tca, F_lmax_prime_full)
     dy = dy.at[idx['F_g_start'] + l_max_g].set(F_lmax_prime)
 
     # === POLARIZATION HIERARCHY ===
-    dy = dy.at[idx['G_g_0']].set(-k*G_g[1] - kappa_dot*(G_g[0] - Pi/2.0))
-    dy = dy.at[idx['G_g_1']].set(k/3.0*(G_g[0] - 2.0*G_g[2]) - kappa_dot*G_g[1])
+    # During TCA, all polarization is zero (scattering damps it instantly).
+    # Drive polarization to zero: G'_l = -G_l / tau_c
+    G0_full = -k*G_g[1] - kappa_dot*(G_g[0] - Pi/2.0)
+    G0_tca = -G_g[0] / tau_c
+    dy = dy.at[idx['G_g_0']].set(jnp.where(is_tca > 0.5, G0_tca, G0_full))
+
+    G1_full = k/3.0*(G_g[0] - 2.0*G_g[2]) - kappa_dot*G_g[1]
+    G1_tca = -G_g[1] / tau_c
+    dy = dy.at[idx['G_g_1']].set(jnp.where(is_tca > 0.5, G1_tca, G1_full))
 
     def pol_hierarchy_step(l, dy_acc):
         Gl_prime = k/(2.0*l+1.0)*(l*G_g[l-1] - (l+1.0)*G_g[jnp.minimum(l+1, l_max_pol)]) - kappa_dot*G_g[l]
         Gl_prime = Gl_prime + jnp.where(l == 2, kappa_dot * Pi / 10.0, 0.0)
+        Gl_prime_tca = -G_g[l] / tau_c
+        Gl_prime = jnp.where(is_tca > 0.5, Gl_prime_tca, Gl_prime)
         return dy_acc.at[idx['G_g_start'] + l].set(Gl_prime)
     dy = jax.lax.fori_loop(2, l_max_pol, pol_hierarchy_step, dy)
 
-    G_lmax_prime = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau0_minus_tau*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
-    dy = dy.at[idx['G_g_start'] + l_max_pol].set(G_lmax_prime)
+    G_lmax_prime_full = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau0_minus_tau*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
+    G_lmax_prime_tca = -G_g[l_max_pol] / tau_c
+    dy = dy.at[idx['G_g_start'] + l_max_pol].set(jnp.where(is_tca > 0.5, G_lmax_prime_tca, G_lmax_prime_full))
 
     # === MASSLESS NEUTRINO HIERARCHY ===
+    # Neutrinos have no scattering — no TCA. Full hierarchy at all times.
     dy = dy.at[idx['F_ur_0']].set(-k*F_ur[1] - 2.0/3.0*h_prime)
     dy = dy.at[idx['F_ur_1']].set(k/3.0*(F_ur[0] - 2.0*F_ur[2]))
 
