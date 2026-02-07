@@ -23,7 +23,7 @@ from jaxclass.background import background_solve, BackgroundResult, H_of_z, angu
 from jaxclass.thermodynamics import thermodynamics_solve, ThermoResult  # noqa: F401
 from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult, tensor_perturbations_solve  # noqa: F401
 from jaxclass.primordial import primordial_scalar_pk, primordial_tensor_pk  # noqa: F401
-from jaxclass.harmonic import compute_cl_bb  # noqa: F401
+from jaxclass.harmonic import compute_cl_bb, compute_cl_tt, compute_cl_ee, compute_cl_te, compute_cls_all  # noqa: F401
 
 from dataclasses import dataclass
 import jax.numpy as jnp
