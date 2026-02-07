@@ -12,6 +12,13 @@ development instructions and conventions.
 - **Design document**: `DESIGN.md` (read this first)
 - **Progress log**: `PROGRESS.md`
 
+## Repository
+
+- **GitHub**: https://github.com/smsharma/jaxclass (private)
+- Commit at meaningful checkpoints (passing tests, bug fixes, new features)
+- Keep commits focused: one logical change per commit
+- Always run `pytest tests/ --fast -x -q` before committing
+
 ## Setup
 
 ```bash

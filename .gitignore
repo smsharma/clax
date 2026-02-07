@@ -9,3 +9,5 @@ build/
 test_logs/
 *.output
 .DS_Store
+pfarrei.f4PTRk/
+test_cl_script.py

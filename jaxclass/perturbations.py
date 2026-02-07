@@ -415,11 +415,15 @@ def _perturbation_rhs(tau, y, args):
 def _extract_sources(y, k, tau, bg, th, idx):
     """Extract CMB source functions from the perturbation state.
 
-    Uses the full CLASS synchronous gauge source function with integration-by-parts
-    form for the Doppler term. This is critical for getting acoustic peaks right.
+    Uses the non-IBP form: S_T0 × j_l + S_T1 × j_l' in the transfer integral.
+    S_T0 = SW + ISW, S_T1 = Doppler (original form, not integration-by-parts).
 
-    cf. CLASS perturbations.c:7660-7678 (synchronous gauge source assembly)
-    cf. CLASS perturbations.c:6643-6674 (alpha, alpha_prime computation)
+    The Newtonian gauge potential Φ = η - ℋα is used for the ISW free-streaming
+    term (more accurate than using η directly), while the SW uses the synchronous
+    gauge form g*(δ_g/4 + η) which is numerically stable.
+
+    cf. CLASS perturbations.c: perturbations_source_functions()
+    cf. CLASS perturbations.c:6611-6674 (Einstein constraints)
     """
     loga = bg.loga_of_tau.evaluate(tau)
     a = jnp.exp(loga)
@@ -431,7 +435,6 @@ def _extract_sources(y, k, tau, bg, th, idx):
     kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
     exp_m_kappa = th.exp_m_kappa_of_loga.evaluate(loga)
     g = th.g_of_loga.evaluate(loga)  # visibility
-    cs2 = th.cs2_of_loga.evaluate(loga)
 
     # Unpack state vector
     eta = y[idx['eta']]
@@ -457,12 +460,10 @@ def _extract_sources(y, k, tau, bg, th, idx):
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
 
-    # --- Einstein constraints (same as in RHS) ---
-    # Total density perturbation δρ
+    # --- Einstein constraints ---
     delta_rho = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * F_ur_0 + rho_ncdm * F_ur_0)
 
-    # Total (ρ+p)θ
     theta_g = 3.0 * k * F_g_1 / 4.0
     theta_ur = 3.0 * k * F_ur_1 / 4.0
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
@@ -481,71 +482,43 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # cf. CLASS perturbations.c:6644
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
 
-    # --- Total anisotropic stress Σ(ρ+p)σ ---
-    # σ_γ = F_g_2/2, σ_ur = F_ur_2/2
-    # cf. CLASS perturbations.c:6670
+    # α' from trace-free ij Einstein constraint
+    # cf. CLASS perturbations.c:6671-6674
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2
                         + 2.0/3.0 * rho_ur * F_ur_2
-                        + 2.0/3.0 * rho_ncdm * F_ur_2)  # ncdm approx as massless
-
-    # α' from Einstein constraint (trace-free ij equation)
-    # cf. CLASS perturbations.c:6671-6674
+                        + 2.0/3.0 * rho_ncdm * F_ur_2)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
 
-    # --- ℋ' = d(aH)/dτ ---
-    # ℋ' = (aH + a*dH/d(loga)) * aH
+    # Newtonian gauge potential Φ = η - ℋα
+    phi_newt = eta - a_prime_over_a * alpha
+
+    # Φ' = η' - ℋ'α - ℋα' (for ISW)
     dH_dloga = bg.H_of_loga.derivative(loga)
     H_prime_conformal = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
+    phi_prime = eta_prime - H_prime_conformal * alpha - a_prime_over_a * alpha_prime
 
-    # --- g' = dg/dτ = dg/d(loga) * aH ---
-    dg_dloga = th.g_of_loga.derivative(loga)
-    g_prime = dg_dloga * a_prime_over_a
+    # === Source functions (non-IBP form) ===
+    # S_T0: monopole source × j_l
+    # SW term: g*(δ_γ/4 + η) -- synchronous gauge form, numerically stable
+    source_SW = g * (delta_g / 4.0 + eta)
 
-    # --- θ_b' from perturbation equations ---
-    # cf. CLASS perturbations.c:5070-5075
-    R = 4.0 * rho_g / (3.0 * rho_b)
-    theta_b_prime = (-a_prime_over_a * theta_b
-                     + cs2 * k2 * delta_b
-                     + R * kappa_dot * (theta_g - theta_b))
+    # ISW free-streaming: exp(-κ)*2Φ' (uses correct Newtonian potential derivative)
+    source_ISW = exp_m_kappa * 2.0 * phi_prime
 
-    # === CLASS synchronous gauge source function ===
-    # cf. perturbations.c:7660-7678
+    source_T0 = source_SW + source_ISW
 
-    # S_T0: Temperature monopole source (multiplied by j_l in transfer integral)
-    # SW: g * (δ_g/4 + α')
-    source_SW = g * (delta_g / 4.0 + alpha_prime)
+    # S_T1: Doppler source × j_l' (non-IBP form)
+    source_T1 = g * theta_b / k
 
-    # ISW (visibility-weighted): g * (η - α' - 2ℋα) = g * (φ - ψ)
-    source_ISW_vis = g * (eta - alpha_prime - 2.0 * a_prime_over_a * alpha)
-
-    # ISW (free-streaming): exp(-κ) * 2 * (η' - ℋ'α - ℋα') = exp(-κ) * 2φ'
-    source_ISW_fs = exp_m_kappa * 2.0 * (eta_prime
-                                          - H_prime_conformal * alpha
-                                          - a_prime_over_a * alpha_prime)
-
-    # Doppler (IBP form): (1/k²) * (g*θ_b' + g'*θ_b)
-    # cf. perturbations.c:7668
-    source_Doppler = (1.0 / k2) * (g * theta_b_prime + g_prime * theta_b)
-
-    source_T0 = source_SW + source_ISW_vis + source_ISW_fs + source_Doppler
-
-    # S_T1: Temperature dipole source (multiplied by j_l' in transfer integral)
-    # ISW dipole: exp(-κ) * k * (α' + 2ℋα - η)
-    # cf. perturbations.c:7672-7674
-    # This is small at recombination (ψ ≈ φ → α'+2ℋα-η ≈ 0)
-    source_T1 = exp_m_kappa * k * (alpha_prime + 2.0 * a_prime_over_a * alpha - eta)
-
-    # S_T2: Quadrupole source (multiplied by appropriate Bessel combination)
-    # cf. perturbations.c:7678
+    # S_T2: Quadrupole source
     source_T2 = g * Pi
 
     # E-polarization source
     source_E = g * Pi / (4.0 * k2)
 
-    # Lensing potential source: φ = η - ℋα (Newtonian gauge potential)
-    phi_newt = eta - a_prime_over_a * alpha
+    # Lensing potential source
     source_lens = exp_m_kappa * 2.0 * phi_newt
 
     # Matter density contrast (for P(k))

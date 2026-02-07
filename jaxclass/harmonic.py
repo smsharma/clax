@@ -2,17 +2,16 @@
 
 Computes angular power spectra C_l^TT from source functions and primordial P(k).
 
-The temperature source function S_T0 is computed in the CLASS synchronous gauge
-IBP form (perturbations.py), which includes SW, ISW, and Doppler (after
-integration by parts). Only j_l is needed for S_T0.
+The transfer function Δ_l(k) is:
+    Δ_l(k) = ∫ dτ [S_T0(k,τ) * j_l(kχ) + S_T1(k,τ) * j_l'(kχ)]
 
-    Δ_l(k) = ∫ dτ S_T0(k,τ) * j_l(k(τ₀-τ))
+where χ = τ₀ - τ, S_T0 is the SW+ISW source, S_T1 is the Doppler source.
+
     C_l = ∫ dlnk P_R(k) |Δ_l(k)|²
 
 References:
     CLASS harmonic.c line 1073: C_l normalization
     CLASS transfer.c: line-of-sight integration
-    CLASS perturbations.c:7660-7678: source function assembly
 """
 
 from __future__ import annotations
@@ -30,6 +29,20 @@ from jaxclass.primordial import primordial_scalar_pk
 from jaxclass.perturbations import PerturbationResult
 
 
+def _spherical_jl_derivative(l: int, x: Float[Array, "..."]) -> Float[Array, "..."]:
+    """Compute j_l'(x) = dj_l/dx.
+
+    Uses the recurrence: j_l'(x) = j_{l-1}(x) - (l+1)/x * j_l(x)
+    """
+    if l == 0:
+        return -spherical_jl(1, x)
+
+    jl = spherical_jl(l, x)
+    jlm1 = spherical_jl(l - 1, x)
+    x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
+    return jlm1 - (l + 1.0) / x_safe * jl
+
+
 def compute_cl_tt(
     pt: PerturbationResult,
     params: CosmoParams,
@@ -38,8 +51,8 @@ def compute_cl_tt(
 ) -> Float[Array, "Nl"]:
     """Compute unlensed C_l^TT from perturbation source functions.
 
-    The source function S_T0 already includes SW + ISW + Doppler (IBP form),
-    so we only need to multiply by j_l(kχ) and integrate.
+    Includes both monopole (SW+ISW) and Doppler terms:
+        Δ_l(k) = ∫ dτ [S_T0 * j_l(kχ) + S_T1 * j_l'(kχ)]
 
     Args:
         pt: perturbation result with source function tables
@@ -70,15 +83,20 @@ def compute_cl_tt(
         """Compute C_l at a single multipole l."""
         l_int = int(l)
 
-        # Compute Δ_l(k) on coarse k-grid via line-of-sight integration
+        # Compute Δ_l(k) on coarse k-grid
         def transfer_single_k(ik):
             k = k_grid[ik]
             x = k * chi_grid
             jl = spherical_jl(l_int, x)
 
-            # S_T0 already contains SW + ISW + Doppler (IBP form)
+            # Monopole (SW + ISW)
             S0 = pt.source_T0[ik, :]
             delta_l = jnp.sum(S0 * jl * dtau_mid)
+
+            # Doppler (× j_l')
+            S1 = pt.source_T1[ik, :]
+            jl_prime = _spherical_jl_derivative(l_int, x)
+            delta_l = delta_l + jnp.sum(S1 * jl_prime * dtau_mid)
 
             return delta_l
 
