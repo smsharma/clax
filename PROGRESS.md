@@ -141,18 +141,21 @@ Going from 15→40 k/decade improved TT(l=100) from 24%→4%, TE from 44%→3%.
 
 **Comprehensive plan in** `~/.claude/plans/smooth-wandering-rainbow.md`
 
-**Completed (Phases 1, 5):**
+**Completed:**
 - [x] `science_cl()` preset: k_max=0.35, l_max=50, 60 k/decade (~270 k-modes)
 - [x] Hybrid Bessel backward recurrence for accurate j_l at l=30-500
 - [x] k-interpolation for C_l integration (spline T_l onto 3x finer grid)
+- [x] `compute_cls_all()`: sparse l-sampling (~100 points) + spline to all integer l
+- [x] Limber helpers for lensing C_l^pp (NOT for TT/EE/TE — see below)
 - [x] GPU access documented (Paperspace P6000)
 
-**Next (Phases 2-4):**
-- [ ] Source function spline interpolation onto finer k-grid for C_l integration
-- [ ] Limber approximation for l>500 (avoid expensive Bessel at high l)
-- [ ] Sparse l-sampling + spline to all integer l (5x speedup)
+**Key insight: Limber fails for primary CMB spectra.** The visibility function
+has sharp features that the single-point Limber evaluation misses. Limber is
+only appropriate for smooth sources (lensing potential, galaxy clustering).
+The path to high-l C_l is exact Bessel + sparse l-sampling, NOT Limber.
 
-**Later (Phases 6-8):**
+**Next steps:**
+- [ ] Run full diagnostic with `science_cl()` (l_max=50, 60 k/decade) on GPU
 - [ ] Fine-tune ODE tolerances to push from ~5% to <1%
 - [ ] Extend lensing to EE/TE/BB
 - [ ] Comprehensive validation at 5+ parameter points
