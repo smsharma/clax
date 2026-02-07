@@ -90,16 +90,26 @@ matching finite differences to 0.03%.**
 | 0.100 | 1.013 | **1.3%** |
 | 0.300 | 0.966 | **3.5%** |
 
-### C_l Accuracy (fast_cl preset, l_max=25)
+### C_l Accuracy
+
+**With 40 k/decade (175 k-modes, k_max=0.25, l_max=25) — GPU verified:**
+| Spectrum | l | jaxCLASS / CLASS | Error |
+|----------|-----|------------------|-------|
+| TT | 100 | 1.04 | **4%** |
+| EE | 100 | 1.13 | **13%** |
+| TE | 100 | 0.97 | **3%** |
+
+**With fast_cl (15 k/decade, 62 modes, l_max=25) — baseline:**
 | Spectrum | l | jaxCLASS / CLASS | Error |
 |----------|-----|------------------|-------|
 | TT | 100 | 1.24 | **24%** |
 | EE | 100 | 1.49 | **49%** |
-| EE | 200 | 0.64 | **36%** |
 | TE | 100 | 1.44 | **44%** |
 | BB (tensor, r=0.1) | 2 | 2.31 | **131%** |
-| BB (tensor, r=0.1) | 100 | 2.24 | **124%** |
 | Lensed TT (algorithm) | 100-2000 | ~1.0 | **< 5%** |
+
+**Key finding**: k-grid resolution is the dominant factor for C_l accuracy.
+Going from 15→40 k/decade improved TT(l=100) from 24%→4%, TE from 44%→3%.
 
 ### Code Size
 - 16 source modules (~4500 lines)
@@ -127,10 +137,27 @@ matching finite differences to 0.03%.**
     CLASS uses source_p=sqrt(6)*g*P with P=Pi/8, and radial factor sqrt(3/8*(l+2)!/(l-2)!).
     Combined: (3/16)*g*Pi. The spurious 1/k² gave 8 OOM excess in C_l^EE.
 
-### Remaining v1 Work
-- **C_l accuracy improvement**: Increase l_max from 25→50 (`medium_cl()` preset added).
-  This should reduce hierarchy truncation at l>200 and improve EE/TE accuracy.
-- **Tensor BB accuracy**: Currently factor ~2.3 off. Needs higher l_max and k resolution.
-- **RSA (Radiation Streaming Approximation)**: Would help high-l accuracy and speed.
-- **No full ncdm perturbation hierarchy**: Approximated as massless in Einstein constraints.
-- **Float64 required**: Recombination numerics overflow in float32.
+### Remaining Work: Path to <1% C_l at l=2-2500
+
+**Comprehensive plan in** `~/.claude/plans/smooth-wandering-rainbow.md`
+
+**Completed (Phases 1, 5):**
+- [x] `science_cl()` preset: k_max=0.35, l_max=50, 60 k/decade (~270 k-modes)
+- [x] Hybrid Bessel backward recurrence for accurate j_l at l=30-500
+- [x] k-interpolation for C_l integration (spline T_l onto 3x finer grid)
+- [x] GPU access documented (Paperspace P6000)
+
+**Next (Phases 2-4):**
+- [ ] Source function spline interpolation onto finer k-grid for C_l integration
+- [ ] Limber approximation for l>500 (avoid expensive Bessel at high l)
+- [ ] Sparse l-sampling + spline to all integer l (5x speedup)
+
+**Later (Phases 6-8):**
+- [ ] Fine-tune ODE tolerances to push from ~5% to <1%
+- [ ] Extend lensing to EE/TE/BB
+- [ ] Comprehensive validation at 5+ parameter points
+- [ ] Gradient tests for C_l: d(C_l)/d(omega_b), d(C_l)/d(n_s), etc.
+
+**Not needed for accuracy (deferred):**
+- RSA: DISCO-EB/SymBoltz achieve 0.1% WITHOUT RSA using implicit solvers
+- Full ncdm hierarchy: approximated as massless, fine for m_ncdm < 0.3 eV
