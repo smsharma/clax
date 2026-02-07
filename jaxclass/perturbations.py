@@ -499,18 +499,49 @@ def _extract_sources(y, k, tau, bg, th, idx):
     H_prime_conformal = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
     phi_prime = eta_prime - H_prime_conformal * alpha - a_prime_over_a * alpha_prime
 
-    # === Source functions (non-IBP form) ===
-    # S_T0: monopole source × j_l
-    # SW term: g*(δ_γ/4 + η) -- synchronous gauge form, numerically stable
-    source_SW = g * (delta_g / 4.0 + eta)
+    # === Source functions (CLASS synchronous gauge IBP form) ===
+    # cf. CLASS perturbations.c:7660-7678
+    # C_l = 4π ∫ dlnk P_R(k) |T_l(k)|²  (Dodelson 2003, eq. 9.35)
+    # T_l(k) = ∫ dτ S_T0(k,τ) j_l(kχ)  (IBP form: only j_l needed)
+    #
+    # The IBP form is the gauge-invariant transfer function formula.
+    # Doppler is integrated by parts: g*v_b*j_l' → (g'*v_b + g*v_b')/k² * j_l
 
-    # ISW free-streaming: exp(-κ)*2Φ' (uses correct Newtonian potential derivative)
-    source_ISW = exp_m_kappa * 2.0 * phi_prime
+    # ℋ' = d(aH)/dτ
+    dH_dloga = bg.H_of_loga.derivative(loga)
+    H_prime_conformal = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
 
-    source_T0 = source_SW + source_ISW
+    # g' = dg/dτ
+    dg_dloga = th.g_of_loga.derivative(loga)
+    g_prime = dg_dloga * a_prime_over_a
 
-    # S_T1: Doppler source × j_l' (non-IBP form)
-    source_T1 = g * theta_b / k
+    # θ_b' from perturbation equations
+    cs2 = th.cs2_of_loga.evaluate(loga)
+    R_photon_baryon = 4.0 * rho_g / (3.0 * rho_b)
+    theta_g = 3.0 * k * F_g_1 / 4.0
+    theta_b_prime = (-a_prime_over_a * theta_b
+                     + cs2 * k2 * delta_b
+                     + R_photon_baryon * kappa_dot * (theta_g - theta_b))
+
+    # SW: g*(δ_g/4 + α')  [cf. perturbations.c:7660]
+    source_SW = g * (delta_g / 4.0 + alpha_prime)
+
+    # ISW (visibility): g*(η - α' - 2ℋα)  [cf. perturbations.c:7662-7664]
+    source_ISW_vis = g * (eta - alpha_prime - 2.0 * a_prime_over_a * alpha)
+
+    # ISW (free-streaming): exp(-κ)*2Φ'  [cf. perturbations.c:7665-7667]
+    source_ISW_fs = exp_m_kappa * 2.0 * (eta_prime
+                                          - H_prime_conformal * alpha
+                                          - a_prime_over_a * alpha_prime)
+
+    # Doppler (IBP): (1/k²)*(g*θ_b' + g'*θ_b)  [cf. perturbations.c:7668]
+    source_Doppler = (1.0 / k2) * (g * theta_b_prime + g_prime * theta_b)
+
+    source_T0 = source_SW + source_ISW_vis + source_ISW_fs + source_Doppler
+
+    # S_T1: ISW dipole (small in flat space)
+    # cf. perturbations.c:7672-7674
+    source_T1 = exp_m_kappa * k * (alpha_prime + 2.0 * a_prime_over_a * alpha - eta)
 
     # S_T2: Quadrupole source
     source_T2 = g * Pi
