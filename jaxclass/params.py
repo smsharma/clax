@@ -167,17 +167,17 @@ class PrecisionParams:
 
     @staticmethod
     def fast_cl():
-        """Fast preset for C_l iteration: fewer k-modes & tau points.
+        """Fast preset for C_l iteration.
 
-        k_max=0.3 is enough for l up to ~4000. Saves ~10x vs default.
+        k_max=0.15 limits to where hierarchy (l_max=25) is well-converged.
         """
         return PrecisionParams(
-            pt_k_max_cl=0.3,         # enough for l~4000, avoids stiff high-k
-            pt_k_per_decade=10,      # ~15 k-modes vs ~170
-            pt_tau_n_points=2000,    # 2000 vs 5000
-            pt_l_max_g=12,           # shorter hierarchy
-            pt_l_max_pol_g=12,
-            pt_l_max_ur=12,
+            pt_k_max_cl=0.15,        # k*tau_visibility < l_max → hierarchy valid
+            pt_k_per_decade=15,
+            pt_tau_n_points=2000,
+            pt_l_max_g=25,           # larger hierarchy for better convergence
+            pt_l_max_pol_g=25,
+            pt_l_max_ur=25,
             pt_ode_rtol=1e-4,
             pt_ode_atol=1e-8,
             ode_max_steps=65536,
