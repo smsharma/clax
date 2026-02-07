@@ -46,10 +46,13 @@ and verified AD gradients matching finite differences to 0.03%.**
   - SW plateau ~30% off (IBP 1/k² sensitivity; needs TCA for improvement)
   - High l (>200) affected by hierarchy truncation at l_max=25
   - Key insight: sync gauge g*(δ_g/4+η) is NOT gauge-invariant; the IBP form IS
-- [x] `lensing.py` - simple exponential damping approximation
-- [x] `nonlinear.py` - placeholder
+- [x] `lensing.py` - simple exponential damping (proper lensing in progress)
+- [x] `nonlinear.py` - **HaloFit (Takahashi 2012)**: σ(R), k_sigma, n_eff, P_NL(k). 10 tests.
 - [x] `distortions.py` - placeholder
-- [x] `shooting.py` - skeleton with custom_vjp for implicit differentiation
+- [x] `shooting.py` - **Functional**: theta_s→H0 via Newton + custom_vjp. 8 tests.
+  - 100*theta_s = 100*rs_rec/ra_rec matches CLASS to < 0.01%
+  - Round-trip shooting converges to < 0.1% of target h
+- [x] `perturbations.py` - **TCA**: Tight coupling approximation with smooth sigmoid switching
 
 ### Phase 5-6: Gradients + API
 - [x] Clean API: `jaxclass.compute(params)` and `jaxclass.compute_pk(params, k)`
@@ -61,9 +64,9 @@ and verified AD gradients matching finite differences to 0.03%.**
   - d(P(k=0.01))/d(n_s): < 5%
 
 ### Test Summary
-- **49 total tests** (45 fast + 4 slow gradient tests), **ALL PASSING**
+- **67 total tests**, **ALL PASSING**
 - Test files: test_background, test_constants, test_end_to_end, test_interpolation,
-  test_perturbations, test_thermodynamics
+  test_perturbations, test_thermodynamics, test_nonlinear, test_shooting
 
 ### P(k) Accuracy (flagship result)
 | k [Mpc⁻¹] | jaxCLASS / CLASS | Error |
@@ -109,7 +112,6 @@ and verified AD gradients matching finite differences to 0.03%.**
   in the Einstein constraints. Adds ~270 equations to the state vector (15 q-bins × 18 multipoles).
 - **No tensor perturbations**: Needed for B-mode polarization.
 - **No full lensing**: Simple exponential damping only. Need correlation function method.
-- **No HaloFit/HMCode**: Linear P(k) only.
 - **Float64 required**: Recombination numerics overflow in float32.
-- **Shooting method**: Skeleton implemented but not yet functional.
-- **C_l^EE, TE, BB**: Source functions computed but integration not yet wired up.
+- **C_l^EE, TE, BB**: Source functions computed but integration not yet wired up (in progress).
+- **Full lensing**: Proper C_l^φφ + lensing convolution in progress (replacing exponential damping).
