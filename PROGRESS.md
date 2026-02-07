@@ -9,8 +9,12 @@
 - **Lensing algorithm**: <5% when given exact inputs
 - 95 tests passing, 16 source modules (~4500 lines), 12 test files (~1750 lines)
 
-k-grid resolution confirmed as the dominant factor for C_l accuracy.
-Path to <1% at l=2-2500 is clear: higher k_per_decade + l_max=50 via science_cl.
+k-grid resolution confirmed as the dominant factor for C_l accuracy (4-5x more
+important than l_max). Verified on multiple presets:
+- 40 k/decade + l_max=25 (GPU): TT 4%, EE 13%, TE 3% at l=100
+- 20 k/decade + l_max=50 (CPU): TT 17%, EE 47%, TE 34% at l=100
+Path to <1%: need 60+ k/decade combined with l_max=50 (science_cl preset).
+Bottleneck: JIT compilation of l_max=50 ODE takes ~45 min on CPU. A100 GPU needed.
 
 ---
 
