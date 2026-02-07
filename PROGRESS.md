@@ -38,11 +38,14 @@ and verified AD gradients matching finite differences to 0.03%.**
 - [x] **GRADIENT: d(P(k))/d(omega_cdm) via AD matches FD to 0.03%**
 
 ### Phase 4: Transfer + C_l -- WORKING ✓
-- [x] `bessel.py` - j_l(x) and j_l'(x), works up to l~500
-- [x] `harmonic.py` - C_l^TT with SW + ISW + Doppler source terms
-  - **D_l(l=30) within 6% of CLASS** (SW plateau, with 1500-point τ grid)
-  - D_l(l=200) within factor 11 (acoustic peaks need quadrupole source + denser k)
-  - Limber implemented but needs ~3000 k-modes for the narrow visibility peak
+- [x] `bessel.py` - j_l(x) and j_l'(x), works up to l~500 (validated vs scipy)
+- [x] `harmonic.py` - C_l^TT with CLASS IBP source + 4π normalization
+  - Uses CLASS sync gauge IBP form (perturbations.c:7660-7678)
+  - C_l = 4π ∫ dlnk P_R |T_l|² (Dodelson 2003 eq. 9.35)
+  - **C_l(l=100) within 2% of CLASS** (first acoustic peak)
+  - SW plateau ~30% off (IBP 1/k² sensitivity; needs TCA for improvement)
+  - High l (>200) affected by hierarchy truncation at l_max=25
+  - Key insight: sync gauge g*(δ_g/4+η) is NOT gauge-invariant; the IBP form IS
 - [x] `lensing.py` - simple exponential damping approximation
 - [x] `nonlinear.py` - placeholder
 - [x] `distortions.py` - placeholder
@@ -96,12 +99,12 @@ and verified AD gradients matching finite differences to 0.03%.**
 14. **METRIC SHEAR in l=2**: 8/15*(h'+6η')/2 source → P(k) from 60% to 4%!
 
 ### Known Limitations & Path to Full Parity
-- **C_l at acoustic peaks (l>50)**: Factor ~10x deficit. Root cause: the direct Bessel
-  integral underestimates the transfer function at acoustic scales because the source
-  function is very narrow in τ (~30 Mpc) and the k-integration peak is very narrow
-  in lnk (~0.002). The Limber approximation requires ~3000 k-modes to resolve this.
-  **Fix**: implement CLASS-style Hermite interpolation of source functions with adaptive
-  Bessel integration, or use a Levin collocation method for the oscillatory integral.
+- **C_l accuracy limited by hierarchy truncation**: l_max=25 photon hierarchy limits
+  k_max to ~0.08 Mpc⁻¹ before truncation artifacts appear. For accurate C_l at all l,
+  need TCA (tight coupling approx) + RSA (radiation streaming approx) to efficiently
+  handle large effective l_max. This is the main blocker for C_l parity.
+  - IBP Doppler has 1/k² sensitivity at low k → SW plateau ~30% off
+  - Need ~100 k-modes for convergent k-integration at acoustic peaks
 - **No full ncdm perturbation hierarchy**: Massive neutrinos are approximated as massless
   in the Einstein constraints. Adds ~270 equations to the state vector (15 q-bins × 18 multipoles).
 - **No tensor perturbations**: Needed for B-mode polarization.
@@ -109,4 +112,4 @@ and verified AD gradients matching finite differences to 0.03%.**
 - **No HaloFit/HMCode**: Linear P(k) only.
 - **Float64 required**: Recombination numerics overflow in float32.
 - **Shooting method**: Skeleton implemented but not yet functional.
-- **C_l^EE, TE, BB**: Source functions computed but integration not yet implemented.
+- **C_l^EE, TE, BB**: Source functions computed but integration not yet wired up.
