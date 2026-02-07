@@ -201,3 +201,23 @@ class PrecisionParams:
             pt_ode_atol=1e-10,
             ode_max_steps=65536,
         )
+
+    @staticmethod
+    def science_cl():
+        """Science-quality preset targeting <1% C_l accuracy at l=2-2500.
+
+        k_max=0.35 covers l~2500 via k*chi_star. l_max=50 for converged source
+        functions. 60 k/decade gives ~13 points per BAO oscillation at k_rec.
+        ~270 k-modes total. ~4 min per forward pass on CPU.
+        """
+        return PrecisionParams(
+            pt_k_max_cl=0.35,        # covers l~2500 via k*chi_star
+            pt_k_per_decade=60,      # ~13 points/BAO oscillation
+            pt_tau_n_points=4000,
+            pt_l_max_g=50,           # converged hierarchy
+            pt_l_max_pol_g=50,
+            pt_l_max_ur=50,
+            pt_ode_rtol=1e-6,
+            pt_ode_atol=1e-11,
+            ode_max_steps=131072,
+        )
