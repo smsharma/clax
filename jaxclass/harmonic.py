@@ -35,11 +35,79 @@ from jaxclass.primordial import primordial_scalar_pk, primordial_tensor_pk
 from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult
 
 
+def _cl_k_integral(T_l: Float[Array, "Nk"], k_grid: Float[Array, "Nk"],
+                   params: CosmoParams, k_interp_factor: int = 3) -> float:
+    """Integrate C_l = 4π ∫ dlnk P_R(k) |T_l(k)|² with optional k-refinement.
+
+    When k_interp_factor > 1, spline-interpolates T_l onto a finer k-grid
+    before integration. This improves accuracy for oscillatory transfer
+    functions without requiring more perturbation ODE solves.
+
+    cf. CLASS transfer.c interpolation before C_l integration.
+
+    Args:
+        T_l: transfer function values on coarse k-grid
+        k_grid: coarse k-grid from perturbation solve
+        params: cosmological parameters (for primordial spectrum)
+        k_interp_factor: refinement factor (1 = no refinement)
+
+    Returns:
+        C_l value (scalar)
+    """
+    log_k = jnp.log(k_grid)
+
+    if k_interp_factor <= 1:
+        # Direct integration on coarse grid
+        P_R = primordial_scalar_pk(k_grid, params)
+        integrand = P_R * T_l**2
+        dlnk = jnp.diff(log_k)
+        return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    # Spline-interpolate T_l onto finer k-grid
+    n_fine = len(k_grid) * k_interp_factor
+    log_k_fine = jnp.linspace(log_k[0], log_k[-1], n_fine)
+    k_fine = jnp.exp(log_k_fine)
+
+    T_l_spline = CubicSpline(log_k, T_l)
+    T_l_fine = T_l_spline.evaluate(log_k_fine)
+
+    P_R_fine = primordial_scalar_pk(k_fine, params)
+    integrand_fine = P_R_fine * T_l_fine**2
+    dlnk_fine = jnp.diff(log_k_fine)
+    return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_fine[:-1] + integrand_fine[1:]) * dlnk_fine)
+
+
+def _cl_k_integral_cross(T_l: Float[Array, "Nk"], E_l: Float[Array, "Nk"],
+                         k_grid: Float[Array, "Nk"], params: CosmoParams,
+                         k_interp_factor: int = 3) -> float:
+    """Like _cl_k_integral but for cross-spectrum C_l = 4π ∫ dlnk P_R T_l E_l."""
+    log_k = jnp.log(k_grid)
+
+    if k_interp_factor <= 1:
+        P_R = primordial_scalar_pk(k_grid, params)
+        integrand = P_R * T_l * E_l
+        dlnk = jnp.diff(log_k)
+        return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    n_fine = len(k_grid) * k_interp_factor
+    log_k_fine = jnp.linspace(log_k[0], log_k[-1], n_fine)
+    k_fine = jnp.exp(log_k_fine)
+
+    T_l_fine = CubicSpline(log_k, T_l).evaluate(log_k_fine)
+    E_l_fine = CubicSpline(log_k, E_l).evaluate(log_k_fine)
+
+    P_R_fine = primordial_scalar_pk(k_fine, params)
+    integrand_fine = P_R_fine * T_l_fine * E_l_fine
+    dlnk_fine = jnp.diff(log_k_fine)
+    return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_fine[:-1] + integrand_fine[1:]) * dlnk_fine)
+
+
 def compute_cl_tt(
     pt: PerturbationResult,
     params: CosmoParams,
     bg: BackgroundResult,
     l_values: Float[Array, "Nl"],
+    k_interp_factor: int = 3,
 ) -> Float[Array, "Nl"]:
     """Compute unlensed C_l^TT from perturbation source functions.
 
@@ -53,6 +121,7 @@ def compute_cl_tt(
         params: cosmological parameters
         bg: background result
         l_values: multipole values (as numpy array of ints)
+        k_interp_factor: k-grid refinement for C_l integration (default 3)
 
     Returns:
         C_l values (dimensionless raw C_l)
@@ -66,8 +135,6 @@ def compute_cl_tt(
     # Weights for trapezoidal integration over τ
     dtau = jnp.diff(tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
-
-    log_k = jnp.log(k_grid)
 
     def compute_cl_single_l(l):
         """Compute C_l at a single multipole l."""
@@ -85,14 +152,7 @@ def compute_cl_tt(
 
         T_l_coarse = jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
 
-        # C_l = 4π ∫ dlnk P_R(k) |T_l(k)|²
-        # cf. Dodelson (2003) eq. 9.35: C_l = (2/π) ∫ k² P(k) |T_l|² dk
-        # where P(k) = (2π²/k³) P_R → C_l = 4π ∫ P_R |T_l|² dlnk
-        P_R_coarse = primordial_scalar_pk(k_grid, params)
-        integrand_k = P_R_coarse * T_l_coarse**2
-        dlnk = jnp.diff(log_k)
-        cl = 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_k[:-1] + integrand_k[1:]) * dlnk)
-        return cl
+        return _cl_k_integral(T_l_coarse, k_grid, params, k_interp_factor)
 
     cls = []
     for l in l_values:
@@ -107,6 +167,7 @@ def compute_cl_ee(
     params: CosmoParams,
     bg: BackgroundResult,
     l_values: Float[Array, "Nl"],
+    k_interp_factor: int = 3,
 ) -> Float[Array, "Nl"]:
     """Compute unlensed C_l^EE from E-polarization source functions.
 
@@ -124,6 +185,7 @@ def compute_cl_ee(
         params: cosmological parameters
         bg: background result
         l_values: multipole values (as numpy array of ints, must be >= 2)
+        k_interp_factor: k-grid refinement for C_l integration (default 3)
 
     Returns:
         C_l^EE values (dimensionless raw C_l)
@@ -138,8 +200,6 @@ def compute_cl_ee(
     dtau = jnp.diff(tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
 
-    log_k = jnp.log(k_grid)
-
     def compute_cl_single_l(l):
         """Compute C_l^EE at a single multipole l."""
         l_int = int(l)
@@ -153,7 +213,6 @@ def compute_cl_ee(
             jl = spherical_jl(l_int, x)
 
             # Radial function for E-mode: j_l(x) / x²
-            # Avoid division by zero for small x (chi → 0 at τ → τ_0)
             x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
             radial_E = jl / (x_safe * x_safe)
 
@@ -161,12 +220,7 @@ def compute_cl_ee(
             return prefactor * jnp.sum(S_E * radial_E * dtau_mid)
 
         E_l_coarse = jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
-
-        P_R_coarse = primordial_scalar_pk(k_grid, params)
-        integrand_k = P_R_coarse * E_l_coarse**2
-        dlnk = jnp.diff(log_k)
-        cl = 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_k[:-1] + integrand_k[1:]) * dlnk)
-        return cl
+        return _cl_k_integral(E_l_coarse, k_grid, params, k_interp_factor)
 
     cls = []
     for l in l_values:
@@ -181,6 +235,7 @@ def compute_cl_te(
     params: CosmoParams,
     bg: BackgroundResult,
     l_values: Float[Array, "Nl"],
+    k_interp_factor: int = 3,
 ) -> Float[Array, "Nl"]:
     """Compute unlensed C_l^TE (temperature-polarization cross-correlation).
 
@@ -196,6 +251,7 @@ def compute_cl_te(
         params: cosmological parameters
         bg: background result
         l_values: multipole values (as numpy array of ints, must be >= 2)
+        k_interp_factor: k-grid refinement for C_l integration (default 3)
 
     Returns:
         C_l^TE values (dimensionless raw C_l, can be negative)
@@ -209,8 +265,6 @@ def compute_cl_te(
     # Weights for trapezoidal integration over τ
     dtau = jnp.diff(tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
-
-    log_k = jnp.log(k_grid)
 
     def compute_cl_single_l(l):
         """Compute C_l^TE at a single multipole l."""
@@ -237,12 +291,7 @@ def compute_cl_te(
             return T_l, E_l
 
         T_l_coarse, E_l_coarse = jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
-
-        P_R_coarse = primordial_scalar_pk(k_grid, params)
-        integrand_k = P_R_coarse * T_l_coarse * E_l_coarse
-        dlnk = jnp.diff(log_k)
-        cl = 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_k[:-1] + integrand_k[1:]) * dlnk)
-        return cl
+        return _cl_k_integral_cross(T_l_coarse, E_l_coarse, k_grid, params, k_interp_factor)
 
     cls = []
     for l in l_values:
