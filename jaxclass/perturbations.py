@@ -103,20 +103,25 @@ class PerturbationResult:
     tau_grid: Float[Array, "Ntau"]
 
     # Source functions: shape (Nk, Ntau)
-    source_T0: Float[Array, "Nk Ntau"]   # Temperature monopole source (SW + intrinsic)
-    source_T1: Float[Array, "Nk Ntau"]   # Temperature dipole source (Doppler)
-    source_T2: Float[Array, "Nk Ntau"]   # Temperature quadrupole source (ISW + pol)
+    source_T0: Float[Array, "Nk Ntau"]   # Temperature monopole source (SW + ISW + Doppler)
+    source_T1: Float[Array, "Nk Ntau"]   # Temperature dipole source (ISW dipole)
+    source_T2: Float[Array, "Nk Ntau"]   # Temperature quadrupole source (g*Pi)
     source_E: Float[Array, "Nk Ntau"]    # E-polarization source
     source_lens: Float[Array, "Nk Ntau"]  # Lensing potential source
-
-    # Also store matter transfer function
     delta_m: Float[Array, "Nk Ntau"]     # Total matter density contrast
+
+    # Decomposed T0 subterms for diagnostics (optional, always stored)
+    source_SW: Float[Array, "Nk Ntau"]       # Sachs-Wolfe: g*(delta_g/4 + alpha')
+    source_ISW_vis: Float[Array, "Nk Ntau"]  # ISW visibility: g*(eta - alpha' - 2*H*alpha)
+    source_ISW_fs: Float[Array, "Nk Ntau"]   # ISW free-streaming: exp(-kappa)*2*Phi'
+    source_Doppler: Float[Array, "Nk Ntau"]  # Doppler IBP: (g*theta_b' + g'*theta_b)/k^2
 
     def tree_flatten(self):
         return [
             self.k_grid, self.tau_grid,
             self.source_T0, self.source_T1, self.source_T2,
             self.source_E, self.source_lens, self.delta_m,
+            self.source_SW, self.source_ISW_vis, self.source_ISW_fs, self.source_Doppler,
         ], None
 
     @classmethod
@@ -635,6 +640,13 @@ def _extract_sources(y, k, tau, bg, th, idx):
                      + cs2 * k2 * delta_b
                      + R_photon_baryon * kappa_dot * (theta_g - theta_b))
 
+    # === GAUGE SHIFT for Doppler source (CLASS perturbations.c:7632-7633) ===
+    # In sync gauge, the gauge-invariant baryon velocity is θ_b + k²α.
+    # CLASS absorbs this shift into θ_b before computing the IBP Doppler source,
+    # making the total source function gauge-invariant.
+    theta_b_shifted = theta_b + k2 * alpha
+    theta_b_prime_shifted = theta_b_prime + k2 * alpha_prime
+
     # SW: g*(δ_g/4 + α')  [cf. perturbations.c:7660]
     source_SW = g * (delta_g / 4.0 + alpha_prime)
 
@@ -647,7 +659,8 @@ def _extract_sources(y, k, tau, bg, th, idx):
                                           - a_prime_over_a * alpha_prime)
 
     # Doppler (IBP): (1/k²)*(g*θ_b' + g'*θ_b)  [cf. perturbations.c:7668]
-    source_Doppler = (1.0 / k2) * (g * theta_b_prime + g_prime * theta_b)
+    # Uses SHIFTED velocities (gauge-invariant): θ_b + k²α, θ_b' + k²α'
+    source_Doppler = (1.0 / k2) * (g * theta_b_prime_shifted + g_prime * theta_b_shifted)
 
     source_T0 = source_SW + source_ISW_vis + source_ISW_fs + source_Doppler
 
@@ -671,7 +684,8 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # Matter density contrast (for P(k))
     delta_m = (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
 
-    return source_T0, source_T1, source_T2, source_E, source_lens, delta_m
+    return (source_T0, source_T1, source_T2, source_E, source_lens, delta_m,
+            source_SW, source_ISW_vis, source_ISW_fs, source_Doppler)
 
 
 # ---------------------------------------------------------------------------
@@ -794,11 +808,11 @@ def perturbations_solve(
             return _extract_sources(y_i, k, tau_i, bg, th, idx)
 
         sources = jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
-        return sources  # tuple of 6 arrays, each shape (n_tau,)
+        return sources  # tuple of 10 arrays, each shape (n_tau,)
 
     # Vectorize over k-modes
     all_sources = jax.vmap(solve_single_k)(k_grid)
-    # all_sources is a tuple of 6 arrays, each shape (n_k, n_tau)
+    # all_sources is a tuple of 10 arrays, each shape (n_k, n_tau)
 
     return PerturbationResult(
         k_grid=k_grid,
@@ -809,6 +823,10 @@ def perturbations_solve(
         source_E=all_sources[3],
         source_lens=all_sources[4],
         delta_m=all_sources[5],
+        source_SW=all_sources[6],
+        source_ISW_vis=all_sources[7],
+        source_ISW_fs=all_sources[8],
+        source_Doppler=all_sources[9],
     )
 
 
