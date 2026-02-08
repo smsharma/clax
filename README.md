@@ -8,7 +8,7 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 
 ## Status
 
-**v0.1** -- P(k) at science quality (1-4% vs CLASS at all k). C_l^TT within 4% at l=100 with sufficient k-resolution. 95 tests passing across 12 test files. See [PROGRESS.md](PROGRESS.md) for full details and roadmap to sub-percent accuracy.
+**v0.2** -- P(k) at 1-4%, C_l^EE approaching science quality (3-7%). C_l^TT has a ~15% systematic under active investigation. 95+ tests passing across 12 test files. See [PROGRESS.md](PROGRESS.md) for full accuracy tables and debugging details.
 
 ## Key results
 
@@ -22,15 +22,16 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 | 0.100       | 1.013            | 1.3%  |
 | 0.300       | 0.966            | 3.5%  |
 
-**Angular power spectra** (40 k/decade, 175 k-modes, l_max=25):
+**Angular power spectra** (V100, 100 k/decade, 439 modes, l_max=25, rtol=1e-6):
 
-| Spectrum | l=100 error |
-|----------|-------------|
-| TT       | 4%          |
-| EE       | 13%         |
-| TE       | 3%          |
+| Spectrum | l=50 | l=100 | l=200 |
+|----------|------|-------|-------|
+| EE       | 5.9% | 6.9%  | **2.9%** |
+| TT       | 3.3% | 17.5% | 7.1%  |
 
 **Gradients**: AD derivatives match finite differences to 0.03% for d(P(k))/d(omega_cdm).
+
+**Verified against CLASS**: Newtonian potential Phi matches to 0.5% at all times. Background quantities match to 6 significant digits.
 
 ## Quick start
 
