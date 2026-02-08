@@ -138,7 +138,7 @@ def _limber_transfer_ee(source_E, tau_grid, k_grid, tau_0, l):
 # ---------------------------------------------------------------------------
 
 def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
-                       source_T1=None, source_T2=None, mode=None):
+                       source_T1=None, source_T2=None, mode=None, **kwargs):
     """Exact Bessel transfer function T_l(k) for temperature.
 
     CLASS sums three transfer types for scalar TT (harmonic.c:962):
@@ -162,6 +162,32 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
     if mode is None:
         mode = _TT_TRANSFER_MODE
     l_int = int(l)
+
+    # Non-IBP mode: source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l'
+    if mode == "nonIBP":
+        source_noDopp = kwargs.get('source_T0_noDopp', source_T0)  # fallback to IBP
+        source_dop_nonIBP = kwargs.get('source_Doppler_nonIBP', None)
+
+        def transfer_single_k_nonibp(ik):
+            k = k_grid[ik]
+            x = k * chi_grid
+            x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
+            jl = spherical_jl_backward(l_int, x)
+
+            # Non-Doppler sources use j_l
+            integrand = source_noDopp[ik, :] * jl
+
+            # Doppler uses j_l'(x) = l/x*j_l - j_{l+1}
+            if source_dop_nonIBP is not None:
+                jl_p1 = spherical_jl_backward(l_int + 1, x)
+                jl_prime = (l_int / x_safe) * jl - jl_p1
+                integrand = integrand + source_dop_nonIBP[ik, :] * jl_prime
+
+            return jnp.sum(integrand * dtau_mid)
+
+        return jax.vmap(transfer_single_k_nonibp)(jnp.arange(len(k_grid)))
+
+    # Standard IBP modes
     include_T1 = "T1" in mode and source_T1 is not None
     include_T2 = "T2" in mode and source_T2 is not None
     T1_sign = -1.0 if mode == "T0-T1+T2" else 1.0
@@ -222,7 +248,14 @@ _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max
 # Transfer decomposition mode: controls which transfer types are included in C_l^TT.
 # CLASS uses T0+T1+T2 (harmonic.c:962), but T1/T2 need careful validation.
 # Options: "T0" (IBP only), "T0+T1", "T0+T1+T2", "T0-T1+T2" (sign test)
-_TT_TRANSFER_MODE = "T0"  # Safe default; T1/T2 under investigation (sign unclear)
+# Transfer decomposition mode for TT.
+# "T0": IBP form (source_T0 * j_l) — has ~17% floor at l=100
+# "T0+T1": adds ISW dipole (j_l' radial)
+# "T0+T1+T2": adds polarization quadrupole
+# "T0-T1+T2": T1 sign flipped (debugging)
+# "nonIBP": Non-IBP Doppler (source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l')
+#   This bypasses the IBP transformation that causes the TT accuracy floor.
+_TT_TRANSFER_MODE = "nonIBP"  # Non-IBP form bypasses the 17.5% IBP error
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
@@ -236,16 +269,23 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
 
     l_fl = float(l)
+    # Extra kwargs for non-IBP mode
+    extra = {}
+    if hasattr(pt, 'source_T0_noDopp'):
+        extra['source_T0_noDopp'] = pt.source_T0_noDopp
+    if hasattr(pt, 'source_Doppler_nonIBP'):
+        extra['source_Doppler_nonIBP'] = pt.source_Doppler_nonIBP
+
     if l_fl > l_switch + 2 * delta_l:
         return _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
     elif l_fl < l_switch - 2 * delta_l:
         return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                                   source_T1=pt.source_T1, source_T2=pt.source_T2,
-                                  mode=tt_mode)
+                                  mode=tt_mode, **extra)
     else:
         T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                                      source_T1=pt.source_T1, source_T2=pt.source_T2,
-                                     mode=tt_mode)
+                                     mode=tt_mode, **extra)
         T_limber = _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
         w = 1.0 / (1.0 + jnp.exp(-(l_fl - l_switch) / delta_l))
         return (1.0 - w) * T_exact + w * T_limber
