@@ -171,8 +171,8 @@ def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
 # Blended transfer (exact + Limber)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_L_SWITCH = 400  # Limber transition center
-_DEFAULT_DELTA_L = 50    # Blending half-width
+_DEFAULT_L_SWITCH = 100000  # Effectively disabled — Limber fails for CMB primaries
+_DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max)
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L):

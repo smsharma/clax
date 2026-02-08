@@ -119,6 +119,17 @@ Bottleneck: JIT compilation of l_max=50 ODE takes ~45 min on CPU. A100 GPU neede
 **Key finding**: k-grid resolution is the dominant factor for C_l accuracy.
 Going from 15→40 k/decade improved TT(l=100) from 24%→4%, TE from 44%→3%.
 
+**With 40 k/decade (179 modes, k_max=0.3, l_max=25) — CPU verified:**
+| Spectrum | l | jaxCLASS / CLASS | Error |
+|----------|-----|------------------|-------|
+| TT | 100 | 0.95 | **5.1%** |
+| EE | 200 | 0.89 | **10.8%** |
+| EE | 30 | 0.86 | **13.8%** |
+| TE | 30 | 0.94 | **5.6%** |
+
+Remaining errors: TT at l=200 (88%) from hierarchy truncation at l_max=25;
+SW plateau (l<50, ~50%) from IBP 1/k² sensitivity. Need l_max > 30 for l=200.
+
 ### Code Size
 - 16 source modules (~4500 lines)
 - 12 test files (~1750 lines)
