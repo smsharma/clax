@@ -173,6 +173,17 @@ has sharp features that the single-point Limber evaluation misses. Limber is
 only appropriate for smooth sources (lensing potential, galaxy clustering).
 The path to high-l C_l is exact Bessel + sparse l-sampling, NOT Limber.
 
+**Best C_l accuracy achieved (V100, 100 k/decade, 439 modes, l_max=25, rtol=1e-6):**
+| Spectrum | l=30 | l=50 | l=100 | l=200 |
+|----------|------|------|-------|-------|
+| EE | 7.8% | **5.9%** | **6.9%** | **3.6%** |
+| TT | 10.5% | **3.3%** | 17.5% | **7.1%** |
+| TE | 3.1% | 65.5% | 12.8% | 29.2% |
+
+EE is approaching science quality (3-8%). TT has a persistent ~17% floor at
+l=100 that does NOT improve with more k-modes — this is a source function issue,
+likely in the Doppler IBP term or its cross-correlation with SW.
+
 **Source decomposition diagnostic (V100, 40k/l25, T0 only):**
 At l=50-100, Doppler is the LARGEST auto-spectrum subterm. The total C_l is
 ~15% low, suggesting excessive SW-Doppler cancellation. The Doppler IBP term
