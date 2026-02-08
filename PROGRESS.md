@@ -173,6 +173,14 @@ has sharp features that the single-point Limber evaluation misses. Limber is
 only appropriate for smooth sources (lensing potential, galaxy clustering).
 The path to high-l C_l is exact Bessel + sparse l-sampling, NOT Limber.
 
+**Source decomposition diagnostic (V100, 40k/l25, T0 only):**
+At l=50-100, Doppler is the LARGEST auto-spectrum subterm. The total C_l is
+~15% low, suggesting excessive SW-Doppler cancellation. The Doppler IBP term
+`(g*theta_b' + g'*theta_b)/k^2` is the #1 suspect — its theta_b_prime
+reconstruction may be inconsistent with the TCA/full switching in the ODE.
+
+Next: extract CLASS source functions at specific (k,tau) to compare directly.
+
 **Latest diagnostic (V100, 40 k/decade, l_max=25, with T1/T2):**
 | l | T0 only | T0+T1 | T0+T1+T2 |
 |---|---------|-------|----------|
