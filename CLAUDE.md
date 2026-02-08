@@ -73,6 +73,38 @@ on GPU (including first JIT compilation). Subsequent runs are faster.
 
 ---
 
+## Agent teams (use liberally)
+
+Agent teams are enabled. Use them aggressively to parallelize independent work:
+
+- **Debugging**: spawn teammates to investigate competing hypotheses in parallel
+  (e.g., one checks source normalization, another checks Bessel accuracy,
+  a third compares against CLASS at specific (k,tau) points)
+- **Testing**: one teammate writes tests while another runs diagnostics on GPU
+- **Code review**: spawn a reviewer teammate to check physics equations against
+  CLASS while the main agent implements
+- **Research**: multiple teammates searching CLASS source code for different
+  conventions simultaneously
+
+Each teammate gets its own context window and can read/write files independently.
+Assign different files to different teammates to avoid conflicts.
+
+Example:
+```
+Create an agent team with 3 teammates:
+- "source-check": compare source_T0 subterms against CLASS at matched (k,tau)
+- "transfer-check": verify T1/T2 radial functions against CLASS transfer.c
+- "integration-check": test k-integration accuracy with different quadrature methods
+```
+
+Teams are especially valuable for this project because:
+1. CLASS source code exploration (reading perturbations.c, transfer.c, harmonic.c)
+   can be split across agents
+2. GPU diagnostic runs take 5-20 min — use that time for parallel investigation
+3. The Boltzmann equations have many independent components to verify
+
+---
+
 ## Orientation (read this first when starting a session)
 
 When you start a new session, orient yourself:
