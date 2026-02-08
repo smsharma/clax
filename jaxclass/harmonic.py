@@ -222,7 +222,7 @@ _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max
 # Transfer decomposition mode: controls which transfer types are included in C_l^TT.
 # CLASS uses T0+T1+T2 (harmonic.c:962), but T1/T2 need careful validation.
 # Options: "T0" (IBP only), "T0+T1", "T0+T1+T2", "T0-T1+T2" (sign test)
-_TT_TRANSFER_MODE = "T0-T1+T2"  # T1 sign flipped: A/B test shows this is closer to CLASS
+_TT_TRANSFER_MODE = "T0"  # Safe default; T1/T2 under investigation (sign unclear)
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
@@ -279,11 +279,15 @@ def _get_transfer_ee(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
 def compute_cl_tt(
     pt, params, bg, l_values,
     k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    tt_mode=None,
 ):
-    """Compute unlensed C_l^TT. Uses Limber for l > l_switch."""
+    """Compute unlensed C_l^TT. Uses Limber for l > l_switch.
+
+    tt_mode: "T0", "T0+T1", "T0+T1+T2", "T0-T1+T2", or None (uses global default).
+    """
     cls = []
     for l in l_values:
-        T_l = _get_transfer_tt(pt, bg, l, l_switch, delta_l)
+        T_l = _get_transfer_tt(pt, bg, l, l_switch, delta_l, tt_mode=tt_mode)
         cl = _cl_k_integral(T_l, pt.k_grid, params, k_interp_factor)
         cls.append(cl)
     return jnp.array(cls)
