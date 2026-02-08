@@ -33,7 +33,7 @@ import numpy as np
 from jaxtyping import Array, Float
 
 from jaxclass.background import BackgroundResult
-from jaxclass.bessel import spherical_jl
+from jaxclass.bessel import spherical_jl, spherical_jl_backward
 from jaxclass.interpolation import CubicSpline
 from jaxclass.params import CosmoParams, PrecisionParams
 from jaxclass.primordial import primordial_scalar_pk, primordial_tensor_pk
@@ -137,15 +137,61 @@ def _limber_transfer_ee(source_E, tau_grid, k_grid, tau_0, l):
 # Exact Bessel transfer functions
 # ---------------------------------------------------------------------------
 
-def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l):
-    """Exact Bessel transfer function T_l(k) for temperature."""
+def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
+                       source_T1=None, source_T2=None):
+    """Exact Bessel transfer function T_l(k) for temperature.
+
+    CLASS sums three transfer types for scalar TT (harmonic.c:962):
+        T_total = T0 + T1 + T2
+    with different radial functions (transfer.c:4168-4190):
+        T0: j_l(x)                                    [x = k*chi]
+        T1: j_l'(x)                                   [derivative of spherical Bessel]
+        T2: (1/2)(3*j_l''(x) + j_l(x))               [second derivative combination]
+
+    For flat space (K=0), sqrt_absK_over_k = 1.0 (transfer.c:4056-4058).
+
+    IMPORTANT: source_T2 in our code is g*Pi (perturbations.py:667), but CLASS
+    uses g*P where P = Pi/8 (perturbations.c:7565,7676). So the T2 source fed
+    here should already be the CLASS-convention source_t2 = g*Pi/8 * appropriate
+    factor. Currently we pass source_T2 = g*Pi, so we apply 1/8 here.
+
+    cf. CLASS harmonic.c:962, transfer.c:4168-4190
+    """
     l_int = int(l)
 
     def transfer_single_k(ik):
         k = k_grid[ik]
         x = k * chi_grid
-        jl = spherical_jl(l_int, x)
-        return jnp.sum(source_T0[ik, :] * jl * dtau_mid)
+
+        jl = spherical_jl_backward(l_int, x)
+
+        # T0 contribution: source_T0 * j_l
+        integrand = source_T0[ik, :] * jl
+
+        # T1 contribution: source_T1 * j_l'(x)
+        # j_l'(x) = (l/x)*j_l(x) - j_{l+1}(x)
+        if source_T1 is not None:
+            x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
+            jl_p1 = spherical_jl_backward(l_int + 1, x)
+            jl_prime = (l_int / x_safe) * jl - jl_p1
+            integrand = integrand + source_T1[ik, :] * jl_prime
+
+        # T2 contribution: source_T2 * (1/2)(3*j_l''(x) + j_l(x))
+        # Our source_T2 = g*Pi, CLASS source_t2 = g*P = g*Pi/8
+        # So we need source_T2/8 as the source weight.
+        # j_l''(x) = (l(l-1)/x^2 - 1)*j_l + (2/x)*j_{l+1}
+        # => (1/2)(3*j_l'' + j_l) = (1/2)(3*[(l(l-1)/x^2 - 1)*j_l + (2/x)*j_{l+1}] + j_l)
+        #                          = (1/2)((3*l(l-1)/x^2 - 2)*j_l + (6/x)*j_{l+1})
+        if source_T2 is not None:
+            x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
+            jl_p1 = spherical_jl_backward(l_int + 1, x)
+            # j_l'' from recurrence: j_l''(x) = (l(l-1)/x^2 - 1)j_l + (2/x)j_{l+1}
+            jl_pp = (l_int * (l_int - 1) / (x_safe * x_safe) - 1.0) * jl + (2.0 / x_safe) * jl_p1
+            radial_T2 = 0.5 * (3.0 * jl_pp + jl)
+            # Apply 1/8 factor: our source_T2 = g*Pi, CLASS wants g*P = g*Pi/8
+            integrand = integrand + (source_T2[ik, :] / 8.0) * radial_T2
+
+        return jnp.sum(integrand * dtau_mid)
 
     return jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
 
@@ -159,7 +205,7 @@ def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
     def transfer_single_k(ik):
         k = k_grid[ik]
         x = k * chi_grid
-        jl = spherical_jl(l_int, x)
+        jl = spherical_jl_backward(l_int, x)
         x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
         radial_E = jl / (x_safe * x_safe)
         return prefactor * jnp.sum(source_E[ik, :] * radial_E * dtau_mid)
@@ -188,9 +234,11 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     if l_fl > l_switch + 2 * delta_l:
         return _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
     elif l_fl < l_switch - 2 * delta_l:
-        return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l)
+        return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
+                                  source_T1=pt.source_T1, source_T2=pt.source_T2)
     else:
-        T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l)
+        T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
+                                     source_T1=pt.source_T1, source_T2=pt.source_T2)
         T_limber = _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
         w = 1.0 / (1.0 + jnp.exp(-(l_fl - l_switch) / delta_l))
         return (1.0 - w) * T_exact + w * T_limber
@@ -336,7 +384,7 @@ def compute_cl_bb(tpt, params, bg, l_values):
         def transfer_single_k(ik):
             k = k_grid[ik]
             x = k * chi_grid
-            jl = spherical_jl(l_int, x)
+            jl = spherical_jl_backward(l_int, x)
             x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
             radial_B = jl / (x_safe * x_safe)
             return prefactor * jnp.sum(tpt.source_p[ik, :] * radial_B * dtau_mid)
