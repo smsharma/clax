@@ -31,7 +31,7 @@ with open(harm_path, "rb") as f:
     sha = hashlib.sha256(f.read()).hexdigest()[:16]
 print(f"harmonic.py: {harm_path}")
 print(f"sha256[:16]: {sha}")
-print(f"_TT_TRANSFER_MODE default: {getattr(hm, '_TT_TRANSFER_MODE', 'MISSING')}")
+print(f"_DEFAULT_TT_MODE: {getattr(hm, '_DEFAULT_TT_MODE', 'MISSING')}")
 
 # 2) Config
 params = CosmoParams()

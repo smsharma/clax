@@ -99,6 +99,64 @@ class ThermoResult:
 
 
 # ---------------------------------------------------------------------------
+# RECFAST Peebles 3-level atom RHS (CLASS/HyRec conventions)
+# ---------------------------------------------------------------------------
+
+def _recfast_dxHII_dlna(xe, xHII, nH, H, TM, TR):
+    """Peebles 3-level atom: dxHII/d(lna).
+
+    All inputs in CGS: nH [cm^-3], H [s^-1], TM/TR [K].
+    Returns dxHII/dlna (dimensionless per e-fold).
+
+    Matches CLASS external/HyRec2020/hydrogen.c:88-109 (rec_TLA_dxHIIdlna)
+    with Fudge=1.14 (RECFAST mode).
+    """
+    # Case-B recombination coefficient: Pequignot et al. (1991) [cm^3/s]
+    t4_M = TM / 1e4
+    t4_R = TR / 1e4
+    t4_M_safe = jnp.maximum(t4_M, 1e-30)
+    t4_R_safe = jnp.maximum(t4_R, 1e-30)
+    alphaB_TM = _RECFAST_FUDGE * _ALPHA_B_PREFACTOR * t4_M_safe**_ALPHA_B_POWER / (
+        1.0 + _ALPHA_B_DENOM_COEFF * t4_M_safe**_ALPHA_B_DENOM_POWER)
+    alphaB_TR = _RECFAST_FUDGE * _ALPHA_B_PREFACTOR * t4_R_safe**_ALPHA_B_POWER / (
+        1.0 + _ALPHA_B_DENOM_COEFF * t4_R_safe**_ALPHA_B_DENOM_POWER)
+
+    # Temperatures in eV
+    TM_eV = _kBoltz_eV * TM
+    TR_eV = _kBoltz_eV * TR
+    TR_eV_safe = jnp.maximum(TR_eV, 1e-30)
+
+    # Saha factor: s = SAHA_FACT * TR^{3/2} * exp(-EI/TR) / nH
+    s = _SAHA_FACT * TR_eV_safe * jnp.sqrt(TR_eV_safe) * jnp.exp(
+        -_EI_eV / TR_eV_safe) / jnp.maximum(nH, 1e-30)
+
+    # Photoionization rate: 4*beta_B [s^-1]
+    four_betaB = _SAHA_FACT * TR_eV_safe * jnp.sqrt(TR_eV_safe) * jnp.exp(
+        -0.25 * _EI_eV / TR_eV_safe) * alphaB_TR
+
+    # Lyman-alpha escape: RLya = LYA_FACT * H / (nH * (1-xHII)) [s^-1]
+    x1s = jnp.maximum(1.0 - xHII, 1e-30)
+    RLya = _LYA_FACT * H / (jnp.maximum(nH, 1e-30) * x1s)
+
+    # Peebles C factor
+    C = (3.0 * RLya + _L2s1s) / (3.0 * RLya + _L2s1s + four_betaB)
+
+    # Saha-departure form (CLASS hydrogen.c:105-107):
+    # dxHII/dlna = -(C*nH/H) * [s*(1-x)*(αB_TM - αB_TR) + Δ*αB_TM]
+    # where Δ = xe*xHII - s*(1-xHII) is the departure from Saha equilibrium.
+    # This form is numerically stable because Δ is O(1) even when the bare
+    # rates (alpha*nH, four_betaB) are O(10^5) and would cause stiffness.
+    Delta = xe * xHII - s * (1.0 - xHII)
+    x1s_safe = jnp.maximum(1.0 - xHII, 1e-30)
+
+    dxHII_dlna = -(C * nH / jnp.maximum(H, 1e-30)) * (
+        s * x1s_safe * (alphaB_TM - alphaB_TR) + Delta * alphaB_TM
+    )
+
+    return dxHII_dlna
+
+
+# ---------------------------------------------------------------------------
 # Semi-implicit ionization solver (MB95)
 # cf. DISCO-EB thermodynamics_mb95.py:ionize()
 # ---------------------------------------------------------------------------
@@ -280,6 +338,15 @@ def thermodynamics_solve(
 
     thomc0 = _thomc0_coeff * T_cmb**4
 
+    # CGS constants for RECFAST (used inside scan_step)
+    _H100_cgs = 3.2407792902755e-18  # H0=100 km/s/Mpc in s^-1
+    _mH_g = 1.67353284e-24  # proton mass [g]
+    _G_cgs = 6.67428e-8
+    _c_over_Mpc = const.c_SI / const.Mpc_over_m  # ~9.716e-15 s^-1
+    H0_cgs = (H0_kmsMpc / 100.0) * _H100_cgs
+    rho_crit_cgs = 3.0 * H0_cgs**2 / (8.0 * math.pi * _G_cgs)
+    n_H_0_cgs = (1.0 - Y_He) * Omega_b * rho_crit_cgs / _mH_g
+
     init = {
         'a': a0, 'adot': adot0, 'tau': tau0, 'tb': tb0,
         'xHII': xHII0, 'xe': xe0, 'xHeII': xHeII0, 'xHeIII': xHeIII0,
@@ -334,9 +401,32 @@ def thermodynamics_solve(
 
         new_tb = T_cmb / new_a + a2t / new_a**2
 
-        # Ionization (semi-implicit algebraic step)
+        # Ionization step
         tbhalf = 0.5 * (tb + new_tb)
-        new_xHII = _ionize(tbhalf, ahalf, adothalf, dtau, xHII, Y_He, H0_kmsMpc, Omega_b)
+
+        # RECFAST Peebles ODE in dlna (CLASS-matching coefficients)
+        # Convert from dτ stepping to dlna: dlna = (a'/a)*dτ = aH*dτ
+        H_half = bg.H_of_loga.evaluate(jnp.log(jnp.maximum(ahalf, 1e-30)))
+        dlna_step = ahalf * H_half * dtau
+        # n_H in CGS [cm^-3]
+        n_H_cgs = n_H_0_cgs / ahalf**3
+        # H in CGS [s^-1]
+        H_cgs = H_half * _c_over_Mpc
+        # Temperatures
+        TR_half = T_cmb / ahalf
+
+        # Hydrogen ionization: RECFAST for z < 1600, MB95 for z > 1800,
+        # smooth sigmoid blend in between to avoid discontinuities.
+        # RECFAST's Saha-departure form is unstable at z > 1600 where
+        # the Saha factor s >> 1 causes Delta to be large.
+        dxHII_dlna = _recfast_dxHII_dlna(xe, xHII, n_H_cgs, H_cgs, tbhalf, TR_half)
+        new_xHII_recfast = jnp.clip(xHII + dlna_step * dxHII_dlna, 0.0, 1.0)
+        new_xHII_mb95 = _ionize(tbhalf, ahalf, adothalf, dtau, xHII, Y_He, H0_kmsMpc, Omega_b)
+
+        # Smooth blend: w=1 (RECFAST) at z < 1600, w=0 (MB95) at z > 1800
+        z_half = 1.0 / ahalf - 1.0
+        w_recfast = jax.nn.sigmoid(-0.02 * (z_half - 1700.0))  # smooth over Δz~100
+        new_xHII = w_recfast * new_xHII_recfast + (1.0 - w_recfast) * new_xHII_mb95
 
         # Helium (Saha iteration)
         new_xHeII, new_xHeIII = _ionHe(

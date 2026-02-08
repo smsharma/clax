@@ -250,7 +250,7 @@ _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max
 # "T0+T1": adds ISW dipole (j_l' radial)
 # "T0+T1+T2": adds polarization quadrupole (CLASS full form)
 # "nonIBP": Non-IBP Doppler (source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l')
-_DEFAULT_TT_MODE = "nonIBP"  # More robust at high l; IBP requires finer k-grid
+_DEFAULT_TT_MODE = "T0"  # IBP form — baseline for all A/B comparisons
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
