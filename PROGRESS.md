@@ -118,11 +118,29 @@ T1 (ISW dipole, `j_l'` radial) and T2 (polarization quadrupole)
 contributions that are summed in CLASS harmonic.c:962. The T1/T2 sign
 convention needs further investigation.
 
+### Review Notes (external)
+
+**Overstatements to correct:**
+- "Root cause confirmed" was premature — T1/T2 sign/normalization is still ambiguous
+- "No numerical dependence" is overstated — k-resolution DID show meaningful
+  movement (TT l=100: 24%→17%→3.3% depending on l and k settings)
+- Too many speculative commits to main during active debugging
+
+**Required next steps (in order):**
+1. Freeze a baseline commit. Stop changing defaults during investigation.
+2. Compare component transfer functions (T0, T1, T2) at fixed l and k
+   against CLASS conventions directly (not just C_l ratios).
+3. Compare time-series of source_SW, source_ISW_vis, source_ISW_fs,
+   source_Doppler at matched (k, tau) windows against CLASS.
+4. Quantify which term must shift (amplitude/phase) to close the TT gap.
+5. Only then change physics/defaults.
+
 ### Next Steps
 
-- [ ] Resolve T1 sign ambiguity (compare CLASS transfer functions in Newtonian gauge)
-- [ ] Push EE below 3% with science_cl (60 k/decade + l_max=50)
+- [ ] Freeze baseline, compare component transfer functions vs CLASS
+- [ ] Time-series source comparison at matched (k, tau) windows
+- [ ] Quantify which source term closes the TT gap
+- [ ] Push EE below 3% with science_cl
 - [ ] Extend lensing to EE/TE/BB
 - [ ] Gradient tests for C_l: d(C_l)/d(params)
 - [ ] Comprehensive validation at 5+ parameter points
-- [ ] Fisher matrix demonstration
