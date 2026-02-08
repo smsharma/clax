@@ -189,6 +189,52 @@ def generate_spectra(cosmo, outdir):
     print(f"  P(k): {len(k_test)} k-points, z={z_pk}")
 
 
+def generate_perturbations(cosmo, outdir, params):
+    """Extract perturbation variables at specific k values for source comparison.
+
+    Uses CLASS k_output_values to get time-series of perturbation variables.
+    This enables direct comparison of source function components against jaxCLASS.
+    """
+    # Need a separate CLASS run with k_output_values
+    from classy import Class
+
+    k_output = [0.01, 0.05, 0.1]  # Mpc^-1
+
+    cosmo2 = Class()
+    params2 = dict(params)
+    params2['k_output_values'] = ','.join(f'{k:.4f}' for k in k_output)
+    # Need perturbation output
+    if 'output' in params2:
+        params2['output'] = params2['output'] + ' dTk vTk'
+    cosmo2.set(params2)
+
+    try:
+        cosmo2.compute()
+
+        pert = cosmo2.get_perturbations()
+        scalar_pert = pert.get('scalar', [])
+
+        for i, k in enumerate(k_output):
+            if i < len(scalar_pert):
+                p = scalar_pert[i]
+                data = {}
+                for key in p.keys():
+                    data[key.replace(' ', '_').replace('[', '').replace(']', '').replace('/', '_')] = np.array(p[key])
+
+                np.savez(
+                    os.path.join(outdir, f'perturbations_k{k:.4f}.npz'),
+                    k=k,
+                    **data,
+                )
+                print(f"  Perturbations k={k}: {len(p.get('tau [Mpc]', []))} tau-points, {len(data)} variables")
+
+        cosmo2.struct_cleanup()
+        cosmo2.empty()
+    except Exception as e:
+        print(f"  Warning: perturbation output failed: {e}")
+        print(f"  (This requires CLASS compiled with perturbation output support)")
+
+
 def generate_model(params, name, outdir_base):
     """Generate all reference data for a single cosmological model."""
     from classy import Class
@@ -207,6 +253,10 @@ def generate_model(params, name, outdir_base):
 
     cosmo.struct_cleanup()
     cosmo.empty()
+
+    # Generate perturbation time-series (separate run with k_output_values)
+    generate_perturbations(None, outdir, params)
+
     print(f"  Done: {name}")
 
 

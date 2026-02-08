@@ -249,6 +249,73 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq):
 
 
 # ---------------------------------------------------------------------------
+# Shared TCA helpers (used by both RHS and source extraction)
+# ---------------------------------------------------------------------------
+
+def _compute_tca_criterion(kappa_dot, a_prime_over_a, k):
+    """Compute smooth TCA switching criterion matching CLASS dual criteria.
+
+    CLASS (perturbations.c:6178-6179) uses:
+        tca_on when tau_c/tau_h < 0.005 AND tau_c/tau_k < 0.01
+    Returns is_tca: ~1 when tightly coupled, ~0 when free-streaming.
+    """
+    tau_c = 1.0 / jnp.maximum(kappa_dot, 1e-30)
+    tau_h = 1.0 / a_prime_over_a
+    tau_k = 1.0 / k
+    crit1 = tau_c / tau_h  # must be < 0.005
+    crit2 = tau_c / tau_k  # must be < 0.01
+    tca_ratio = jnp.maximum(crit1 / 0.005, crit2 / 0.01)
+    _TCA_WIDTH = 5.0
+    return jax.nn.sigmoid(-_TCA_WIDTH * jnp.log(jnp.maximum(tca_ratio, 1e-30))), tau_c
+
+
+def _compute_theta_b_prime_blended(
+    theta_b, delta_b, theta_g, delta_g, F_g_2, G_g_0, G_g_2,
+    a_prime_over_a, cs2, k, k2, kappa_dot,
+    rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+):
+    """Compute theta_b' with proper TCA/full blending, matching the ODE RHS.
+
+    This must be called from both _perturbation_rhs and _extract_sources
+    to ensure the Doppler IBP source uses the same theta_b' as the evolution.
+
+    cf. CLASS perturbations.c:9100-9103 (TCA), Ma & Bertschinger eq. 31 (full)
+    """
+    R = 4.0 * rho_g / (3.0 * rho_b)
+    metric_continuity = h_prime / 2.0
+    metric_shear = (h_prime + 6.0 * eta_prime) / 2.0
+
+    # --- TCA theta_b' ---
+    # Shear: cf. CLASS perturbations.c:10193
+    tca_shear_g = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
+
+    # Slip: cf. CLASS perturbations.c:10168 (first_order_CLASS)
+    F_tca = tau_c / (1.0 + R)
+    dtau_c_over_tau_c = 2.0 * a_prime_over_a
+    dH_dloga = bg.H_of_loga.derivative(loga)
+    a_primeprime_over_a = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
+    tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
+        + F_tca * (
+            -a_primeprime_over_a * theta_b
+            + k2 * (
+                -a_prime_over_a * delta_g / 2.0
+                + cs2 * (-theta_b - metric_continuity)
+                - (1.0/3.0) * (-theta_g - metric_continuity)
+            )
+        )
+
+    theta_b_tca = (-a_prime_over_a * theta_b
+                   + k2 * (cs2 * delta_b + R * (delta_g / 4.0 - tca_shear_g))
+                   + R * tca_slip) / (1.0 + R)
+
+    # --- Full (non-TCA) theta_b' ---
+    theta_b_full = -a_prime_over_a * theta_b + cs2 * k2 * delta_b + R * kappa_dot * (theta_g - theta_b)
+
+    # Hard switch: TCA or full equations (not blended — blending changes the physics)
+    return jnp.where(is_tca > 0.5, theta_b_tca, theta_b_full)
+
+
+# ---------------------------------------------------------------------------
 # Boltzmann hierarchy RHS (synchronous gauge)
 # ---------------------------------------------------------------------------
 
@@ -313,32 +380,20 @@ def _perturbation_rhs(tau, y, args):
 
     Pi = F_g[2] + G_g[0] + G_g[2]
 
-    # === TCA CRITERION ===
-    # τ_c = 1/κ' is the photon mean free time.
-    # TCA is valid when τ_c * k << 1, i.e., κ'/k >> 1.
-    # CLASS uses: tca_on when τ_c/τ_h < 0.005 AND τ_c/τ_k < 0.01
-    #   where τ_h = 1/aH, τ_k = 1/k → τ_c*k < 0.01 → κ'/k > 100
-    # We use a softer threshold with smooth sigmoid for JAX compatibility.
-    # cf. CLASS perturbations.c:6178-6179
-    tau_c = 1.0 / jnp.maximum(kappa_dot, 1e-30)  # photon mean free time
-    tca_ratio = tau_c * k  # small when tightly coupled
-    # Smooth sigmoid: 1 when tca_ratio << threshold, 0 when tca_ratio >> threshold
-    # CLASS uses threshold ~0.01; we use 0.01 with transition width
-    _TCA_THRESHOLD = 0.01
-    _TCA_WIDTH = 5.0  # steepness of sigmoid transition
-    is_tca = jax.nn.sigmoid(-_TCA_WIDTH * (jnp.log(tca_ratio + 1e-30) - jnp.log(_TCA_THRESHOLD)))
+    # === TCA CRITERION (shared helper, dual criteria matching CLASS) ===
+    is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
 
     # === EINSTEIN EQUATIONS (constraint approach, matching CLASS) ===
     # cf. CLASS perturbations.c:6611-6644
 
     # Total density perturbation δρ = Σ ρ_i δ_i
-    # Include ncdm contribution approximated as massless (δ_ncdm ≈ δ_ur)
-    # This is valid at early times when ncdm are relativistic.
-    # Without this, h' constraint is wrong and perturbations grow too fast.
+    # ncdm perturbations are approximated using ur variables (δ_ncdm ≈ δ_ur, θ_ncdm ≈ θ_ur)
+    # but with correct background equation of state from p_ncdm(a).
     delta_rho = rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm + rho_ur * delta_ur + rho_ncdm * delta_ur
 
     # Total (ρ+p)θ
-    # Include ncdm (approximated as massless: ρ_ncdm + p_ncdm = 4/3 ρ_ncdm, θ_ncdm ≈ θ_ur)
+    # ncdm approximated as massless: ρ_ncdm + p_ncdm ≈ 4/3 ρ_ncdm, θ_ncdm ≈ θ_ur
+    # TODO: use actual p_ncdm(a) once ncdm perturbation variables are implemented
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur + 4.0/3.0 * rho_ncdm * theta_ur)
 
@@ -366,78 +421,35 @@ def _perturbation_rhs(tau, y, args):
     # cf. CLASS: δ'_cdm = -h'/2 (θ_cdm = 0 in synchronous gauge)
     delta_cdm_prime = -h_prime / 2.0
 
-    # === TCA PHOTON SHEAR ===
+    # === TCA PHOTON SHEAR (needed for photon hierarchy l=2 TCA) ===
     # cf. CLASS perturbations.c:10193
-    # shear_g = 16/45 * tau_c * (theta_g + metric_shear)
-    # In F_l notation: F_g_2 = 2*sigma_g, and CLASS sigma_g = shear_g/2
-    # so F_g_2^{tca} = 2 * (16/45) * tau_c * (theta_g + metric_shear)
-    # Note: includes contribution from G_g0 and G_g2 (cf. CLASS comment at line 10194)
     tca_shear_g = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
-    # tca_shear_g is σ_g in CLASS convention; F_g_2 = 2*σ_g
     tca_F_g_2 = 2.0 * tca_shear_g
 
-    # === TCA SLIP ===
-    # Photon-baryon slip: Δ = θ_b - θ_g at first order in τ_c
-    # cf. CLASS perturbations.c:10144-10176 (first_order_CLASS approximation)
-    # F = tau_c / (1+R) where R = (4/3)*rho_g/rho_b
-    R = 4.0 * rho_g / (3.0 * rho_b)  # photon-baryon momentum ratio
-    F_tca = tau_c / (1.0 + R)
-
-    # dtau_c = -κ''/κ'^2 (derivative of τ_c w.r.t. conformal time)
-    # We approximate dtau_c/tau_c ≈ -κ''/κ' which for κ'~a^{-2} gives ~2*aH
-    # For the first_order_CAMB/compromise_CLASS form:
-    # slip = (dtau_c/tau_c - 2*aH/(1+R))*(theta_b - theta_g)
-    #        + F * (-a''_prime_over_a * theta_b + k2*(...) - aH*metric_euler)
-    # In synchronous gauge metric_euler = 0.
-    # Approximate dtau_c/tau_c ≈ 2*aH (Thomson ~ a^{-2})
-    dtau_c_over_tau_c = 2.0 * a_prime_over_a
-    tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
-        + F_tca * (
-            -(a_prime_over_a**2 + a_prime_over_a**2) * theta_b  # -a''/a * theta_b (approx a''/a ≈ 2(a'/a)^2 in RD)
-            + k2 * (
-                -a_prime_over_a * delta_g / 2.0
-                + cs2 * (-theta_b - metric_continuity)
-                - (1.0/3.0) * (-theta_g - metric_continuity)
-            )
-        )
-    # Note: a''/a = H'^conformal + 2*(a'/a)^2 but approximating as 2*(a'/a)^2 in RD is sufficient
-    # for first-order TCA accuracy. Cleaner: use background spline for H'.
-    dH_dloga_rhs = bg.H_of_loga.derivative(loga)
-    a_primeprime_over_a = a_prime_over_a * (a_prime_over_a + a * dH_dloga_rhs)
-    tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
-        + F_tca * (
-            -a_primeprime_over_a * theta_b
-            + k2 * (
-                -a_prime_over_a * delta_g / 2.0
-                + cs2 * (-theta_b - metric_continuity)
-                - (1.0/3.0) * (-theta_g - metric_continuity)
-            )
-        )
-
-    # === TCA BARYON VELOCITY ===
-    # cf. CLASS perturbations.c:9100-9103
-    # theta_b' = (-aH*theta_b + k2*(cs2*delta_b + R*(delta_g/4 - s2*shear_g)) + R*slip) / (1+R)
-    # In synchronous gauge: metric_euler = 0
-    theta_b_tca = (-a_prime_over_a * theta_b
-                   + k2 * (cs2 * delta_b + R * (delta_g / 4.0 - tca_shear_g))
-                   + R * tca_slip) / (1.0 + R)
+    # === BARYON VELOCITY (TCA/full blended via shared helper) ===
+    R = 4.0 * rho_g / (3.0 * rho_b)
+    theta_b_prime = _compute_theta_b_prime_blended(
+        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
+        a_prime_over_a, cs2, k, k2, kappa_dot,
+        rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+    )
 
     # === TCA PHOTON VELOCITY ===
+    # Need TCA theta_b' for photon velocity computation
+    # Recompute TCA shear and theta_b_tca for photon velocity
+    theta_b_tca = _compute_theta_b_prime_blended(
+        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
+        a_prime_over_a, cs2, k, k2, kappa_dot,
+        rho_g, rho_b, bg, loga, a, h_prime, eta_prime,
+        jnp.ones_like(is_tca), tau_c,  # force TCA mode
+    )
     # cf. CLASS perturbations.c:9204-9206
-    # theta_g' = -(theta_b' + aH*theta_b - k2*cs2*delta_b)/R + k2*(delta_g/4 - shear_g) + (1+R)/R*metric_euler
-    # Synchronous gauge: metric_euler = 0
     theta_g_tca = -(theta_b_tca + a_prime_over_a * theta_b - k2 * cs2 * delta_b) / R \
         + k2 * (0.25 * delta_g - tca_shear_g)
-    # Convert to F_1 derivative: theta_g = 3k*F_1/4 → F_1' = 4*theta_g'/(3k)
     F1_prime_tca = 4.0 * theta_g_tca / (3.0 * k)
 
     # === FULL (non-TCA) BARYONS ===
-    # cf. Ma & Bertschinger Eqs. (30)-(31)
     delta_b_prime = -theta_b - h_prime / 2.0
-    theta_b_full = -a_prime_over_a * theta_b + cs2 * k2 * delta_b + R * kappa_dot * (theta_g - theta_b)
-
-    # Blend TCA and full baryon velocity
-    theta_b_prime = jnp.where(is_tca > 0.5, theta_b_tca, theta_b_full)
 
     # === PHOTON HIERARCHY ===
     dy = jnp.zeros_like(y)
@@ -640,15 +652,16 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # θ_b' from the ODE RHS, consistent with TCA/full switching.
     # CRITICAL: CLASS (perturbations.c:7535) uses dy[theta_b] directly from the
     # RHS evaluation, which includes TCA/full switching. We must do the same.
-    # Re-evaluate the RHS at this (tau, y) to get the correct theta_b_prime.
+    # Use the shared helper to reproduce the exact same TCA blending as the RHS.
     cs2 = th.cs2_of_loga.evaluate(loga)
-    R_photon_baryon = 4.0 * rho_g / (3.0 * rho_b)
     theta_g = 3.0 * k * F_g_1 / 4.0
 
-    # Full baryon equation (always correct after TCA switch-off at recombination)
-    theta_b_prime = (-a_prime_over_a * theta_b
-                     + cs2 * k2 * delta_b
-                     + R_photon_baryon * kappa_dot * (theta_g - theta_b))
+    is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
+    theta_b_prime = _compute_theta_b_prime_blended(
+        theta_b, delta_b, theta_g, delta_g, F_g_2, G_g_0, G_g_2,
+        a_prime_over_a, cs2, k, k2, kappa_dot,
+        rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+    )
 
     # === GAUGE SHIFT for Doppler source (CLASS perturbations.c:7632-7633) ===
     # In sync gauge, the gauge-invariant baryon velocity is θ_b + k²α.

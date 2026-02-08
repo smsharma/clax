@@ -51,7 +51,6 @@ def spherical_jl(l: int, x: Float[Array, "..."]) -> Float[Array, "..."]:
         x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
         j_next = (2.0 * l_curr + 1.0) / x_safe * j_curr - j_prev
         # For x < l_curr, the recurrence is unstable → set to 0
-        # For x < l_curr: set to 0 (exponentially small regime, upward recurrence unstable)
         j_next = jnp.where(jnp.abs(x) < 0.7 * (l_curr + 1), 0.0, j_next)
         # |j_l(x)| < 1 always, so clip aggressively to prevent overflow cascade
         j_next = jnp.clip(j_next, -1.0, 1.0)

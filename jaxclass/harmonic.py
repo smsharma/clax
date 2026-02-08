@@ -160,7 +160,7 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
     cf. CLASS harmonic.c:962, transfer.c:4168-4190
     """
     if mode is None:
-        mode = _TT_TRANSFER_MODE
+        mode = _DEFAULT_TT_MODE
     l_int = int(l)
 
     # Non-IBP mode: source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l'
@@ -245,22 +245,23 @@ def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
 _DEFAULT_L_SWITCH = 100000  # Effectively disabled — Limber fails for CMB primaries
 _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max)
 
-# Transfer decomposition mode: controls which transfer types are included in C_l^TT.
-# CLASS uses T0+T1+T2 (harmonic.c:962), but T1/T2 need careful validation.
-# Options: "T0" (IBP only), "T0+T1", "T0+T1+T2", "T0-T1+T2" (sign test)
-# Transfer decomposition mode for TT.
-# "T0": IBP form (source_T0 * j_l) — has ~17% floor at l=100
+# Default TT transfer mode.
+# "T0": IBP form (source_T0 * j_l) — correct physics, all terms in j_l radial
 # "T0+T1": adds ISW dipole (j_l' radial)
-# "T0+T1+T2": adds polarization quadrupole
-# "T0-T1+T2": T1 sign flipped (debugging)
+# "T0+T1+T2": adds polarization quadrupole (CLASS full form)
 # "nonIBP": Non-IBP Doppler (source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l')
-#   This bypasses the IBP transformation that causes the TT accuracy floor.
-_TT_TRANSFER_MODE = "nonIBP"  # Non-IBP form bypasses the 17.5% IBP error
+_DEFAULT_TT_MODE = "nonIBP"  # More robust at high l; IBP requires finer k-grid
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
                      tt_mode=None):
-    """Compute T_l(k) choosing exact vs Limber based on l."""
+    """Compute T_l(k) choosing exact vs Limber based on l.
+
+    NOTE: Limber always uses source_T0 (IBP form with j_l radial), since the
+    Limber approximation j_l(kX) ~ delta(kX-(l+0.5)) only applies to the j_l
+    radial function. For nonIBP mode (which uses j_l' for Doppler), Limber
+    falls back to the IBP form automatically.
+    """
     tau_grid = pt.tau_grid
     k_grid = pt.k_grid
     tau_0 = float(bg.conformal_age)
@@ -277,6 +278,7 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
         extra['source_Doppler_nonIBP'] = pt.source_Doppler_nonIBP
 
     if l_fl > l_switch + 2 * delta_l:
+        # Limber always uses IBP source_T0 (j_l radial)
         return _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
     elif l_fl < l_switch - 2 * delta_l:
         return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
@@ -286,6 +288,7 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
         T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                                      source_T1=pt.source_T1, source_T2=pt.source_T2,
                                      mode=tt_mode, **extra)
+        # Limber uses IBP source_T0 for consistency
         T_limber = _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
         w = 1.0 / (1.0 + jnp.exp(-(l_fl - l_switch) / delta_l))
         return (1.0 - w) * T_exact + w * T_limber
@@ -349,11 +352,12 @@ def compute_cl_ee(
 def compute_cl_te(
     pt, params, bg, l_values,
     k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    tt_mode=None,
 ):
     """Compute unlensed C_l^TE. Uses Limber for l > l_switch."""
     cls = []
     for l in l_values:
-        T_l = _get_transfer_tt(pt, bg, l, l_switch, delta_l)
+        T_l = _get_transfer_tt(pt, bg, l, l_switch, delta_l, tt_mode=tt_mode)
         E_l = _get_transfer_ee(pt, bg, l, l_switch, delta_l)
         cl = _cl_k_integral_cross(T_l, E_l, pt.k_grid, params, k_interp_factor)
         cls.append(cl)
@@ -380,6 +384,7 @@ def sparse_l_grid(l_max=2500):
 def compute_cls_all(
     pt, params, bg, l_max=2500,
     k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    tt_mode=None,
 ):
     """Compute all unlensed C_l spectra at l=2..l_max.
 
@@ -392,11 +397,13 @@ def compute_cls_all(
     l_sparse = sparse_l_grid(l_max)
 
     cl_tt_sparse = compute_cl_tt(pt, params, bg, l_sparse.tolist(),
-                                 k_interp_factor, l_switch, delta_l)
+                                 k_interp_factor, l_switch, delta_l,
+                                 tt_mode=tt_mode)
     cl_ee_sparse = compute_cl_ee(pt, params, bg, l_sparse.tolist(),
                                  k_interp_factor, l_switch, delta_l)
     cl_te_sparse = compute_cl_te(pt, params, bg, l_sparse.tolist(),
-                                 k_interp_factor, l_switch, delta_l)
+                                 k_interp_factor, l_switch, delta_l,
+                                 tt_mode=tt_mode)
 
     l_dense = jnp.arange(2, l_max + 1, dtype=jnp.float64)
     l_sp = jnp.array(l_sparse.astype(float))

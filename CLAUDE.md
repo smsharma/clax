@@ -37,39 +37,34 @@ pytest tests/ -v -m "not slow"    # skip perturbation integration tests
 pytest tests/test_gradients.py -v  # gradient checks only
 ```
 
-## GPU Access (Paperspace P6000)
+## GPU Access
 
 For medium_cl / science_cl presets (l_max=50, many k-modes), a GPU is
 strongly recommended. The perturbation vmap over k-modes parallelizes well.
 
+### Bridges-2 (PSC) — primary
+
+Full instructions in `../BRIDGES2_ACCESS.md` (gitignored). Summary:
+
+- **V100-32GB, H100-80GB, L40S-48GB** available via SLURM
+- SSH configured as `bridges2` (ControlMaster, no password after initial auth)
+- Interactive GPU via tmux: `ssh bridges2 'tmux send-keys -t gpu "command" Enter'`
+- Read output: `ssh bridges2 'tmux capture-pane -t gpu -p -S -50'`
+- File transfer: `scp file bridges2:/ocean/projects/phy230064p/smishrasharma/`
+- `$PROJECT` = `/ocean/projects/phy230064p/smishrasharma` (1TB, use for everything)
+- ~2,000 SU remaining (1 SU/gpu-hr for V100/L40S, 2 for H100)
+
+### Paperspace P6000 (legacy)
+
 ```bash
-# SSH to GPU node
 ssh paperspace@184.105.5.21
-
-# Machine: Quadro P6000 (24GB VRAM), 8 CPU, 32GB RAM, CUDA 12.2
-# Python/JAX already installed at ~/jaxclass/.venv/
-
-# Sync local changes to remote
-rsync -avz --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' \
-  --exclude 'class_public-3.3.4' \
-  /Users/smsharma/Projects/class-diff/jaxclass/ paperspace@184.105.5.21:~/jaxclass/
-
-# Run on GPU
-ssh paperspace@184.105.5.21 "cd ~/jaxclass && .venv/bin/python -c 'import jax; print(jax.devices())'"
-
-# Run tests on GPU
-ssh paperspace@184.105.5.21 "cd ~/jaxclass && .venv/bin/python -m pytest tests/ --fast -x -q"
-
-# Run a script
-ssh paperspace@184.105.5.21 "cd ~/jaxclass && .venv/bin/python script.py"
+# Quadro P6000 (24GB VRAM), 8 CPU, 32GB RAM, CUDA 12.2
+# Python/JAX at ~/jaxclass/.venv/
 ```
 
 **Known GPU issue**: XLA autotuner fails with l_max=50 on P6000 ("couldn't
 get temp CUBIN file name"). Works with l_max=25. May need to clear /tmp or
 use `XLA_FLAGS=--xla_gpu_autotune_level=0`.
-
-**Timing**: With 175 k-modes (40 k/decade), perturbation solve takes ~500s
-on GPU (including first JIT compilation). Subsequent runs are faster.
 
 ---
 

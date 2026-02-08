@@ -31,19 +31,38 @@ from jaxclass.interpolation import CubicSpline
 from jaxclass.params import CosmoParams, PrecisionParams
 
 # ---------------------------------------------------------------------------
-# Constants for the MB95 recombination model
-# cf. DISCO-EB thermodynamics_mb95.py
+# Constants for recombination
 # ---------------------------------------------------------------------------
 
-_tion = 1.5789e5       # H ionization temperature [K]
-_beta0 = 43.082        # ionization coefficient
-_dec2g = 8.468e14      # two-photon decay rate [1/Mpc]
+# MB95 constants (kept for helium Saha)
 _thomc0_coeff = 5.0577e-8  # Thomson cooling coefficient (times Tcmb^4)
 _barssc_raw = 9.1820e-14   # baryon sound speed prefactor
-
-# Helium Saha equation constants
 _tion1 = 2.855e5       # HeII ionization temperature [K]
 _tion2 = 6.313e5       # HeIII ionization temperature [K]
+
+# --- RECFAST/CLASS hydrogen recombination constants ---
+# cf. CLASS external/HyRec2020/hydrogen.h and hydrogen.c
+_EI_eV = 13.598286071938324     # H ionization energy [eV]
+_E21_eV = 10.198714553953742    # E_2 - E_1 [eV]
+_kBoltz_eV = 8.617343e-5        # Boltzmann constant [eV/K]
+_L2s1s = 8.2206                 # 2s→1s two-photon decay rate [s^-1]
+_lambda_Lya_cm = 1.215670e-5    # Lyman-alpha wavelength [cm]
+_RECFAST_FUDGE = 1.14           # RECFAST fudge factor (Seager et al. 1999)
+
+# Pequignot et al. (1991) case-B recombination coefficient
+# alpha_B(T) = F * 4.309e-13 * t4^(-0.6166) / (1 + 0.6703 * t4^0.5300) [cm^3/s]
+_ALPHA_B_PREFACTOR = 4.309e-13  # cm^3 s^-1
+_ALPHA_B_POWER = -0.6166
+_ALPHA_B_DENOM_COEFF = 0.6703
+_ALPHA_B_DENOM_POWER = 0.5300
+
+# Saha factor: n_1s,eq / (n_e * n_p) = (2*pi*m_e*kT/h^2)^{-3/2} * exp(E_I/kT) / 4
+# SAHA_FACT = 3.016103031869581e21 [eV^{-3/2} cm^{-3}]
+_SAHA_FACT = 3.016103031869581e21
+
+# Lyman-alpha escape factor: 8*pi*H / (3 * n_H * (1-x_HII) * lambda_Lya^3)
+# LYA_FACT = 4.662899067555897e15 [cm^-3]
+_LYA_FACT = 4.662899067555897e15
 
 
 # ---------------------------------------------------------------------------
@@ -84,16 +103,37 @@ class ThermoResult:
 # cf. DISCO-EB thermodynamics_mb95.py:ionize()
 # ---------------------------------------------------------------------------
 
+def _alpha_B(T_K):
+    """Case-B recombination coefficient α_B(T) [cm^3/s].
+
+    Pequignot, Petitjean & Boisson (1991) fitting formula,
+    with RECFAST fudge factor F=1.14.
+
+    cf. CLASS external/HyRec2020/hydrogen.c:64-73 (alphaB_PPB)
+    """
+    t4 = T_K / 1e4  # temperature in units of 10^4 K
+    t4_safe = jnp.maximum(t4, 1e-30)
+    return _RECFAST_FUDGE * _ALPHA_B_PREFACTOR * t4_safe**_ALPHA_B_POWER / (
+        1.0 + _ALPHA_B_DENOM_COEFF * t4_safe**_ALPHA_B_DENOM_POWER
+    )
+
+
 def _ionize(tempb, a, adot, dtau, xe, Y_He, H0, Omega_b):
-    """Semi-implicit hydrogen ionization step.
+    """Semi-implicit hydrogen ionization step with Pequignot alpha_B.
 
-    Solves the Peebles recombination equation algebraically at each timestep
-    using a semi-implicit (Crank-Nicolson-like) discretization.
+    Same MB95 framework (Mpc^-1 code units, semi-implicit stepping) but
+    with the Pequignot et al. (1991) case-B recombination coefficient
+    and proper Peebles C factor matching CLASS/RECFAST.
 
-    cf. DISCO-EB thermodynamics_mb95.py:ionize() lines 6-44
+    The key change from MB95: replace phi2*alpha0/sqrt(T) with the
+    Pequignot formula, and compute C factor with CLASS constants.
+
+    cf. CLASS external/HyRec2020/hydrogen.c:64-73 (alphaB_PPB)
+    cf. DISCO-EB thermodynamics_mb95.py:ionize() for stepping framework
     """
     iswitch = 0.5  # semi-implicit
 
+    # --- Recombination coefficient (MB95 original, code units Mpc^-1) ---
     # Recombination coefficient (in sqrt(K)/Mpc)
     # cf. DISCO-EB line 15: alpha0 = 2.3866e-6 * (1-YHe) * Omegab * H0^2
     alpha0 = 2.3866e-6 * (1.0 - Y_He) * Omega_b * H0**2
@@ -102,6 +142,9 @@ def _ionize(tempb, a, adot, dtau, xe, Y_He, H0, Omega_b):
     crec = 8.0138e-26 * (1.0 - Y_He) * Omega_b * H0**2
 
     # Recombination and ionization rates
+    _tion = 1.5789e5
+    _beta0 = 43.082
+    _dec2g = 8.468e14
     phi2 = jnp.maximum(0.448 * jnp.log(_tion / tempb), 0.0)
     alpha = alpha0 / jnp.sqrt(tempb) * phi2 / a**3
     beta = tempb * phi2 * jnp.exp(_beta0 - _tion / tempb)
@@ -122,13 +165,11 @@ def _ionize(tempb, a, adot, dtau, xe, Y_He, H0, Omega_b):
     bbxe = bb + xe - (1.0 - iswitch) * (bb * xe + aa * xe * xe)
     rat = iswitch * aa * bbxe / (b1 * b1)
 
-    # Solve quadratic: use Taylor expansion for small rat to avoid roundoff
     xe_new = jnp.where(
         rat < 5e-5,
         bbxe / b1 * (1.0 - rat),
         b1 / (2.0 * iswitch * jnp.maximum(aa, 1e-30)) * (jnp.sqrt(jnp.maximum(4.0 * rat + 1.0, 0.0)) - 1.0),
     )
-    # Clamp to physical range [0, 1]
     xe_new = jnp.clip(xe_new, 0.0, 1.0)
     return xe_new
 
