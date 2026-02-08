@@ -138,7 +138,7 @@ def _limber_transfer_ee(source_E, tau_grid, k_grid, tau_0, l):
 # ---------------------------------------------------------------------------
 
 def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
-                       source_T1=None, source_T2=None):
+                       source_T1=None, source_T2=None, mode=None):
     """Exact Bessel transfer function T_l(k) for temperature.
 
     CLASS sums three transfer types for scalar TT (harmonic.c:962):
@@ -151,44 +151,43 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
     For flat space (K=0), sqrt_absK_over_k = 1.0 (transfer.c:4056-4058).
 
     IMPORTANT: source_T2 in our code is g*Pi (perturbations.py:667), but CLASS
-    uses g*P where P = Pi/8 (perturbations.c:7565,7676). So the T2 source fed
-    here should already be the CLASS-convention source_t2 = g*Pi/8 * appropriate
-    factor. Currently we pass source_T2 = g*Pi, so we apply 1/8 here.
+    uses g*P where P = Pi/8 (perturbations.c:7565,7676). The 1/8 is applied here.
+
+    Args:
+        mode: "T0", "T0+T1", "T0+T1+T2", or "T0-T1+T2" (sign test).
+              Default: _TT_TRANSFER_MODE global.
 
     cf. CLASS harmonic.c:962, transfer.c:4168-4190
     """
+    if mode is None:
+        mode = _TT_TRANSFER_MODE
     l_int = int(l)
+    include_T1 = "T1" in mode and source_T1 is not None
+    include_T2 = "T2" in mode and source_T2 is not None
+    T1_sign = -1.0 if mode == "T0-T1+T2" else 1.0
 
     def transfer_single_k(ik):
         k = k_grid[ik]
         x = k * chi_grid
+        x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
 
         jl = spherical_jl_backward(l_int, x)
 
         # T0 contribution: source_T0 * j_l
         integrand = source_T0[ik, :] * jl
 
-        # T1 contribution: source_T1 * j_l'(x)
-        # j_l'(x) = (l/x)*j_l(x) - j_{l+1}(x)
-        if source_T1 is not None:
-            x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
+        if include_T1 or include_T2:
             jl_p1 = spherical_jl_backward(l_int + 1, x)
-            jl_prime = (l_int / x_safe) * jl - jl_p1
-            integrand = integrand + source_T1[ik, :] * jl_prime
 
-        # T2 contribution: source_T2 * (1/2)(3*j_l''(x) + j_l(x))
-        # Our source_T2 = g*Pi, CLASS source_t2 = g*P = g*Pi/8
-        # So we need source_T2/8 as the source weight.
-        # j_l''(x) = (l(l-1)/x^2 - 1)*j_l + (2/x)*j_{l+1}
-        # => (1/2)(3*j_l'' + j_l) = (1/2)(3*[(l(l-1)/x^2 - 1)*j_l + (2/x)*j_{l+1}] + j_l)
-        #                          = (1/2)((3*l(l-1)/x^2 - 2)*j_l + (6/x)*j_{l+1})
-        if source_T2 is not None:
-            x_safe = jnp.where(jnp.abs(x) < 1e-30, 1e-30, x)
-            jl_p1 = spherical_jl_backward(l_int + 1, x)
-            # j_l'' from recurrence: j_l''(x) = (l(l-1)/x^2 - 1)j_l + (2/x)j_{l+1}
+        # T1 contribution: source_T1 * j_l'(x)
+        if include_T1:
+            jl_prime = (l_int / x_safe) * jl - jl_p1
+            integrand = integrand + T1_sign * source_T1[ik, :] * jl_prime
+
+        # T2 contribution: (source_T2/8) * (1/2)(3*j_l''(x) + j_l(x))
+        if include_T2:
             jl_pp = (l_int * (l_int - 1) / (x_safe * x_safe) - 1.0) * jl + (2.0 / x_safe) * jl_p1
             radial_T2 = 0.5 * (3.0 * jl_pp + jl)
-            # Apply 1/8 factor: our source_T2 = g*Pi, CLASS wants g*P = g*Pi/8
             integrand = integrand + (source_T2[ik, :] / 8.0) * radial_T2
 
         return jnp.sum(integrand * dtau_mid)
@@ -220,8 +219,14 @@ def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
 _DEFAULT_L_SWITCH = 100000  # Effectively disabled — Limber fails for CMB primaries
 _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max)
 
+# Transfer decomposition mode: controls which transfer types are included in C_l^TT.
+# CLASS uses T0+T1+T2 (harmonic.c:962), but T1/T2 need careful validation.
+# Options: "T0" (IBP only), "T0+T1", "T0+T1+T2", "T0-T1+T2" (sign test)
+_TT_TRANSFER_MODE = "T0-T1+T2"  # T1 sign flipped: A/B test shows this is closer to CLASS
 
-def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L):
+
+def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+                     tt_mode=None):
     """Compute T_l(k) choosing exact vs Limber based on l."""
     tau_grid = pt.tau_grid
     k_grid = pt.k_grid
@@ -235,10 +240,12 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
         return _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
     elif l_fl < l_switch - 2 * delta_l:
         return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
-                                  source_T1=pt.source_T1, source_T2=pt.source_T2)
+                                  source_T1=pt.source_T1, source_T2=pt.source_T2,
+                                  mode=tt_mode)
     else:
         T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
-                                     source_T1=pt.source_T1, source_T2=pt.source_T2)
+                                     source_T1=pt.source_T1, source_T2=pt.source_T2,
+                                     mode=tt_mode)
         T_limber = _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
         w = 1.0 / (1.0 + jnp.exp(-(l_fl - l_switch) / delta_l))
         return (1.0 - w) * T_exact + w * T_limber
