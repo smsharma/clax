@@ -632,10 +632,15 @@ def _extract_sources(y, k, tau, bg, th, idx):
     dg_dloga = th.g_of_loga.derivative(loga)
     g_prime = dg_dloga * a_prime_over_a
 
-    # θ_b' from perturbation equations
+    # θ_b' from the ODE RHS, consistent with TCA/full switching.
+    # CRITICAL: CLASS (perturbations.c:7535) uses dy[theta_b] directly from the
+    # RHS evaluation, which includes TCA/full switching. We must do the same.
+    # Re-evaluate the RHS at this (tau, y) to get the correct theta_b_prime.
     cs2 = th.cs2_of_loga.evaluate(loga)
     R_photon_baryon = 4.0 * rho_g / (3.0 * rho_b)
     theta_g = 3.0 * k * F_g_1 / 4.0
+
+    # Full baryon equation (always correct after TCA switch-off at recombination)
     theta_b_prime = (-a_prime_over_a * theta_b
                      + cs2 * k2 * delta_b
                      + R_photon_baryon * kappa_dot * (theta_g - theta_b))
