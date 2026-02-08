@@ -173,9 +173,17 @@ has sharp features that the single-point Limber evaluation misses. Limber is
 only appropriate for smooth sources (lensing potential, galaxy clustering).
 The path to high-l C_l is exact Bessel + sparse l-sampling, NOT Limber.
 
+**Latest diagnostic (V100, 40 k/decade, l_max=25, with T1/T2):**
+| l | T0 only | T0+T1 | T0+T1+T2 |
+|---|---------|-------|----------|
+| 10 | 1.075 | 0.919 | 0.921 |
+| 100 | 0.855 | 0.809 | 0.808 |
+T1 has ~5% effect. T2 < 0.5%. Need science_cl (60k/l50) run on V100 for final numbers.
+
 **Next steps:**
-- [ ] Run full diagnostic with `science_cl()` (l_max=50, 60 k/decade) on GPU
-- [ ] Fine-tune ODE tolerances to push from ~5% to <1%
+- [ ] Await science_cl (60k/l50) V100 results (running now)
+- [ ] If ~5%: investigate source function accuracy (extract CLASS source at specific k,tau)
+- [ ] If ~10%: increase k to 80+/decade or investigate IBP Doppler term
 - [ ] Extend lensing to EE/TE/BB
 - [ ] Comprehensive validation at 5+ parameter points
 - [ ] Gradient tests for C_l: d(C_l)/d(omega_b), d(C_l)/d(n_s), etc.
