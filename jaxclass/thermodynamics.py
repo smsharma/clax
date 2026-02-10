@@ -41,28 +41,61 @@ _tion1 = 2.855e5       # HeII ionization temperature [K]
 _tion2 = 6.313e5       # HeIII ionization temperature [K]
 
 # --- RECFAST/CLASS hydrogen recombination constants ---
-# cf. CLASS external/HyRec2020/hydrogen.h and hydrogen.c
-_EI_eV = 13.598286071938324     # H ionization energy [eV]
-_E21_eV = 10.198714553953742    # E_2 - E_1 [eV]
-_kBoltz_eV = 8.617343e-5        # Boltzmann constant [eV/K]
-_L2s1s = 8.2206                 # 2s→1s two-photon decay rate [s^-1]
-_lambda_Lya_cm = 1.215670e-5    # Lyman-alpha wavelength [cm]
-_RECFAST_FUDGE = 1.14           # RECFAST fudge factor (Seager et al. 1999)
+# All constants match CLASS wrap_recfast.c exactly (CODATA 2006 values).
+# cf. CLASS external/RecfastCLASS/wrap_recfast.{c,h}
 
-# Pequignot et al. (1991) case-B recombination coefficient
-# alpha_B(T) = F * 4.309e-13 * t4^(-0.6166) / (1 + 0.6703 * t4^0.5300) [cm^3/s]
+# Fundamental constants (CLASS values from common.h, thermodynamics.h)
+_hP_SI = 6.62606896e-34      # Planck constant [J·s]
+_c_SI = 2.99792458e8         # Speed of light [m/s]
+_kB_SI = 1.3806504e-23       # Boltzmann constant [J/K]
+_me_SI = 9.10938215e-31      # Electron mass [kg]
+# CGS versions
+_hP_CGS = _hP_SI * 1e7       # [erg·s]
+_kB_CGS = _kB_SI * 1e7       # [erg/K]
+_me_CGS = _me_SI * 1e3       # [g]
+
+# Inverse wavenumbers (CLASS wrap_recfast.h)
+_L_H_ion = 1.096787737e7     # H ionization [m^{-1}]
+_L_H_alpha = 8.225916453e6   # H Lyman-alpha [m^{-1}]
+
+# Derived RECFAST constants (CLASS wrap_recfast.c:68-89)
+_Lalpha_m = 1.0 / _L_H_alpha                # Lyman-alpha wavelength [m]
+_Lalpha_cm = _Lalpha_m * 100.0               # Lyman-alpha wavelength [cm]
+_CDB = _hP_SI * _c_SI * (_L_H_ion - _L_H_alpha) / _kB_SI  # 39,462 K (n=2 ionization temp)
+_CL = _hP_SI * _c_SI * _L_H_alpha / _kB_SI                # 118,348 K (Lyman-alpha temp)
+_CK_CGS = _Lalpha_cm**3 / (8.0 * math.pi)  # Peebles K prefactor [cm^3]
+_CR_CGS = 2.0 * math.pi * (_me_CGS / _hP_CGS) * (_kB_CGS / _hP_CGS)  # NR number density [K^{-1} cm^{-2}]
+_A2s1sH = 8.2245809                         # Einstein 2s→1s coefficient [s^{-1}]
+
+# Pequignot et al. (1991) case-B recombination coefficient (NO fudge factor)
+# alpha_B(T) = 4.309e-13 * t4^(-0.6166) / (1 + 0.6703 * t4^0.5300) [cm^3/s]
 _ALPHA_B_PREFACTOR = 4.309e-13  # cm^3 s^-1
 _ALPHA_B_POWER = -0.6166
 _ALPHA_B_DENOM_COEFF = 0.6703
 _ALPHA_B_DENOM_POWER = 0.5300
 
-# Saha factor: n_1s,eq / (n_e * n_p) = (2*pi*m_e*kT/h^2)^{-3/2} * exp(E_I/kT) / 4
-# SAHA_FACT = 3.016103031869581e21 [eV^{-3/2} cm^{-3}]
-_SAHA_FACT = 3.016103031869581e21
+# RECFAST fudge factors (CLASS precisions.h:183-192)
+# When Hswitch=True (default): fudge_H = 1.14 + delta = 1.14 - 0.015 = 1.125
+_RECFAST_FUDGE_H = 1.14 + (-0.015)   # = 1.125 (RECFAST 1.5.2 with Hswitch)
+_RECFAST_FUDGE = _RECFAST_FUDGE_H    # For backward compat with _ionize
+_RECFAST_X_H0_TRIGGER2 = 0.995       # Peebles C activation threshold
 
-# Lyman-alpha escape factor: 8*pi*H / (3 * n_H * (1-x_HII) * lambda_Lya^3)
-# LYA_FACT = 4.662899067555897e15 [cm^-3]
-_LYA_FACT = 4.662899067555897e15
+# Gaussian K correction parameters (RECFAST 1.5/1.5.2, Hswitch=True)
+# cf. CLASS precisions.h:187-192
+_AGauss1 = -0.14
+_AGauss2 = 0.079
+_zGauss1 = 7.28    # in ln(1+z)
+_zGauss2 = 6.73    # in ln(1+z)
+_wGauss1 = 0.18
+_wGauss2 = 0.33
+
+# Legacy constants kept for MB95 helium Saha / _ionize
+_EI_eV = 13.598286071938324     # H ionization energy [eV]
+_kBoltz_eV = 8.617343e-5        # Boltzmann constant [eV/K]
+_L2s1s = _A2s1sH                # Alias
+_lambda_Lya_cm = _Lalpha_cm     # Alias
+_SAHA_FACT = 3.016103031869581e21  # HyRec Saha factor [eV^{-3/2} cm^{-3}]
+_LYA_FACT = 4.662899067555897e15   # Lyman-alpha escape factor [cm^{-3}]
 
 
 # ---------------------------------------------------------------------------
@@ -102,56 +135,65 @@ class ThermoResult:
 # RECFAST Peebles 3-level atom RHS (CLASS/HyRec conventions)
 # ---------------------------------------------------------------------------
 
-def _recfast_dxHII_dlna(xe, xHII, nH, H, TM, TR):
+def _recfast_dxHII_dlna(xe, xHII, nH, Hz, z, TM, TR):
     """Peebles 3-level atom: dxHII/d(lna).
 
-    All inputs in CGS: nH [cm^-3], H [s^-1], TM/TR [K].
+    Matches CLASS external/RecfastCLASS/wrap_recfast.c:110-174 exactly
+    (recfast_dx_H_dz), converted from dz to dlna.
+
+    Key differences from previous HyRec-style version:
+    1. Fudge factor F=1.125 is in the Peebles C coefficient, NOT in alpha_B
+    2. Gaussian K correction (RECFAST 1.5, Hswitch=True)
+    3. Photoionization uses Tmat (CLASS default: recfast_photoion_Tmat)
+
+    All inputs in CGS: nH [cm^-3], Hz [s^-1], TM/TR [K], z dimensionless.
     Returns dxHII/dlna (dimensionless per e-fold).
-
-    Matches CLASS external/HyRec2020/hydrogen.c:88-109 (rec_TLA_dxHIIdlna)
-    with Fudge=1.14 (RECFAST mode).
     """
-    # Case-B recombination coefficient: Pequignot et al. (1991) [cm^3/s]
+    # --- Case-B recombination coefficient alpha_B(Tmat) — NO fudge ---
+    # cf. wrap_recfast.c:131
     t4_M = TM / 1e4
-    t4_R = TR / 1e4
     t4_M_safe = jnp.maximum(t4_M, 1e-30)
-    t4_R_safe = jnp.maximum(t4_R, 1e-30)
-    alphaB_TM = _RECFAST_FUDGE * _ALPHA_B_PREFACTOR * t4_M_safe**_ALPHA_B_POWER / (
+    Rdown = _ALPHA_B_PREFACTOR * t4_M_safe**_ALPHA_B_POWER / (
         1.0 + _ALPHA_B_DENOM_COEFF * t4_M_safe**_ALPHA_B_DENOM_POWER)
-    alphaB_TR = _RECFAST_FUDGE * _ALPHA_B_PREFACTOR * t4_R_safe**_ALPHA_B_POWER / (
-        1.0 + _ALPHA_B_DENOM_COEFF * t4_R_safe**_ALPHA_B_DENOM_POWER)
 
-    # Temperatures in eV
-    TM_eV = _kBoltz_eV * TM
-    TR_eV = _kBoltz_eV * TR
-    TR_eV_safe = jnp.maximum(TR_eV, 1e-30)
+    # --- Photoionization rate Rup (Tmat mode, CLASS default) ---
+    # cf. wrap_recfast.c:133-134
+    # Rup = Rdown * (CR*Tmat)^{3/2} * exp(-CDB/Tmat) [s^{-1}]
+    TM_safe = jnp.maximum(TM, 1e-30)
+    Rup = Rdown * (_CR_CGS * TM_safe)**1.5 * jnp.exp(-_CDB / TM_safe)
 
-    # Saha factor: s = SAHA_FACT * TR^{3/2} * exp(-EI/TR) / nH
-    s = _SAHA_FACT * TR_eV_safe * jnp.sqrt(TR_eV_safe) * jnp.exp(
-        -_EI_eV / TR_eV_safe) / jnp.maximum(nH, 1e-30)
+    # --- K factor with Gaussian correction (RECFAST 1.5, Hswitch=True) ---
+    # cf. wrap_recfast.c:141-149
+    Hz_safe = jnp.maximum(Hz, 1e-30)
+    K = _CK_CGS / Hz_safe
+    # Gaussian correction from Rubino-Martin et al. (2010)
+    lnz1 = jnp.log(1.0 + z)
+    K = K * (1.0
+             + _AGauss1 * jnp.exp(-((lnz1 - _zGauss1) / _wGauss1)**2)
+             + _AGauss2 * jnp.exp(-((lnz1 - _zGauss2) / _wGauss2)**2))
 
-    # Photoionization rate: 4*beta_B [s^-1]
-    four_betaB = _SAHA_FACT * TR_eV_safe * jnp.sqrt(TR_eV_safe) * jnp.exp(
-        -0.25 * _EI_eV / TR_eV_safe) * alphaB_TR
+    # --- Peebles C factor with fudge ---
+    # cf. wrap_recfast.c:161-171
+    # C = F * (1 + K*A*n_1s) / (1 + K*A*n_1s + F*K*Rup*n_1s)
+    # where F = fudge_H = 1.125, A = A2s1sH = 8.2245809
+    n_1s = jnp.maximum(nH * (1.0 - xHII), 1e-30)
+    KAn = K * _A2s1sH * n_1s
+    KRn = K * Rup * n_1s
+    C_full = _RECFAST_FUDGE_H * (1.0 + KAn) / jnp.maximum(
+        1.0 + KAn + _RECFAST_FUDGE_H * KRn, 1e-30)
 
-    # Lyman-alpha escape: RLya = LYA_FACT * H / (nH * (1-xHII)) [s^-1]
-    x1s = jnp.maximum(1.0 - xHII, 1e-30)
-    RLya = _LYA_FACT * H / (jnp.maximum(nH, 1e-30) * x1s)
+    # C = 1 when still fully ionized (x_H >= trigger2 AND z >= z_switch_late)
+    # cf. wrap_recfast.c:164
+    C = jnp.where((xHII < _RECFAST_X_H0_TRIGGER2) | (z < 800.0), C_full, 1.0)
 
-    # Peebles C factor
-    C = (3.0 * RLya + _L2s1s) / (3.0 * RLya + _L2s1s + four_betaB)
-
-    # Saha-departure form (CLASS hydrogen.c:105-107):
-    # dxHII/dlna = -(C*nH/H) * [s*(1-x)*(αB_TM - αB_TR) + Δ*αB_TM]
-    # where Δ = xe*xHII - s*(1-xHII) is the departure from Saha equilibrium.
-    # This form is numerically stable because Δ is O(1) even when the bare
-    # rates (alpha*nH, four_betaB) are O(10^5) and would cause stiffness.
-    Delta = xe * xHII - s * (1.0 - xHII)
-    x1s_safe = jnp.maximum(1.0 - xHII, 1e-30)
-
-    dxHII_dlna = -(C * nH / jnp.maximum(H, 1e-30)) * (
-        s * x1s_safe * (alphaB_TM - alphaB_TR) + Delta * alphaB_TM
-    )
+    # --- ODE: dxH/dz = (x*xH*nH*Rdown - Rup*(1-xH)*exp(-CL/Tmat)) * C / (Hz*(1+z)) ---
+    # Convert to dlna: dxH/dlna = dxH/dz * (-(1+z))
+    # = -(x*xH*nH*Rdown - Rup*(1-xH)*exp(-CL/Tmat)) * C / Hz
+    # cf. wrap_recfast.c:174
+    dxHII_dlna = -(
+        xe * xHII * nH * Rdown
+        - Rup * (1.0 - xHII) * jnp.exp(-_CL / TM_safe)
+    ) * C / Hz_safe
 
     return dxHII_dlna
 
@@ -415,17 +457,34 @@ def thermodynamics_solve(
         # Temperatures
         TR_half = T_cmb / ahalf
 
-        # Hydrogen ionization: RECFAST for z < 1600, MB95 for z > 1800,
-        # smooth sigmoid blend in between to avoid discontinuities.
-        # RECFAST's Saha-departure form is unstable at z > 1600 where
-        # the Saha factor s >> 1 causes Delta to be large.
-        dxHII_dlna = _recfast_dxHII_dlna(xe, xHII, n_H_cgs, H_cgs, tbhalf, TR_half)
-        new_xHII_recfast = jnp.clip(xHII + dlna_step * dxHII_dlna, 0.0, 1.0)
+        # Hydrogen ionization: RECFAST Peebles ODE for z < ~1700,
+        # MB95 for z > ~1700 (handles pre-H-recombination stably).
+        # Smooth sigmoid transition to avoid discontinuities.
+        z_half = 1.0 / ahalf - 1.0
+
+        # --- Heun's method (predictor-corrector, 2nd order) ---
+        # Step 1: Evaluate rate at current state (predictor)
+        dxHII_1 = _recfast_dxHII_dlna(
+            xe, xHII, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
+        xHII_pred = jnp.clip(xHII + dlna_step * dxHII_1, 0.0, 1.0)
+
+        # Step 2: Evaluate rate at predicted state using NEW step quantities
+        # (new_a, new_tb give quantities at end of step)
+        z_new = 1.0 / new_a - 1.0
+        nH_new = n_H_0_cgs / new_a**3
+        H_new = new_H * _c_over_Mpc  # [s^-1]
+        TR_new = T_cmb / new_a
+        xe_pred = xHII_pred + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
+        dxHII_2 = _recfast_dxHII_dlna(
+            xe_pred, xHII_pred, nH_new, H_new, z_new, new_tb, TR_new)
+
+        # Step 3: Corrector (trapezoidal average)
+        new_xHII_recfast = jnp.clip(
+            xHII + 0.5 * dlna_step * (dxHII_1 + dxHII_2), 0.0, 1.0)
+
         new_xHII_mb95 = _ionize(tbhalf, ahalf, adothalf, dtau, xHII, Y_He, H0_kmsMpc, Omega_b)
 
-        # Smooth blend: w=1 (RECFAST) at z < 1600, w=0 (MB95) at z > 1800
-        z_half = 1.0 / ahalf - 1.0
-        w_recfast = jax.nn.sigmoid(-0.02 * (z_half - 1700.0))  # smooth over Δz~100
+        w_recfast = jax.nn.sigmoid(-0.02 * (z_half - 1700.0))
         new_xHII = w_recfast * new_xHII_recfast + (1.0 - w_recfast) * new_xHII_mb95
 
         # Helium (Saha iteration)
@@ -461,26 +520,37 @@ def thermodynamics_solve(
     cs2_grid = prepend('cs2')
     loga_grid = jnp.log(jnp.maximum(a_grid, 1e-30))
 
-    # --- Reionization ---
+    # --- Derived quantities (n_H_0, kappa_dot prefactor) ---
     z_grid = 1.0 / a_grid - 1.0
-    z_reio = _estimate_z_reio(params.tau_reio)
+    mu_H = 1.0 / (1.0 - Y_He)
+    _bigH = 3.2407792902755102e-18  # H0=100 km/s/Mpc in s^-1
+    n_H_0 = 3.0 * (_bigH * params.h)**2 / (8.0 * math.pi * const.G_SI * 1.67353284e-27 * mu_H) * Omega_b
+    # kappa_dot prefactor: kappa_dot(z) = xe * n_H_0 * (1+z)^2 * sigma_T * c/Mpc
+    kd_prefactor = n_H_0 * (1.0 + z_grid)**2 * const.sigma_T * const.Mpc_over_m
+    dtau_grid = jnp.diff(tau_grid)
+
+    # --- Reionization: find z_reio self-consistently to match tau_reio ---
+    # Step 1: Compute kappa from recombination only (xe_raw)
+    kd_raw = xe_raw_grid * kd_prefactor
+    kappa_raw_integ = 0.5 * (kd_raw[:-1] + kd_raw[1:]) * dtau_grid
+    kappa_raw_total = jnp.sum(kappa_raw_integ)  # total optical depth without reionization
+
+    # Step 2: Find z_reio such that the reionization contribution = tau_reio - kappa_raw_residual
+    # We use a scan over candidate z_reio values and select the one giving the right tau.
+    # The reionization optical depth for a given z_reio is:
+    #   tau_reio_model(z_reio) = ∫ max(xe_reio(z,z_reio) - xe_raw(z), 0) * kd_prefactor * dtau
+    # We precompute this for several z_reio candidates and interpolate.
+    z_reio = _find_z_reio(
+        params.tau_reio, xe_raw_grid, kd_prefactor, dtau_grid,
+        z_grid, Y_He, kappa_raw_total)
 
     xe_reio_grid = jax.vmap(lambda z: _reionization_xe(z, z_reio, Y_He))(z_grid)
     xe_grid = jnp.maximum(xe_raw_grid, xe_reio_grid)
 
-    # --- Derived quantities ---
+    # --- Optical depth ---
+    kappa_dot_grid = xe_grid * kd_prefactor
 
-    # Thomson scattering rate κ' [Mpc^-1]
-    # n_e = x_e * n_H(z) = x_e * n_H_0 * (1+z)^3
-    # κ'(τ) = n_e * σ_T * a * c converted to Mpc^-1
-    mu_H = 1.0 / (1.0 - Y_He)
-    _bigH = 3.2407792902755102e-18  # H0=100 km/s/Mpc in s^-1
-    n_H_0 = 3.0 * (_bigH * params.h)**2 / (8.0 * math.pi * const.G_SI * 1.67353284e-27 * mu_H) * Omega_b
-    kappa_dot_grid = xe_grid * n_H_0 * (1.0 + z_grid)**2 * const.sigma_T * const.Mpc_over_m
-
-    # Optical depth: κ = ∫_τ^τ_0 κ'(τ') dτ' (integrate backwards from today)
-    # Use trapezoidal integration on the tau grid
-    dtau_grid = jnp.diff(tau_grid)
+    # κ = ∫_τ^τ_0 κ'(τ') dτ' (integrate backwards from today)
     kappa_integrand = 0.5 * (kappa_dot_grid[:-1] + kappa_dot_grid[1:]) * dtau_grid
     kappa_cumulative = jnp.cumsum(kappa_integrand[::-1])[::-1]
     kappa_grid = jnp.concatenate([kappa_cumulative, jnp.array([0.0])])
@@ -521,8 +591,41 @@ def thermodynamics_solve(
     )
 
 
+def _find_z_reio(tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid,
+                 z_grid, Y_He, kappa_raw_total):
+    """Find z_reio such that the reionization optical depth matches tau_reio.
+
+    The reionization optical depth is the EXTRA optical depth from
+    reionization above the recombination baseline:
+        tau_reio = ∫ max(xe_reio - xe_raw, 0) * kd_prefactor * dtau
+
+    Uses bisection (20 iterations → accuracy ~0.001 in z_reio).
+    Memory-efficient: only one _reionization_xe evaluation per iteration.
+    """
+    def _tau_reio_for_zreio(z_reio_cand):
+        """Compute reionization-only optical depth for a given z_reio."""
+        xe_reio = jax.vmap(lambda z: _reionization_xe(z, z_reio_cand, Y_He))(z_grid)
+        xe_extra = jnp.maximum(xe_reio - xe_raw_grid, 0.0)
+        kd_extra = xe_extra * kd_prefactor
+        kappa_integ = 0.5 * (kd_extra[:-1] + kd_extra[1:]) * dtau_grid
+        return jnp.sum(kappa_integ)
+
+    # Bisection: find z_reio in [4, 25] where tau_reio = tau_reio_target
+    def bisect_step(carry, _):
+        z_lo, z_hi = carry
+        z_mid = 0.5 * (z_lo + z_hi)
+        tau_mid = _tau_reio_for_zreio(z_mid)
+        # If tau_mid < target, need higher z_reio (more reionization)
+        z_lo = jnp.where(tau_mid < tau_reio_target, z_mid, z_lo)
+        z_hi = jnp.where(tau_mid < tau_reio_target, z_hi, z_mid)
+        return (z_lo, z_hi), None
+
+    (z_lo, z_hi), _ = jax.lax.scan(bisect_step, (4.0, 25.0), jnp.arange(20))
+    return 0.5 * (z_lo + z_hi)
+
+
 def _estimate_z_reio(tau_reio_target):
-    """Rough estimate of z_reio from tau_reio."""
+    """Rough estimate of z_reio from tau_reio (legacy, kept for reference)."""
     return jnp.clip(2.0 + 150.0 * tau_reio_target, 4.0, 30.0)
 
 

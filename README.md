@@ -8,11 +8,28 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 
 ## Status
 
-**v0.2** -- P(k) at 1-4%, C_l^EE approaching science quality (3-7%). C_l^TT has a ~15% systematic under active investigation. 95+ tests passing across 12 test files. See [PROGRESS.md](PROGRESS.md) for full accuracy tables and debugging details.
+**v0.3** -- Sub-percent C_l^EE at l=12-150 and C_l^TT at l=20, 100, 150 (1-2% at l=30-50). P(k) at 1-4%. Visibility function g(tau) at 0.04%. 100 tests passing. See [PROGRESS.md](PROGRESS.md) for full details.
 
-## Key results
+## Accuracy comparison against CLASS v3.3.4
 
-**Matter power spectrum** (flagship result):
+All comparisons at Planck 2018 best-fit LCDM. GPU: V100-32GB.
+
+### C_l angular power spectra (science-grade)
+
+Perturbation solve at 60 k/decade (272 modes), l_max=50, source-interpolated to 3000 fine k-points. Convergence verified across k-densities (60, 120, 200 k/decade all agree to 0.01%).
+
+| Multipole l | C_l^TT error | C_l^EE error |
+|-------------|-------------|-------------|
+| 12          | -5.2%       | **-0.15%**  |
+| 20          | **-0.29%**  | **-0.27%**  |
+| 30          | +1.52%      | **-0.27%**  |
+| 50          | +1.66%      | **-0.23%**  |
+| 100         | **+0.73%**  | **-0.11%**  |
+| 150         | **-0.21%**  | **-0.19%**  |
+
+Bold = sub-percent. TT l=12 is the Sachs-Wolfe plateau where gauge-dependent effects dominate. EE is sub-percent across the full tested range.
+
+### Matter power spectrum P(k)
 
 | k [Mpc^-1] | jaxCLASS / CLASS | Error |
 |-------------|------------------|-------|
@@ -22,16 +39,15 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 | 0.100       | 1.013            | 1.3%  |
 | 0.300       | 0.966            | 3.5%  |
 
-**Angular power spectra** (V100, 100 k/decade, 439 modes, l_max=25, rtol=1e-6):
+### Pipeline accuracy
 
-| Spectrum | l=50 | l=100 | l=200 |
-|----------|------|-------|-------|
-| EE       | 5.9% | 6.9%  | **2.9%** |
-| TT       | 3.3% | 17.5% | 7.1%  |
-
-**Gradients**: AD derivatives match finite differences to 0.03% for d(P(k))/d(omega_cdm).
-
-**Verified against CLASS**: Newtonian potential Phi matches to 0.5% at all times. Background quantities match to 6 significant digits.
+| Module | Accuracy | Notes |
+|--------|----------|-------|
+| Background (H, D_A, r_s) | < 0.01% | 6+ significant digits |
+| Thermodynamics (x_e) | 0.25% at z_star | RECFAST with Heun stepping |
+| Visibility function g(tau) | **0.04%** | Bisection reionization, corrected kappa |
+| Perturbation ODE (Phi, Psi) | 0.01-0.25% | Gauge-corrected at recombination |
+| AD gradients (dP(k)/d(params)) | 0.03% | vs finite differences |
 
 ## Quick start
 
@@ -52,15 +68,16 @@ pk = jaxclass.compute_pk(CosmoParams(), k=0.05)
 grad = jax.grad(lambda p: jaxclass.compute_pk(p, k=0.05))(CosmoParams())
 print(grad.omega_cdm)  # dP(k)/d(omega_cdm)
 
-# Angular power spectra (C_l)
+# Angular power spectra (C_l) -- science quality
 from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cls_all
-prec = PrecisionParams.fast_cl()
+from jaxclass.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
+prec = PrecisionParams.science_cl()
 params = CosmoParams()
 bg = jaxclass.background_solve(params, prec)
 th = jaxclass.thermodynamics_solve(params, prec, bg)
 pt = perturbations_solve(params, prec, bg, th)
-cls = compute_cls_all(pt, params, bg, l_max=500)  # returns dict with 'tt', 'ee', 'te'
+cl_tt = compute_cl_tt_interp(pt, params, bg, [30, 100, 200])
+cl_ee = compute_cl_ee_interp(pt, params, bg, [30, 100, 200])
 ```
 
 ## Installation
@@ -100,11 +117,13 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 **Key design choices:**
 
 - `CosmoParams` fields are JAX-traced for automatic differentiation. `PrecisionParams` fields are static (control array shapes, not traced).
-- Full Boltzmann hierarchy at all times -- no TCA/RSA/UFA switching. This follows the approach validated by DISCO-EB and SymBoltz.jl.
+- Full Boltzmann hierarchy at all times -- no RSA/UFA switching. TCA (tight-coupling approximation) with CLASS-matching dual criteria for numerical stability.
 - Perturbation ODE solved with Kvaerno5 (implicit, stiff-capable) via Diffrax.
 - `vmap` over k-modes for GPU parallelism.
 - `RecursiveCheckpointAdjoint` for memory-efficient reverse-mode AD through the ODE solve.
 - Synchronous gauge throughout (matching CLASS default).
+- RECFAST recombination matching CLASS `wrap_recfast.c` (Peebles C with fudge, Gaussian K correction, Heun stepping).
+- Source-interpolated C_l integration: source functions S(k,tau) interpolated to fine k-grid (3000 points) before line-of-sight integration, resolving the oscillatory T_l(k) transfer function robustly.
 
 ### Source modules
 
@@ -115,7 +134,7 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 | `interpolation.py`  | Pytree-registered `CubicSpline`                  |
 | `ode.py`            | Diffrax ODE solver wrappers                      |
 | `background.py`     | Friedmann equation, distances, growth factor     |
-| `thermodynamics.py` | Semi-implicit recombination (MB95), visibility   |
+| `thermodynamics.py` | RECFAST recombination, visibility function       |
 | `perturbations.py`  | Full scalar + tensor Boltzmann hierarchy         |
 | `primordial.py`     | Power-law scalar and tensor spectra              |
 | `bessel.py`         | Spherical Bessel functions j_l(x)                |
@@ -132,12 +151,9 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 |---------------|----------|-------|--------|--------------------------|
 | `fast_cl()`   | 15       | 25    | 0.15   | Quick iteration, testing |
 | `medium_cl()` | 20       | 50    | 0.3    | Moderate accuracy        |
-| `science_cl()`| 60       | 50    | 0.35   | Sub-percent P(k)         |
+| `science_cl()`| 200      | 50    | 0.35   | Sub-percent C_l          |
 
-```python
-prec = PrecisionParams.fast_cl()    # ~62 k-modes
-prec = PrecisionParams.science_cl() # ~270 k-modes
-```
+For science-grade results, use `compute_cl_tt_interp` / `compute_cl_ee_interp` which interpolate source functions to a fine k-grid (3000 points) before computing the transfer integral. This is robust regardless of the perturbation k-density.
 
 ## Cosmological parameters
 
@@ -153,6 +169,14 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 | `tau_reio`   | 0.0544   | Reionization optical depth       |
 | `m_ncdm`     | 0.06 eV  | Neutrino mass (single species)   |
 | `w0`, `wa`   | -1.0, 0  | CPL dark energy equation of state|
+
+## Known limitations
+
+- **TT at l=30-50**: ~1.5% residual error, converged across k-densities (physics-limited). Most likely from missing radiation streaming approximation (RSA) for post-recombination photon evolution. Implementing RSA would likely bring this to sub-percent.
+- **TT Sachs-Wolfe plateau (l < 15)**: ~5% error from gauge-dependent source terms at super-horizon scales. Requires RSA + careful gauge-invariant source construction.
+- **High l (l > 200)**: Accuracy degrades; needs l_max > 50 or RSA to extend the hierarchy analytically.
+- **Massive neutrinos**: Approximated as massless in perturbation equations (background is correct). Full ncdm perturbation variables (Psi_l(q)) not yet implemented (~0.3% C_l effect at m=0.06 eV).
+- **Single cosmology validated**: Sub-percent results demonstrated at Planck 2018 fiducial only. Multi-cosmology validation is straightforward but pending.
 
 ## References
 

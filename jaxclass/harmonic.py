@@ -44,14 +44,19 @@ from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult
 # k-integration helpers
 # ---------------------------------------------------------------------------
 
-def _cl_k_integral(T_l, k_grid, params, k_interp_factor=3):
-    """Integrate C_l = 4pi int dlnk P_R(k) |T_l(k)|^2 with k-refinement."""
+def _cl_k_integral(T_l, k_grid, params, k_interp_factor=1):
+    """Integrate C_l = 4pi int dlnk P_R(k) |T_l(k)|^2.
+
+    Uses trapezoidal rule on the log-k grid by default (k_interp_factor=1).
+    CubicSpline refinement (k_interp_factor>1) is available but can introduce
+    ringing for oscillatory T_l(k) — use with caution.
+    """
     log_k = jnp.log(k_grid)
+    P_R = primordial_scalar_pk(k_grid, params)
+    integrand = P_R * T_l**2
+    dlnk = jnp.diff(log_k)
 
     if k_interp_factor <= 1:
-        P_R = primordial_scalar_pk(k_grid, params)
-        integrand = P_R * T_l**2
-        dlnk = jnp.diff(log_k)
         return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
 
     n_fine = len(k_grid) * k_interp_factor
@@ -65,14 +70,14 @@ def _cl_k_integral(T_l, k_grid, params, k_interp_factor=3):
     return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_fine[:-1] + integrand_fine[1:]) * dlnk_fine)
 
 
-def _cl_k_integral_cross(T_l, E_l, k_grid, params, k_interp_factor=3):
+def _cl_k_integral_cross(T_l, E_l, k_grid, params, k_interp_factor=1):
     """Like _cl_k_integral but for cross-spectrum C_l = 4pi int dlnk P_R T_l E_l."""
     log_k = jnp.log(k_grid)
+    P_R = primordial_scalar_pk(k_grid, params)
+    integrand = P_R * T_l * E_l
+    dlnk = jnp.diff(log_k)
 
     if k_interp_factor <= 1:
-        P_R = primordial_scalar_pk(k_grid, params)
-        integrand = P_R * T_l * E_l
-        dlnk = jnp.diff(log_k)
         return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
 
     n_fine = len(k_grid) * k_interp_factor
@@ -155,7 +160,7 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
 
     Args:
         mode: "T0", "T0+T1", "T0+T1+T2", or "T0-T1+T2" (sign test).
-              Default: _TT_TRANSFER_MODE global.
+              Default: _DEFAULT_TT_MODE ("T0").
 
     cf. CLASS harmonic.c:962, transfer.c:4168-4190
     """
@@ -250,7 +255,7 @@ _DEFAULT_DELTA_L = 50       # Blending half-width (unused when l_switch >> l_max
 # "T0+T1": adds ISW dipole (j_l' radial)
 # "T0+T1+T2": adds polarization quadrupole (CLASS full form)
 # "nonIBP": Non-IBP Doppler (source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l')
-_DEFAULT_TT_MODE = "T0"  # IBP form — baseline for all A/B comparisons
+_DEFAULT_TT_MODE = "T0+T1+T2"  # CLASS full form (harmonic.c:962)
 
 
 def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
@@ -267,7 +272,7 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     tau_0 = float(bg.conformal_age)
     chi_grid = tau_0 - tau_grid
     dtau = jnp.diff(tau_grid)
-    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
 
     l_fl = float(l)
     # Extra kwargs for non-IBP mode
@@ -301,7 +306,7 @@ def _get_transfer_ee(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     tau_0 = float(bg.conformal_age)
     chi_grid = tau_0 - tau_grid
     dtau = jnp.diff(tau_grid)
-    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
 
     l_fl = float(l)
     if l_fl > l_switch + 2 * delta_l:
@@ -321,7 +326,7 @@ def _get_transfer_ee(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
 
 def compute_cl_tt(
     pt, params, bg, l_values,
-    k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    k_interp_factor=1, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
     """Compute unlensed C_l^TT. Uses Limber for l > l_switch.
@@ -338,7 +343,7 @@ def compute_cl_tt(
 
 def compute_cl_ee(
     pt, params, bg, l_values,
-    k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    k_interp_factor=1, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
 ):
     """Compute unlensed C_l^EE. Uses Limber for l > l_switch."""
     cls = []
@@ -351,7 +356,7 @@ def compute_cl_ee(
 
 def compute_cl_te(
     pt, params, bg, l_values,
-    k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    k_interp_factor=1, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
     """Compute unlensed C_l^TE. Uses Limber for l > l_switch."""
@@ -360,6 +365,121 @@ def compute_cl_te(
         T_l = _get_transfer_tt(pt, bg, l, l_switch, delta_l, tt_mode=tt_mode)
         E_l = _get_transfer_ee(pt, bg, l, l_switch, delta_l)
         cl = _cl_k_integral_cross(T_l, E_l, pt.k_grid, params, k_interp_factor)
+        cls.append(cl)
+    return jnp.array(cls)
+
+
+# ---------------------------------------------------------------------------
+# Source-interpolated C_l (robust against oscillatory T_l(k))
+# ---------------------------------------------------------------------------
+
+def _interp_sources_to_fine_k(sources_list, log_k_coarse, log_k_fine):
+    """Interpolate source functions S(k,τ) from coarse to fine k-grid.
+
+    Source functions vary slowly in k (BAO scale ~0.02 Mpc⁻¹), so
+    CubicSpline interpolation in log(k) is well-conditioned.
+
+    Args:
+        sources_list: list of [n_k, n_tau] source arrays
+        log_k_coarse: log(k) values of the perturbation k-grid
+        log_k_fine: log(k) values of the fine output grid
+
+    Returns:
+        list of [n_k_fine, n_tau] interpolated source arrays
+    """
+    result = []
+    for src in sources_list:
+        # Interpolate each tau column independently
+        # Build splines along k-axis for each tau point
+        def interp_one_tau(itau):
+            return CubicSpline(log_k_coarse, src[:, itau]).evaluate(log_k_fine)
+        src_fine = jax.vmap(interp_one_tau)(jnp.arange(src.shape[1]))  # [n_tau, n_k_fine]
+        result.append(src_fine.T)  # [n_k_fine, n_tau]
+    return result
+
+
+def compute_cl_tt_interp(
+    pt, params, bg, l_values,
+    n_k_fine=3000,
+    l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    tt_mode=None,
+):
+    """Compute C_l^TT with source interpolation to a fine k-grid.
+
+    This is the robust version that handles the oscillatory T_l(k) by:
+    1. Interpolating smooth source functions S(k,τ) to a fine k-grid
+    2. Computing T_l(k_fine) = ∫ S(k_fine,τ) × j_l(k_fine×χ) dτ exactly
+    3. Integrating C_l = 4π ∫ P_R |T_l|² dlnk on the fine grid
+
+    The fine k-grid resolves the Bessel oscillation period (π/χ_star),
+    ensuring the C_l integral converges independent of the perturbation
+    k-grid density.
+
+    Args:
+        n_k_fine: number of fine k-points (default 3000, ~660 k/decade)
+    """
+    if tt_mode is None:
+        tt_mode = _DEFAULT_TT_MODE
+
+    # Fine k-grid
+    log_k_coarse = jnp.log(pt.k_grid)
+    log_k_fine = jnp.linspace(log_k_coarse[0], log_k_coarse[-1], n_k_fine)
+    k_fine = jnp.exp(log_k_fine)
+
+    # Interpolate sources to fine grid
+    sources_to_interp = [pt.source_T0]
+    include_T1 = "T1" in tt_mode and pt.source_T1 is not None
+    include_T2 = "T2" in tt_mode and pt.source_T2 is not None
+    if include_T1:
+        sources_to_interp.append(pt.source_T1)
+    if include_T2:
+        sources_to_interp.append(pt.source_T2)
+
+    fine_sources = _interp_sources_to_fine_k(sources_to_interp, log_k_coarse, log_k_fine)
+    source_T0_fine = fine_sources[0]
+    source_T1_fine = fine_sources[1] if include_T1 else None
+    source_T2_fine = fine_sources[1 + int(include_T1)] if include_T2 else None
+
+    # Setup tau-grid quantities
+    tau_0 = float(bg.conformal_age)
+    chi_grid = tau_0 - pt.tau_grid
+    dtau = jnp.diff(pt.tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
+
+    # Compute T_l(k_fine) and C_l for each l
+    cls = []
+    for l in l_values:
+        T_l_fine = _exact_transfer_tt(
+            source_T0_fine, pt.tau_grid, k_fine, chi_grid, dtau_mid, l,
+            source_T1=source_T1_fine, source_T2=source_T2_fine,
+            mode=tt_mode)
+        cl = _cl_k_integral(T_l_fine, k_fine, params, k_interp_factor=1)
+        cls.append(cl)
+    return jnp.array(cls)
+
+
+def compute_cl_ee_interp(
+    pt, params, bg, l_values,
+    n_k_fine=3000,
+    l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+):
+    """Compute C_l^EE with source interpolation to a fine k-grid."""
+    log_k_coarse = jnp.log(pt.k_grid)
+    log_k_fine = jnp.linspace(log_k_coarse[0], log_k_coarse[-1], n_k_fine)
+    k_fine = jnp.exp(log_k_fine)
+
+    fine_sources = _interp_sources_to_fine_k([pt.source_E], log_k_coarse, log_k_fine)
+    source_E_fine = fine_sources[0]
+
+    tau_0 = float(bg.conformal_age)
+    chi_grid = tau_0 - pt.tau_grid
+    dtau = jnp.diff(pt.tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
+
+    cls = []
+    for l in l_values:
+        E_l_fine = _exact_transfer_ee(source_E_fine, pt.tau_grid, k_fine, chi_grid, dtau_mid, l)
+        cl = _cl_k_integral(E_l_fine, k_fine, params, k_interp_factor=1)
         cls.append(cl)
     return jnp.array(cls)
 
@@ -383,7 +503,7 @@ def sparse_l_grid(l_max=2500):
 
 def compute_cls_all(
     pt, params, bg, l_max=2500,
-    k_interp_factor=3, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    k_interp_factor=1, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
     """Compute all unlensed C_l spectra at l=2..l_max.
@@ -432,7 +552,7 @@ def compute_cl_bb(tpt, params, bg, l_values):
     chi_grid = tau_0 - tau_grid
 
     dtau = jnp.diff(tau_grid)
-    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
     log_k = jnp.log(k_grid)
 
     def compute_cl_single_l(l):
