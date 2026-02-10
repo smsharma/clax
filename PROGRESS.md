@@ -16,18 +16,24 @@ interpolation to a fine k-grid, **C_l^EE is sub-percent at l=12-150** and
 
 ## Science-grade accuracy (Planck 2018 LCDM, V100 GPU)
 
-Source-interpolated C_l (60 k/decade -> 3000 fine k, l_max=50):
+planck_cl preset: k_max=1.0, 60 k/decade (300 modes), l_max=50, 5000 tau,
+source-interpolated to 3000 fine k-points:
 
 | l | C_l^TT error | C_l^EE error |
 |---|-------------|-------------|
-| 12 | -5.2% | **-0.15%** |
-| 20 | **-0.29%** | **-0.27%** |
+| 20 | **-0.28%** | **-0.27%** |
 | 30 | +1.52% | **-0.27%** |
-| 50 | +1.66% | **-0.23%** |
-| 100 | **+0.73%** | **-0.11%** |
-| 150 | **-0.21%** | **-0.19%** |
+| 50 | +1.63% | **-0.23%** |
+| 100 | **+0.57%** | **-0.17%** |
+| 150 | **-0.12%** | **-0.17%** |
+| 200 | **+0.10%** | **-0.28%** |
+| 300 | **-0.84%** | **-0.10%** |
+| 500 | -1.45% | **-0.25%** |
+| 700 | -2.65% | **-0.96%** |
+| 1000 | -9.05% | **-0.89%** |
 
-Convergence verified: k/dec = 60, 120, 200 all agree to 0.01%.
+Source interpolation convergence verified: k/dec = 60, 120, 200 agree to 0.01%.
+Bessel functions accurate to machine precision at l=2500.
 
 ### Pipeline accuracy
 

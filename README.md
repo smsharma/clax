@@ -14,20 +14,24 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 
 All comparisons at Planck 2018 best-fit LCDM. GPU: V100-32GB.
 
-### C_l angular power spectra (science-grade)
+### C_l angular power spectra (Planck-quality)
 
-Perturbation solve at 60 k/decade (272 modes), l_max=50, source-interpolated to 3000 fine k-points. Convergence verified across k-densities (60, 120, 200 k/decade all agree to 0.01%).
+`planck_cl` preset: k_max=1.0, 60 k/decade (300 modes), l_max=50, source-interpolated to 3000 fine k-points. Convergence verified across k-densities. V100 GPU.
 
 | Multipole l | C_l^TT error | C_l^EE error |
 |-------------|-------------|-------------|
-| 12          | -5.2%       | **-0.15%**  |
-| 20          | **-0.29%**  | **-0.27%**  |
+| 20          | **-0.28%**  | **-0.27%**  |
 | 30          | +1.52%      | **-0.27%**  |
-| 50          | +1.66%      | **-0.23%**  |
-| 100         | **+0.73%**  | **-0.11%**  |
-| 150         | **-0.21%**  | **-0.19%**  |
+| 50          | +1.63%      | **-0.23%**  |
+| 100         | **+0.57%**  | **-0.17%**  |
+| 150         | **-0.12%**  | **-0.17%**  |
+| 200         | **+0.10%**  | **-0.28%**  |
+| 300         | **-0.84%**  | **-0.10%**  |
+| 500         | -1.45%      | **-0.25%**  |
+| 700         | -2.65%      | **-0.96%**  |
+| 1000        | -9.05%      | **-0.89%**  |
 
-Bold = sub-percent. TT l=12 is the Sachs-Wolfe plateau where gauge-dependent effects dominate. EE is sub-percent across the full tested range.
+Bold = sub-percent. EE is sub-percent from l=20 to l=1000. TT is sub-percent at l=20, 100-300 and 1-3% at l=30-700. High-l TT degradation (l>700) from hierarchy truncation effects.
 
 ### Matter power spectrum P(k)
 
