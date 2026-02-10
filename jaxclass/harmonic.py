@@ -484,6 +484,52 @@ def compute_cl_ee_interp(
     return jnp.array(cls)
 
 
+def compute_cl_te_interp(
+    pt, params, bg, l_values,
+    n_k_fine=3000,
+    l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
+    tt_mode=None,
+):
+    """Compute C_l^TE with source interpolation to a fine k-grid."""
+    if tt_mode is None:
+        tt_mode = _DEFAULT_TT_MODE
+
+    log_k_coarse = jnp.log(pt.k_grid)
+    log_k_fine = jnp.linspace(log_k_coarse[0], log_k_coarse[-1], n_k_fine)
+    k_fine = jnp.exp(log_k_fine)
+
+    # Interpolate all needed sources
+    sources_to_interp = [pt.source_T0, pt.source_E]
+    include_T1 = "T1" in tt_mode and pt.source_T1 is not None
+    include_T2 = "T2" in tt_mode and pt.source_T2 is not None
+    if include_T1:
+        sources_to_interp.append(pt.source_T1)
+    if include_T2:
+        sources_to_interp.append(pt.source_T2)
+
+    fine_sources = _interp_sources_to_fine_k(sources_to_interp, log_k_coarse, log_k_fine)
+    source_T0_fine = fine_sources[0]
+    source_E_fine = fine_sources[1]
+    source_T1_fine = fine_sources[2] if include_T1 else None
+    source_T2_fine = fine_sources[2 + int(include_T1)] if include_T2 else None
+
+    tau_0 = float(bg.conformal_age)
+    chi_grid = tau_0 - pt.tau_grid
+    dtau = jnp.diff(pt.tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
+
+    cls = []
+    for l in l_values:
+        T_l_fine = _exact_transfer_tt(
+            source_T0_fine, pt.tau_grid, k_fine, chi_grid, dtau_mid, l,
+            source_T1=source_T1_fine, source_T2=source_T2_fine,
+            mode=tt_mode)
+        E_l_fine = _exact_transfer_ee(source_E_fine, pt.tau_grid, k_fine, chi_grid, dtau_mid, l)
+        cl = _cl_k_integral_cross(T_l_fine, E_l_fine, k_fine, params, k_interp_factor=1)
+        cls.append(cl)
+    return jnp.array(cls)
+
+
 # ---------------------------------------------------------------------------
 # Sparse l-sampling + full spectrum API
 # ---------------------------------------------------------------------------
@@ -524,6 +570,43 @@ def compute_cls_all(
     cl_te_sparse = compute_cl_te(pt, params, bg, l_sparse.tolist(),
                                  k_interp_factor, l_switch, delta_l,
                                  tt_mode=tt_mode)
+
+    l_dense = jnp.arange(2, l_max + 1, dtype=jnp.float64)
+    l_sp = jnp.array(l_sparse.astype(float))
+
+    cl_tt_dense = CubicSpline(l_sp, cl_tt_sparse).evaluate(l_dense)
+    cl_ee_dense = CubicSpline(l_sp, cl_ee_sparse).evaluate(l_dense)
+    cl_te_dense = CubicSpline(l_sp, cl_te_sparse).evaluate(l_dense)
+
+    ell = jnp.arange(l_max + 1, dtype=jnp.float64)
+    tt = jnp.concatenate([jnp.zeros(2), cl_tt_dense])
+    ee = jnp.concatenate([jnp.zeros(2), cl_ee_dense])
+    te = jnp.concatenate([jnp.zeros(2), cl_te_dense])
+
+    return {'ell': ell, 'tt': tt, 'ee': ee, 'te': te}
+
+
+def compute_cls_all_interp(
+    pt, params, bg, l_max=2500,
+    n_k_fine=3000, tt_mode=None,
+):
+    """Compute all unlensed C_l spectra at l=2..l_max with source interpolation.
+
+    The robust version: interpolates source functions to a fine k-grid
+    before computing transfer functions. Convergent regardless of the
+    perturbation k-density. Use this for science-quality results.
+
+    Returns:
+        dict with 'ell', 'tt', 'ee', 'te' (arrays of length l_max+1)
+    """
+    l_sparse = sparse_l_grid(l_max)
+
+    cl_tt_sparse = compute_cl_tt_interp(pt, params, bg, l_sparse.tolist(),
+                                         n_k_fine=n_k_fine, tt_mode=tt_mode)
+    cl_ee_sparse = compute_cl_ee_interp(pt, params, bg, l_sparse.tolist(),
+                                         n_k_fine=n_k_fine)
+    cl_te_sparse = compute_cl_te_interp(pt, params, bg, l_sparse.tolist(),
+                                         n_k_fine=n_k_fine, tt_mode=tt_mode)
 
     l_dense = jnp.arange(2, l_max + 1, dtype=jnp.float64)
     l_sp = jnp.array(l_sparse.astype(float))
