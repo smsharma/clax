@@ -489,6 +489,43 @@ def _perturbation_rhs(tau, y, args):
     F_lmax_prime = jnp.where(is_tca > 0.5, F_lmax_prime_tca, F_lmax_prime_full)
     dy = dy.at[idx['F_g_start'] + l_max_g].set(F_lmax_prime)
 
+    # === RSA (Radiation Streaming Approximation) ===
+    # After recombination, photons free-stream and hierarchy moments cascade
+    # to high l. Truncation at l_max causes ringing that contaminates the
+    # metric via Einstein equations. RSA damps the hierarchy toward algebraic
+    # targets computed from the metric, preventing this contamination.
+    #
+    # cf. CLASS perturbations.c:6235-6243, 10408-10449
+    # Condition: tau*k > 45 AND kappa_dot/(a'/a) < 5
+    # Targets (synchronous gauge):
+    #   delta_g_rsa = 4/k² * (aH*h' - k²*eta)
+    #   theta_g_rsa = -h'/2  →  F_1_rsa = -2*h'/(3*k)
+    #   F_l_rsa = 0 for l >= 2
+    #
+    # Implementation: add relaxation term  rsa_crit * (target - F_l) * k
+    # This damps toward RSA on a timescale ~1/k (conformal Hubble time for
+    # the mode), which is fast enough to prevent ringing but slow enough for
+    # the ODE solver to handle.
+    tau_k = tau * k
+    kd_over_aH = kappa_dot / jnp.maximum(a_prime_over_a, 1e-30)
+    rsa_crit = jax.nn.sigmoid(0.5 * (tau_k - 45.0)) * jax.nn.sigmoid(2.0 * (5.0 - kd_over_aH))
+
+    # RSA targets
+    delta_g_rsa = 4.0 / k2 * (a_prime_over_a * h_prime - k2 * eta)
+    F_g_1_rsa = -2.0 * h_prime / (3.0 * k)
+
+    # Damping rate: k is the natural rate for free-streaming modes
+    rsa_rate = rsa_crit * k
+
+    # Apply RSA relaxation to monopole and dipole
+    dy = dy.at[idx['F_g_0']].add(rsa_rate * (delta_g_rsa - F_g[0]))
+    dy = dy.at[idx['F_g_1']].add(rsa_rate * (F_g_1_rsa - F_g[1]))
+
+    # Apply RSA damping to l >= 2 (target = 0)
+    def rsa_damp_step(l, dy_acc):
+        return dy_acc.at[idx['F_g_start'] + l].add(-rsa_rate * F_g[l])
+    dy = jax.lax.fori_loop(2, l_max_g + 1, rsa_damp_step, dy)
+
     # === POLARIZATION HIERARCHY ===
     # During TCA, all polarization is zero (scattering damps it instantly).
     # Drive polarization to zero: G'_l = -G_l / tau_c
@@ -527,6 +564,23 @@ def _perturbation_rhs(tau, y, args):
 
     F_ur_lmax_prime = k*F_ur[l_max_ur-1] - (l_max_ur+1.0)/tau0_minus_tau*F_ur[l_max_ur]
     dy = dy.at[idx['F_ur_start'] + l_max_ur].set(F_ur_lmax_prime)
+
+    # RSA damping for massless neutrinos (same physics as photons, no scattering)
+    # Targets: delta_ur_rsa = delta_g_rsa (same for all relativistic species)
+    #          F_ur_1_rsa = F_g_1_rsa = -2h'/(3k)
+    #          F_ur_l = 0 for l >= 2
+    delta_ur_rsa = delta_g_rsa
+    F_ur_1_rsa = F_g_1_rsa
+    dy = dy.at[idx['F_ur_0']].add(rsa_rate * (delta_ur_rsa - F_ur[0]))
+    dy = dy.at[idx['F_ur_1']].add(rsa_rate * (F_ur_1_rsa - F_ur[1]))
+    def rsa_damp_ur_step(l, dy_acc):
+        return dy_acc.at[idx['F_ur_start'] + l].add(-rsa_rate * F_ur[l])
+    dy = jax.lax.fori_loop(2, l_max_ur + 1, rsa_damp_ur_step, dy)
+
+    # RSA damping for polarization (target = 0 for all moments)
+    def rsa_damp_pol_step(l, dy_acc):
+        return dy_acc.at[idx['G_g_start'] + l].add(-rsa_rate * G_g[l])
+    dy = jax.lax.fori_loop(0, l_max_pol + 1, rsa_damp_pol_step, dy)
 
     # === SET METRIC DERIVATIVES ===
     dy = dy.at[idx['eta']].set(eta_prime)

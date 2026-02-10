@@ -8,7 +8,7 @@ The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_
 
 ## Status
 
-**v0.3** -- Sub-percent C_l^EE at l=12-150 and C_l^TT at l=20, 100, 150 (1-2% at l=30-50). P(k) at 1-4%. Visibility function g(tau) at 0.04%. 100 tests passing. See [PROGRESS.md](PROGRESS.md) for full details.
+**v0.4** -- Sub-percent C_l^EE at l=20-1000, sub-percent C_l^TT at l=20, 100-300. Bessel functions accurate to machine precision at l=2500. Source-interpolated C_l for robust convergence. RSA hierarchy damping for post-recombination photon evolution. 100 tests passing. See [PROGRESS.md](PROGRESS.md) for full details.
 
 ## Accuracy comparison against CLASS v3.3.4
 
@@ -176,9 +176,9 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 
 ## Known limitations
 
-- **TT at l=30-50**: ~1.5% residual error, converged across k-densities (physics-limited). Most likely from missing radiation streaming approximation (RSA) for post-recombination photon evolution. Implementing RSA would likely bring this to sub-percent.
-- **TT Sachs-Wolfe plateau (l < 15)**: ~5% error from gauge-dependent source terms at super-horizon scales. Requires RSA + careful gauge-invariant source construction.
-- **High l (l > 200)**: Accuracy degrades; needs l_max > 50 or RSA to extend the hierarchy analytically.
+- **TT at l=30-50, 500-700**: 1-3% residual error, converged across k-densities (physics-limited). RSA hierarchy damping is implemented but has minimal impact — the residual is likely from a subtle source function normalization issue in the T1/T2 transfer contributions.
+- **TT at l>700**: Degrades to 3-9% at l=700-1000, worse at l>1500. Hierarchy truncation at l_max=50 contaminates the metric via Einstein equations at late times. A proper CLASS-style RSA (hard switch replacing hierarchy with algebraic expressions) would fix this but requires non-smooth switching incompatible with current differentiable architecture.
+- **TT Sachs-Wolfe plateau (l < 15)**: ~5% error from gauge-dependent source terms at super-horizon scales.
 - **Massive neutrinos**: Approximated as massless in perturbation equations (background is correct). Full ncdm perturbation variables (Psi_l(q)) not yet implemented (~0.3% C_l effect at m=0.06 eV).
 - **Single cosmology validated**: Sub-percent results demonstrated at Planck 2018 fiducial only. Multi-cosmology validation is straightforward but pending.
 

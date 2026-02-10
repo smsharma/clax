@@ -1,15 +1,17 @@
 # jaxCLASS Development Progress
 
-## Status: Sub-percent C_l — EE 0.1-0.3% at l=12-150, TT 0.2-1.7% at l=20-150
+## Status: Sub-percent C_l — EE 0.1-1.0% at l=20-1000, TT 0.1-0.8% at l=20, 100-300
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
 
-The perturbation ODE matches CLASS to **0.02%** (gauge-invariant quantities at
-recombination). Visibility function g(tau) matches to **0.04%**. With source
-interpolation to a fine k-grid, **C_l^EE is sub-percent at l=12-150** and
-**C_l^TT is sub-percent at l=20, 100, 150** (1-2% at l=30, 50).
+With `planck_cl` preset (k_max=1.0, 300 modes) + source interpolation:
+- **C_l^EE sub-percent from l=20 to l=1000** (0.10-0.97%)
+- **C_l^TT sub-percent at l=20, 100-300** (0.10-0.84%)
+- TT 1-3% at l=30-700, degrades at l>700 from hierarchy truncation
 
+Bessel functions accurate to machine precision at l=2500.
+RSA damping in ODE for post-recombination hierarchy.
 100 tests passing, ~10K lines of code.
 
 ---
@@ -49,6 +51,30 @@ Bessel functions accurate to machine precision at l=2500.
 ---
 
 ## Changelog
+
+### Feb 10, 2026: High-l Bessel fix + RSA damping + Planck preset
+
+**Bessel function rewrite.** Replaced soft sigmoid blending with hard switch
+at x=l between backward (x<l) and upward (x>=l) recurrences. Both now use
+jax.lax.fori_loop for O(1) compilation. Verified accurate to machine precision
+at l=2500 against scipy.
+
+**RSA hierarchy damping in ODE.** After recombination (tau*k>45, kappa'/aH<5),
+photon and neutrino hierarchy moments are damped toward RSA algebraic targets:
+  delta_g_rsa = 4/k² * (aH*h' - k²*eta)
+  F_1_rsa = -2h'/(3k)
+  F_l = 0 for l >= 2
+Damping rate = rsa_crit * k (relaxation on timescale ~1/k).
+Note: this had minimal impact on C_l accuracy — the dominant TT high-l error
+is likely from source function normalization, not hierarchy contamination.
+
+**planck_cl preset.** k_max=1.0, 60 k/decade, l_max=50, 5000 tau points.
+With source interpolation, covers l=2-2500.
+
+**compute_cls_all_interp.** Full-spectrum API using source-interpolated
+TT+EE+TE at sparse l-values + spline to l=2..l_max.
+
+**compute_cl_te_interp.** Source-interpolated TE cross-spectrum.
 
 ### Feb 9, 2026: Source Interpolation (sub-percent C_l)
 
@@ -115,32 +141,30 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 **Accuracy bottlenecks (ordered by impact):**
 
-1. **TT l=30-50 at ~1.5%**: Converged across k-densities — physics-limited,
-   not numerical. Most likely cause: missing RSA (radiation streaming approx)
-   for post-recombination photon free-streaming. Without RSA, photon hierarchy
-   moments drift at late times, contaminating the ISW source. Could also be a
-   subtle normalization issue in the T1/T2 radial functions (a term-by-term
-   comparison against CLASS transfer.c at a single (l,k) would catch this).
-   **Feasibility: doable with RSA implementation (1-2 sessions). Expected
-   improvement: 0.5-1pp, potentially bringing l=30-50 to sub-percent.**
+1. **TT l=30-50 at ~1.5%**: Converged across k-densities. RSA hierarchy
+   damping was implemented and tested — had minimal impact (0.01pp). The
+   residual is likely a normalization issue in the T1/T2 radial functions
+   or a missing term in the source function assembly. A term-by-term
+   comparison of T_l(k) at a single (l,k) against CLASS transfer.c would
+   identify the exact source. **Effort: moderate (careful debugging session).**
 
-2. **SW plateau (l<15)**: ~5% from gauge-dependent metric source at
-   super-horizon scales + ISW integral over the matter-to-dark-energy
-   transition. Hardest to fix — requires RSA + careful gauge-invariant
-   source construction. **Feasibility: requires RSA; moderate effort.**
+2. **TT l>700**: Degrades to 3-9% at l=700-1000, worse at l>1500. Source
+   interpolation and Bessel functions are confirmed accurate. The error
+   correlates with high-k modes where the perturbation hierarchy truncation
+   (l_max=50) affects the metric via Einstein equations. A CLASS-style hard
+   RSA switch (replacing hierarchy with algebraic expressions) would fix
+   this but is incompatible with smooth differentiability. A possible
+   approach: implement RSA as a `jax.lax.cond` branch per k-mode.
+   **Effort: substantial (1-2 sessions).**
 
-3. **ncdm as massless in perturbations**: Background is correct, but
-   perturbation equations approximate m_ncdm=0.06eV neutrinos as massless.
-   ~0.3% C_l effect. Implementing full Psi_l(q) adds ~270 ODE variables per
-   k-mode (15 q-bins x 18 multipoles). **Feasibility: doable, ~1 session.
-   Expensive in compute (ODE state vector grows 2x).**
+3. **SW plateau (l<15)**: ~5% error from gauge-dependent source at
+   super-horizon scales. **Effort: moderate.**
 
-4. **High l (l>200)**: Needs l_max > 50 or RSA. Without RSA, the hierarchy
-   truncation corrupts the source at high k*tau. **Feasibility: requires RSA.**
+4. **ncdm as massless in perturbations**: ~0.3% C_l effect at m=0.06eV.
+   **Effort: moderate (1 session, 2x compute cost).**
 
-5. **Single cosmology validated**: Only Planck 2018 fiducial LCDM tested.
-   **Feasibility: trivial — just GPU time. Reference data generation script
-   already supports multiple cosmologies. A few hours.**
+5. **Single cosmology validated**: Only Planck 2018 fiducial tested.
+   **Effort: trivial (GPU time only).**
 
 **Next steps (ordered by effort/impact):**
 
