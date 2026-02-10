@@ -385,15 +385,13 @@ def _perturbation_rhs(tau, y, args):
 
     # === EINSTEIN EQUATIONS (constraint approach, matching CLASS) ===
     # cf. CLASS perturbations.c:6611-6644
+    # Uses raw hierarchy values (no RSA in ODE RHS — RSA is applied only
+    # during source function extraction to keep the ODE self-consistent).
 
     # Total density perturbation δρ = Σ ρ_i δ_i
-    # ncdm perturbations are approximated using ur variables (δ_ncdm ≈ δ_ur, θ_ncdm ≈ θ_ur)
-    # but with correct background equation of state from p_ncdm(a).
     delta_rho = rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm + rho_ur * delta_ur + rho_ncdm * delta_ur
 
     # Total (ρ+p)θ
-    # ncdm approximated as massless: ρ_ncdm + p_ncdm ≈ 4/3 ρ_ncdm, θ_ncdm ≈ θ_ur
-    # TODO: use actual p_ncdm(a) once ncdm perturbation variables are implemented
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur + 4.0/3.0 * rho_ncdm * theta_ur)
 
@@ -594,12 +592,13 @@ def _extract_sources(y, k, tau, bg, th, idx):
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
 
-    # --- Einstein constraints ---
+    # --- Einstein constraints (no RSA — use raw hierarchy values) ---
+    theta_g = 3.0 * k * F_g_1 / 4.0
+    theta_ur = 3.0 * k * F_ur_1 / 4.0
+
     delta_rho = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * F_ur_0 + rho_ncdm * F_ur_0)
 
-    theta_g = 3.0 * k * F_g_1 / 4.0
-    theta_ur = 3.0 * k * F_ur_1 / 4.0
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur
                         + 4.0/3.0 * rho_ncdm * theta_ur)
