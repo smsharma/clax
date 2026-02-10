@@ -168,10 +168,16 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 **Next steps (ordered by effort/impact):**
 
-- [ ] TE spectrum with source interpolation (trivial, 30 min)
+- [x] TE spectrum with source interpolation (done: compute_cl_te_interp)
+- [x] RSA hierarchy damping in ODE (done: implemented, tested, minimal impact)
+- [ ] Term-by-term T1/T2 radial function check vs CLASS transfer.c — **highest
+      priority for TT accuracy.** Compare our radial_T2 = 0.5*(3*j_l'' + j_l)
+      against CLASS transfer.c:4168-4200. Check source_T1 normalization (our
+      source_T1 has a factor of k — does CLASS's?). (hours, biggest impact)
+- [ ] Hard RSA switch for high-l TT — replace hierarchy with algebraic
+      expressions (not just damp). Use jax.lax.cond per timestep. Would fix
+      TT l>700. (1-2 sessions, substantial)
 - [ ] Multi-cosmology validation at 5+ parameter points (GPU time only)
-- [ ] Term-by-term T1/T2 radial function check vs CLASS transfer.c (hours)
-- [ ] RSA for post-recombination photon evolution (1-2 sessions, biggest impact)
 - [ ] Full ncdm perturbation variables Psi_l(q) (~1 session)
 - [ ] Gradient tests for C_l: d(C_l)/d(params)
 
@@ -187,6 +193,13 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 - **Intermediate k-density (30-120 k/decade)**: Non-monotonic convergence for
   raw trapezoidal C_l integration. Either use very dense (200+) or source
   interpolation.
+- **RSA as smooth damping in ODE constraints**: Blending RSA values into the
+  Einstein equations while keeping the full hierarchy running creates
+  inconsistency (metric uses blended values, hierarchy uses raw values).
+  Also: first attempt had wrong theta_g_rsa formula (extra factor of k).
+  RSA damping in the hierarchy evolution (relaxation toward targets) is
+  self-consistent but had <0.1pp impact — the TT high-l error is NOT from
+  hierarchy ringing. The remaining error is elsewhere (likely T1/T2 normalization).
 
 ---
 
