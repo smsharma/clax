@@ -5,6 +5,36 @@
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
 
+### Autonomous agent work (Feb 10-11, 2026 — Bridges-2 GPU loop)
+
+Agent running via `scripts/gpu_claude_loop.sh` (Carlini-style while-true loop).
+5 sessions completed so far.
+
+#### Changes made by agent (session 1, Feb 10-11):
+1. **Analytic g' (visibility derivative)**: Replaced spline derivative of g(τ) with
+   pre-computed analytic `g' = (κ'' + κ'²) e^{-κ}` matching CLASS thermodynamics.c:3482.
+   Added `g_prime_of_loga` spline to ThermoResult.
+2. **RSA in source functions**: Implemented CLASS-style RSA substitution in source
+   extraction (perturbations.c:7553-7567). After recombination (k*τ > 45, κ'/aH < 5):
+   - `delta_g` → analytic RSA expression from metric
+   - `Pi` → 0 (photon anisotropic stress vanishes)
+   Applied to SW, T2 quadrupole, and E-polarization sources via `jnp.where`.
+3. **Fixed a''/a formula**: Was missing factor of 2 (CLASS perturbations.c:10032).
+4. **Proper dtau_c/tau_c**: Now computed from dκ̇/dloga spline derivative instead
+   of the approximation `2aH`.
+5. **Second-order compromise_CLASS TCA corrections**: Implemented the full
+   compromise_CLASS TCA scheme (perturbations.c:10303-10316) with second-order
+   slip and shear corrections. Previously only had first-order.
+
+#### Session 5 (in progress):
+- Further perturbations.py edits (90 lines changed), running GPU diagnostics.
+- Accuracy impact not yet measured (waiting for diagnostic results).
+
+#### Issues encountered:
+- API 529 overload errors overnight caused sessions 2-4 to crash immediately.
+- BashTool pre-flight check warnings (benign, resolved with CI=true).
+- Agent not updating PROGRESS.md (fixed in prompt).
+
 With `planck_cl` preset (k_max=1.0, 300 modes) + source interpolation:
 - **C_l^EE sub-percent from l=20 to l=1000** (0.10-0.97%)
 - **C_l^TT sub-percent at l=20, 100-300** (0.10-0.84%)

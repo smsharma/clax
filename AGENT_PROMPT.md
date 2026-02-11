@@ -59,4 +59,13 @@ python scripts/gpu_science_cl_test.py  # science_cl preset
 Or write a quick diagnostic script. JAX+CUDA are set up.
 
 Focus on making concrete, measurable progress. Even 0.5% improvement at any l
-is valuable. Document everything in PROGRESS.md so the next session has context.
+is valuable.
+
+## CRITICAL: Update PROGRESS.md EVERY session
+
+Before you finish, you MUST update PROGRESS.md with:
+- What you investigated and what you found
+- What changes you made and why
+- Accuracy results (before/after if possible)
+- Failed approaches (so the next session doesn't re-try them)
+This is how the next session knows what happened. Without it, work gets repeated.

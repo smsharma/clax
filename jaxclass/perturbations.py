@@ -272,28 +272,39 @@ def _compute_tca_criterion(kappa_dot, a_prime_over_a, k):
 def _compute_theta_b_prime_blended(
     theta_b, delta_b, theta_g, delta_g, F_g_2, G_g_0, G_g_2,
     a_prime_over_a, cs2, k, k2, kappa_dot,
-    rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+    rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime, is_tca, tau_c,
+    alpha_prime=None,
 ):
     """Compute theta_b' with proper TCA/full blending, matching the ODE RHS.
 
+    Uses the compromise_CLASS TCA scheme (CLASS default) with second-order
+    corrections to both the photon-baryon slip and the photon shear.
+    cf. CLASS perturbations.c:9100-9103 (TCA), 10303-10316 (compromise_CLASS)
+
     This must be called from both _perturbation_rhs and _extract_sources
     to ensure the Doppler IBP source uses the same theta_b' as the evolution.
-
-    cf. CLASS perturbations.c:9100-9103 (TCA), Ma & Bertschinger eq. 31 (full)
     """
     R = 4.0 * rho_g / (3.0 * rho_b)
     metric_continuity = h_prime / 2.0
     metric_shear = (h_prime + 6.0 * eta_prime) / 2.0
 
-    # --- TCA theta_b' ---
+    # --- First-order TCA quantities ---
     # Shear: cf. CLASS perturbations.c:10193
     tca_shear_g = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
 
-    # Slip: cf. CLASS perturbations.c:10168 (first_order_CLASS)
+    # Slip: cf. CLASS perturbations.c:10157 (compromise_CLASS first-order part)
     F_tca = tau_c / (1.0 + R)
-    dtau_c_over_tau_c = 2.0 * a_prime_over_a
     dH_dloga = bg.H_of_loga.derivative(loga)
-    a_primeprime_over_a = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
+    # a''/a = 2(aH)^2 + a*H'_tau  (cf. CLASS perturbations.c:10032)
+    a_primeprime_over_a = a_prime_over_a * (2.0 * a_prime_over_a + a * dH_dloga)
+
+    # dtau_c = d(tau_c)/d(tau) = -ddkappa*tau_c^2 (cf. CLASS perturbations.c:10074)
+    # ddkappa = d(kappa_dot)/d(tau) = d(kappa_dot)/d(loga) * aH
+    dkd_dloga = th.kappa_dot_of_loga.derivative(loga)
+    ddkappa = dkd_dloga * a_prime_over_a
+    dtau_c = -ddkappa * tau_c * tau_c
+    dtau_c_over_tau_c = dtau_c / jnp.maximum(tau_c, 1e-30)
+
     tca_slip = (dtau_c_over_tau_c - 2.0 * a_prime_over_a / (1.0 + R)) * (theta_b - theta_g) \
         + F_tca * (
             -a_primeprime_over_a * theta_b
@@ -304,6 +315,38 @@ def _compute_theta_b_prime_blended(
             )
         )
 
+    # --- Second-order corrections (compromise_CLASS) ---
+    # cf. CLASS perturbations.c:10303-10316
+    # Zero-order theta' = (-aH*theta_b + k^2*(cb2*delta_b + R/4*delta_g))/(1+R)
+    # cf. CLASS perturbations.c:10137
+    theta_prime_0 = (-a_prime_over_a * theta_b + k2 * (cs2 * delta_b + R / 4.0 * delta_g)) / (1.0 + R)
+
+    # metric_shear_prime = k^2 * alpha_prime (cf. CLASS perturbations.c:10117)
+    # If alpha_prime not provided, approximate as 0 during early TCA
+    metric_shear_prime = k2 * alpha_prime if alpha_prime is not None else 0.0
+
+    # F_prime = dtau_c/(1+R) + tau_c*aH*R/(1+R)^2 (cf. CLASS perturbations.c:10077)
+    F_prime = dtau_c / (1.0 + R) + tau_c * a_prime_over_a * R / (1.0 + R)**2
+
+    # shear_g_prime at first order (cf. CLASS perturbations.c:10203)
+    shear_g_prime = 16.0/45.0 * (tau_c * (theta_prime_0 + metric_shear_prime)
+                                  + dtau_c * (theta_g + metric_shear))
+
+    # Second-order slip correction (cf. CLASS perturbations.c:10307)
+    # slip = (1-2*aH*F)*slip + F*k^2*(2*aH*shear_g + shear_g' - (1/3-cb2)*(F*theta'+2*F'*theta_b))
+    tca_slip = ((1.0 - 2.0 * a_prime_over_a * F_tca) * tca_slip
+                + F_tca * k2 * (
+                    2.0 * a_prime_over_a * tca_shear_g
+                    + shear_g_prime
+                    - (1.0/3.0 - cs2) * (F_tca * theta_prime_0 + 2.0 * F_prime * theta_b)
+                ))
+
+    # Second-order shear correction (cf. CLASS perturbations.c:10315)
+    # shear_g = (1-11/6*dtau_c)*shear_g - 11/6*tau_c*16/45*tau_c*(theta'+metric_shear')
+    tca_shear_g = ((1.0 - 11.0/6.0 * dtau_c) * tca_shear_g
+                   - 11.0/6.0 * tau_c * 16.0/45.0 * tau_c * (theta_prime_0 + metric_shear_prime))
+
+    # --- TCA theta_b' with second-order corrected slip and shear ---
     theta_b_tca = (-a_prime_over_a * theta_b
                    + k2 * (cs2 * delta_b + R * (delta_g / 4.0 - tca_shear_g))
                    + R * tca_slip) / (1.0 + R)
@@ -464,8 +507,32 @@ def _perturbation_rhs(tau, y, args):
     delta_cdm_prime = -h_prime / 2.0
 
     # === TCA PHOTON SHEAR (needed for photon hierarchy l=2 TCA) ===
-    # cf. CLASS perturbations.c:10193
-    tca_shear_g = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
+    # Step 1: First-order shear (cf. CLASS perturbations.c:10193)
+    tca_shear_g_1st = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
+    tca_F_g_2_1st = 2.0 * tca_shear_g_1st
+
+    # Step 2: alpha_prime using first-order TCA shear
+    # Use TCA-blended F_g_2 for shear: during TCA, F_g_2 → tca_F_g_2
+    F_g_2_blended = jnp.where(is_tca > 0.5, tca_F_g_2_1st, F_g[2])
+    rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_blended
+                        + 2.0/3.0 * rho_ur * F_ur[2]
+                        + 2.0/3.0 * rho_ncdm * F_ur[2])
+    alpha_prime = (-2.0 * a_prime_over_a * alpha
+                   + eta
+                   - 4.5 * (a2 / k2) * rho_plus_p_shear)
+
+    # Step 3: Second-order shear correction (compromise_CLASS, cf. perturbations.c:10315)
+    # Needs theta_prime_0 and metric_shear_prime
+    R_tca = 4.0 * rho_g / (3.0 * rho_b)
+    theta_prime_0 = (-a_prime_over_a * theta_b + k2 * (cs2 * delta_b + R_tca / 4.0 * delta_g)) / (1.0 + R_tca)
+    metric_shear_prime = k2 * alpha_prime
+    # dtau_c = -ddkappa*tau_c^2 (cf. CLASS perturbations.c:10074)
+    dkd_dloga_rhs = th.kappa_dot_of_loga.derivative(loga)
+    ddkappa_rhs = dkd_dloga_rhs * a_prime_over_a
+    dtau_c_rhs = -ddkappa_rhs * tau_c * tau_c
+    # Apply second-order shear correction
+    tca_shear_g = ((1.0 - 11.0/6.0 * dtau_c_rhs) * tca_shear_g_1st
+                   - 11.0/6.0 * tau_c * 16.0/45.0 * tau_c * (theta_prime_0 + metric_shear_prime))
     tca_F_g_2 = 2.0 * tca_shear_g
 
     # === BARYON VELOCITY (TCA/full blended via shared helper) ===
@@ -473,7 +540,8 @@ def _perturbation_rhs(tau, y, args):
     theta_b_prime = _compute_theta_b_prime_blended(
         theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
         a_prime_over_a, cs2, k, k2, kappa_dot,
-        rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+        rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime, is_tca, tau_c,
+        alpha_prime=alpha_prime,
     )
 
     # === TCA PHOTON VELOCITY ===
@@ -482,8 +550,9 @@ def _perturbation_rhs(tau, y, args):
     theta_b_tca = _compute_theta_b_prime_blended(
         theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
         a_prime_over_a, cs2, k, k2, kappa_dot,
-        rho_g, rho_b, bg, loga, a, h_prime, eta_prime,
+        rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime,
         jnp.ones_like(is_tca), tau_c,  # force TCA mode
+        alpha_prime=alpha_prime,
     )
     # cf. CLASS perturbations.c:9204-9206
     theta_g_tca = -(theta_b_tca + a_prime_over_a * theta_b - k2 * cs2 * delta_b) / R \
@@ -770,7 +839,8 @@ def _extract_sources(y, k, tau, bg, th, idx):
     theta_b_prime = _compute_theta_b_prime_blended(
         theta_b, delta_b, theta_g, delta_g, F_g_2, G_g_0, G_g_2,
         a_prime_over_a, cs2, k, k2, kappa_dot,
-        rho_g, rho_b, bg, loga, a, h_prime, eta_prime, is_tca, tau_c,
+        rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime, is_tca, tau_c,
+        alpha_prime=alpha_prime,
     )
 
     # === GAUGE SHIFT for Doppler source (CLASS perturbations.c:7632-7633) ===
