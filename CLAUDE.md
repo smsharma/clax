@@ -1,7 +1,8 @@
 # jaxCLASS Development Guide
 
-## CRITICAL: Filesystem rules (HPC environment)
+## CRITICAL: HPC environment rules
 
+### Filesystem
 - **NEVER** use `find /`, `find /ocean`, or scan outside the project directory.
   The HPC filesystem has millions of files and these commands will hang forever.
 - **Reference CLASS source**: `../class_public-3.3.4/` — ALWAYS use this path.
@@ -10,6 +11,17 @@
 - **Project root**: the current working directory (use `.` or relative paths)
 - **Only search within** `.` and `../class_public-3.3.4/`
 - Use `grep` or `Grep` to search file contents — never `find` with broad paths.
+
+### GPU access (login node → compute node)
+You are running on the **login node**. A GPU batch job runs separately.
+To run python/pytest on the GPU, use the wrapper:
+```bash
+bash scripts/gpu-run.sh "python scripts/gpu_planck_test.py"
+bash scripts/gpu-run.sh "pytest tests/ --fast -x -q"
+bash scripts/gpu-run.sh "python -c 'import jax; print(jax.devices())'"
+```
+This automatically finds the GPU job and runs the command there.
+Do NOT run python or pytest directly — the login node has no GPU.
 
 ## What is this?
 

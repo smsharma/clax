@@ -148,14 +148,15 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
 
     CLASS sums three transfer types for scalar TT (harmonic.c:962):
         T_total = T0 + T1 + T2
-    with different radial functions (transfer.c:4168-4190):
-        T0: j_l(x)                                    [x = k*chi]
-        T1: j_l'(x)                                   [derivative of spherical Bessel]
-        T2: (1/2)(3*j_l''(x) + j_l(x))               [second derivative combination]
+    with radial functions (transfer.c:4168-4190):
+        T0: j_l(x)                                         [x = k*chi]
+        T1: sqrt(|K|)/k * j_l'(x)                          [vanishes for flat K=0]
+        T2: (1/(2*s2)) * (3*(K/k^2)*j_l''(x) + j_l(x))    [= 0.5*j_l for K=0]
 
-    For flat space (K=0), sqrt_absK_over_k = 1.0 (transfer.c:4056-4058).
+    For FLAT space (K=0): T1 contributes nothing (sqrt(|K|)/k = 0), and
+    T2 simplifies to 0.5*j_l since the K/k^2 * j_l'' term vanishes.
 
-    IMPORTANT: source_T2 in our code is g*Pi (perturbations.py:667), but CLASS
+    IMPORTANT: source_T2 in our code is g*Pi (perturbations.py), but CLASS
     uses g*P where P = Pi/8 (perturbations.c:7565,7676). The 1/8 is applied here.
 
     Args:

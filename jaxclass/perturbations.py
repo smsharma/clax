@@ -41,6 +41,10 @@ from jaxclass.interpolation import CubicSpline
 from jaxclass.params import CosmoParams, PrecisionParams
 from jaxclass.thermodynamics import ThermoResult
 
+# Module-level flag to disable RSA relaxation damping in the ODE RHS.
+# Set to False for testing whether RSA damping helps or hurts.
+_RSA_DAMPING_ENABLED = True
+
 
 # ---------------------------------------------------------------------------
 # State vector index layout
@@ -511,12 +515,15 @@ def _perturbation_rhs(tau, y, args):
     tca_shear_g_1st = 16.0 / 45.0 * tau_c * (theta_g + metric_shear)
     tca_F_g_2_1st = 2.0 * tca_shear_g_1st
 
-    # Step 2: alpha_prime using first-order TCA shear
-    # Use TCA-blended F_g_2 for shear: during TCA, F_g_2 → tca_F_g_2
+    # Step 2: alpha_prime using TCA-blended and RSA-corrected shear
+    # During TCA: F_g_2 → tca_F_g_2; during RSA: F_g_2 → 0
+    # cf. CLASS perturbations.c:8259-8265 (RSA shear substitution)
     F_g_2_blended = jnp.where(is_tca > 0.5, tca_F_g_2_1st, F_g[2])
+    F_g_2_blended = jnp.where(is_rsa, 0.0, F_g_2_blended)
+    F_ur_2_blended = jnp.where(is_rsa, 0.0, F_ur[2])
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_blended
-                        + 2.0/3.0 * rho_ur * F_ur[2]
-                        + 2.0/3.0 * rho_ncdm * F_ur[2])
+                        + 2.0/3.0 * rho_ur * F_ur_2_blended
+                        + 2.0/3.0 * rho_ncdm * F_ur_2_blended)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
@@ -629,6 +636,8 @@ def _perturbation_rhs(tau, y, args):
 
     # Damping rate: k is the natural rate for free-streaming modes
     rsa_rate = rsa_crit * k
+    # Gate on module-level flag (allows disabling for testing)
+    rsa_rate = jnp.where(_RSA_DAMPING_ENABLED, rsa_rate, 0.0)
 
     # Apply RSA relaxation to monopole and dipole
     dy = dy.at[idx['F_g_0']].add(rsa_rate * (delta_g_rsa - F_g[0]))
@@ -759,18 +768,44 @@ def _extract_sources(y, k, tau, bg, th, idx):
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
 
-    # --- Einstein constraints (no RSA — use raw hierarchy values) ---
-    theta_g = 3.0 * k * F_g_1 / 4.0
-    theta_ur = 3.0 * k * F_ur_1 / 4.0
+    # --- Einstein constraints WITH RSA substitution ---
+    # CLASS perturbations_source_functions() calls perturbations_einstein() which
+    # applies RSA corrections. We must do the same to get correct h', η', α, α'.
+    # cf. CLASS perturbations.c:8218-8265, 10407-10462
+    theta_g_raw = 3.0 * k * F_g_1 / 4.0
+    theta_ur_raw = 3.0 * k * F_ur_1 / 4.0
 
-    delta_rho = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
-                 + rho_ur * F_ur_0 + rho_ncdm * F_ur_0)
+    # RSA criterion (same as ODE RHS)
+    tau_k = tau * k
+    kd_over_aH = kappa_dot / jnp.maximum(a_prime_over_a, 1e-30)
+    is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
 
-    rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
-                        + 4.0/3.0 * rho_ur * theta_ur
-                        + 4.0/3.0 * rho_ncdm * theta_ur)
+    # First compute raw h' (needed for RSA algebraic values)
+    delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
+                     + rho_ur * F_ur_0 + rho_ncdm * F_ur_0)
+    h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
 
-    # h' from 00 Einstein CONSTRAINT
+    # RSA photon/neutrino values (cf. CLASS perturbations.c:10417-10447)
+    rsa_delta_g_ein = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta) \
+                      - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime_raw)
+    rsa_theta_g = -0.5 * h_prime_raw
+    rsa_delta_ur = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta)
+    rsa_theta_ur = -0.5 * h_prime_raw
+
+    # Substitute RSA values in Einstein equations
+    delta_g_ein = jnp.where(is_rsa, rsa_delta_g_ein, delta_g)
+    theta_g_ein = jnp.where(is_rsa, rsa_theta_g, theta_g_raw)
+    delta_ur_ein = jnp.where(is_rsa, rsa_delta_ur, F_ur_0)
+    theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur_raw)
+
+    delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
+
+    rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
+                        + 4.0/3.0 * rho_ur * theta_ur_ein
+                        + 4.0/3.0 * rho_ncdm * theta_ur_ein)
+
+    # h' from 00 Einstein CONSTRAINT (now with RSA-corrected densities)
     # cf. CLASS perturbations.c:6612
     h_prime = (k2 * eta + 1.5 * a2 * delta_rho) / (0.5 * a_prime_over_a)
 
@@ -782,11 +817,14 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # cf. CLASS perturbations.c:6644
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
 
-    # α' from trace-free ij Einstein constraint
+    # α' from trace-free ij Einstein constraint (also RSA-corrected shear)
     # cf. CLASS perturbations.c:6671-6674
-    rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2
-                        + 2.0/3.0 * rho_ur * F_ur_2
-                        + 2.0/3.0 * rho_ncdm * F_ur_2)
+    # For RSA: photon shear → 0, neutrino shear → 0
+    F_g_2_ein = jnp.where(is_rsa, 0.0, F_g_2)
+    F_ur_2_ein = jnp.where(is_rsa, 0.0, F_ur_2)
+    rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_ein
+                        + 2.0/3.0 * rho_ur * F_ur_2_ein
+                        + 2.0/3.0 * rho_ncdm * F_ur_2_ein)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
@@ -800,20 +838,13 @@ def _extract_sources(y, k, tau, bg, th, idx):
     phi_prime = eta_prime - H_prime_conformal * alpha - a_prime_over_a * alpha_prime
 
     # === RSA substitution in source functions (CLASS perturbations.c:7553-7567) ===
-    # After recombination, CLASS substitutes RSA-corrected values for delta_g and P:
-    #   delta_g → rsa_delta_g = 4/k²*(aH*h' - k²*eta) - 4/k²*kappa'*(theta_b + h'/2)
-    #   P → 0
-    # Condition: k*tau > 45 AND tau > tau_free_streaming (kappa'/aH < 5)
+    # After recombination, CLASS substitutes RSA-corrected values for delta_g and P.
+    # Uses the FINAL h_prime (RSA-corrected from Einstein eqs above).
+    # is_rsa was already computed above in the Einstein constraints section.
     # cf. CLASS perturbations.c:7553-7556, 10417-10426
-    rsa_delta_g = (4.0 / k2) * (a_prime_over_a * h_prime - k2 * eta)
-    # Reionization correction (rsa_MD_with_reio, CLASS default)
-    # cf. CLASS perturbations.c:10424-10426
-    rsa_delta_g = rsa_delta_g - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime)
-
-    tau_k = tau * k
-    kd_over_aH = kappa_dot / jnp.maximum(a_prime_over_a, 1e-30)
-    is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
-    delta_g_src = jnp.where(is_rsa, rsa_delta_g, delta_g)
+    rsa_delta_g_src = (4.0 / k2) * (a_prime_over_a * h_prime - k2 * eta) \
+                      - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime)
+    delta_g_src = jnp.where(is_rsa, rsa_delta_g_src, delta_g)
     Pi_src = jnp.where(is_rsa, 0.0, Pi)
 
     # === Source functions (CLASS synchronous gauge IBP form) ===
@@ -833,11 +864,10 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # RHS evaluation, which includes TCA/full switching. We must do the same.
     # Use the shared helper to reproduce the exact same TCA blending as the RHS.
     cs2 = th.cs2_of_loga.evaluate(loga)
-    theta_g = 3.0 * k * F_g_1 / 4.0
 
     is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
     theta_b_prime = _compute_theta_b_prime_blended(
-        theta_b, delta_b, theta_g, delta_g, F_g_2, G_g_0, G_g_2,
+        theta_b, delta_b, theta_g_raw, delta_g, F_g_2, G_g_0, G_g_2,
         a_prime_over_a, cs2, k, k2, kappa_dot,
         rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime, is_tca, tau_c,
         alpha_prime=alpha_prime,

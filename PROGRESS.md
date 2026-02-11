@@ -1,6 +1,6 @@
 # jaxCLASS Development Progress
 
-## Status: Sub-percent C_l — EE 0.1-1.0% at l=20-1000, TT 0.1-0.8% at l=20, 100-300
+## Status: Sub-percent C_l — EE 0.05-0.7% at l=20-700, TT 0.04-1.6% at l=20-700
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
@@ -26,9 +26,21 @@ Agent running via `scripts/gpu_claude_loop.sh` (Carlini-style while-true loop).
    compromise_CLASS TCA scheme (perturbations.c:10303-10316) with second-order
    slip and shear corrections. Previously only had first-order.
 
-#### Session 5 (in progress):
+#### Session 5:
 - Further perturbations.py edits (90 lines changed), running GPU diagnostics.
-- Accuracy impact not yet measured (waiting for diagnostic results).
+
+#### Session 6 (Feb 11, 2026):
+- **RSA in source Einstein equations (Bug 22)**: Source extraction computed h', η', α, α'
+  from RAW hierarchy values, while the ODE RHS used RSA-corrected values. After
+  recombination, truncated hierarchy values contaminated the metric potentials in the
+  source functions. Fixed by applying the same RSA substitution as the ODE RHS.
+  Impact: TT l=500 improved from -1.45% to -0.57%, l=700 from -2.65% to -1.58%,
+  l=1000 from -9.05% to -7.23%.
+- **RSA shear in ODE alpha_prime**: Also zeroed photon/neutrino shear (F_g_2, F_ur_2)
+  in the alpha_prime computation when RSA is active, matching CLASS perturbations.c:8259.
+- Confirmed T1/T2 radial functions are correct for flat space (CLASS sets
+  sqrt_absK_over_k=1.0, absK_over_k2=1.0 for K=0, NOT the physical curvature).
+- l_max=80 OOMs on V100-32GB. Running l_max=65 test to check hierarchy convergence.
 
 #### Issues encountered:
 - API 529 overload errors overnight caused sessions 2-4 to crash immediately.
@@ -51,18 +63,20 @@ RSA damping in ODE for post-recombination hierarchy.
 planck_cl preset: k_max=1.0, 60 k/decade (300 modes), l_max=50, 5000 tau,
 source-interpolated to 3000 fine k-points:
 
-| l | C_l^TT error | C_l^EE error |
-|---|-------------|-------------|
-| 20 | **-0.28%** | **-0.27%** |
-| 30 | +1.52% | **-0.27%** |
-| 50 | +1.63% | **-0.23%** |
-| 100 | **+0.57%** | **-0.17%** |
-| 150 | **-0.12%** | **-0.17%** |
-| 200 | **+0.10%** | **-0.28%** |
-| 300 | **-0.84%** | **-0.10%** |
-| 500 | -1.45% | **-0.25%** |
-| 700 | -2.65% | **-0.96%** |
-| 1000 | -9.05% | **-0.89%** |
+| l | C_l^TT error | C_l^EE error | C_l^TE error |
+|---|-------------|-------------|-------------|
+| 20 | **-0.29%** | **-0.30%** | -8.2% (near zero) |
+| 30 | +1.54% | **-0.27%** | -7.2% (near zero) |
+| 50 | +1.67% | **-0.20%** | -25% (zero crossing) |
+| 100 | **+0.64%** | **-0.13%** | **+0.38%** |
+| 150 | **-0.04%** | **-0.16%** | **-0.04%** |
+| 200 | **+0.19%** | **-0.14%** | **-0.11%** |
+| 300 | **-0.68%** | **+0.05%** | **+0.05%** |
+| 500 | **-0.57%** | **+0.08%** | +2.3% |
+| 700 | -1.58% | **-0.71%** | -4.5% |
+| 1000 | -7.23% | +1.11% | +12.7% |
+
+Note: TE has zero crossing near l≈52; relative errors near crossings are misleading.
 
 Source interpolation convergence verified: k/dec = 60, 120, 200 agree to 0.01%.
 Bessel functions accurate to machine precision at l=2500.
@@ -143,7 +157,7 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 ---
 
-## Bugs found and fixed (21 total)
+## Bugs found and fixed (23 total)
 
 1. ncdm deg=1 -> g*=2 (factor of 2 in density)
 2. age: divide by Gyr_over_Mpc, not multiply
@@ -166,6 +180,8 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 19. RECFAST fudge misplacement: F in alpha_B vs F in Peebles C
 20. Missing Gaussian K correction (RECFAST 1.5 Hswitch)
 21. Reionization tau_reio: crude z_reio gave tau=0.077 instead of 0.054
+22. RSA missing in source Einstein equations: h',η',α,α' computed from raw hierarchy
+23. RSA shear missing in ODE alpha_prime: F_g_2, F_ur_2 not zeroed when RSA active
 
 ## Known limitations and remaining work
 
@@ -210,6 +226,18 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 - [ ] Multi-cosmology validation at 5+ parameter points (GPU time only)
 - [ ] Full ncdm perturbation variables Psi_l(q) (~1 session)
 - [ ] Gradient tests for C_l: d(C_l)/d(params)
+
+## Confirmed correct (do not re-investigate)
+
+- **T1/T2 radial functions for flat space**: CLASS sets sqrt_absK_over_k=1.0 and
+  absK_over_k2=1.0 for flat space (transfer.c:4056-4064, with comment "consistent
+  with chi=k*(tau0-tau) and nu=1"). So T1 radial = j_l', T2 radial = 0.5*(3j_l''+j_l)
+  are CORRECT for flat space. Attempted changing to 0-radial/0.5*j_l — made TT 22% worse.
+- **E-mode source normalization**: source_E = 3*g*Pi/16 is correct. CLASS has
+  sqrt(6)*g*Pi/8 as source and sqrt(3/8*(l+2)(l+1)*l*(l-1)) as radial factor;
+  combined with our j_l/(kχ)² and prefactor, it matches.
+- **a''/a and ℋ' formulas**: Both verified to match CLASS perturbations.c:10032
+  and the ISW Φ' = η' - ℋ'α - ℋα' formulation.
 
 ## Failed approaches (do not re-attempt)
 
