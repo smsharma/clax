@@ -232,11 +232,16 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
    n_k_fine or a hybrid linear/log k-grid would help.
    **Effort: easy (just increase n_k_fine or implement smart grid).**
 
-3. **SW plateau (l<15)**: ~5% error from gauge-dependent source at
-   super-horizon scales. **Effort: moderate.**
+3. **ncdm as massless in perturbations**: Dominant remaining error source.
+   Treating 0.06 eV neutrino as massless affects C_l through early ISW
+   (l=30-50: +1.5%), Silk damping tail (l=1000: -0.5%), and metric
+   perturbations at all l>55. Fix: implement full Ψ_l(q) hierarchy.
+   **Effort: moderate (1 session, 2x compute cost). THIS IS THE #1 PRIORITY
+   for achieving <0.1% everywhere.**
 
-4. **ncdm as massless in perturbations**: ~0.3% C_l effect at m=0.06eV.
-   **Effort: moderate (1 session, 2x compute cost).**
+4. **SW plateau (l<15)**: ~5% error from gauge-dependent source at
+   super-horizon scales. Low priority for most applications.
+   **Effort: moderate.**
 
 5. **Single cosmology validated**: Only Planck 2018 fiducial tested.
    **Effort: trivial (GPU time only).**
@@ -245,16 +250,16 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 - [x] TE spectrum with source interpolation (done: compute_cl_te_interp)
 - [x] RSA hierarchy damping in ODE (done: implemented, tested, minimal impact)
-- [ ] Term-by-term T1/T2 radial function check vs CLASS transfer.c — **highest
-      priority for TT accuracy.** Compare our radial_T2 = 0.5*(3*j_l'' + j_l)
-      against CLASS transfer.c:4168-4200. Check source_T1 normalization (our
-      source_T1 has a factor of k — does CLASS's?). (hours, biggest impact)
-- [ ] Hard RSA switch for high-l TT — replace hierarchy with algebraic
-      expressions (not just damp). Use jax.lax.cond per timestep. Would fix
-      TT l>700. (1-2 sessions, substantial)
+- [x] Term-by-term T1/T2 radial function check vs CLASS transfer.c — CONFIRMED
+      CORRECT for flat space (verified: source_T1 formula, radial_T2 formula,
+      normalization factor 1/8 all match CLASS exactly)
+- [x] k-integration resolution fix — n_k_fine=3000→5000 default, chunked vmap
+      for n_k_fine=10000+, TT l=700 from -1.6% to -0.24%
+- [ ] **Full ncdm perturbation hierarchy Ψ_l(q)** — #1 PRIORITY for <0.1%
+      everywhere. Currently the dominant error source at all l. (~1 session)
 - [ ] Multi-cosmology validation at 5+ parameter points (GPU time only)
-- [ ] Full ncdm perturbation variables Psi_l(q) (~1 session)
 - [ ] Gradient tests for C_l: d(C_l)/d(params)
+- [ ] Hybrid linear/log fine k-grid for better convergence at l>1500
 
 ## Confirmed correct (do not re-investigate)
 
@@ -262,6 +267,12 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
   absK_over_k2=1.0 for flat space (transfer.c:4056-4064, with comment "consistent
   with chi=k*(tau0-tau) and nu=1"). So T1 radial = j_l', T2 radial = 0.5*(3j_l''+j_l)
   are CORRECT for flat space. Attempted changing to 0-radial/0.5*j_l — made TT 22% worse.
+- **ODE precision converged**: rtol=1e-8 gives identical C_l to rtol=1e-6.
+- **Tau-grid converged**: n_tau=10000 gives identical C_l to n_tau=5000.
+- **k-integration converged**: n_k_fine=10000 and 20000 agree to <0.01pp at l=300-700.
+  The remaining errors at l>100 are from physics (ncdm), not numerical resolution.
+- **T0+T1+T2 source functions match CLASS**: Verified source_T0, source_T1, source_T2,
+  and source_E definitions line-by-line against CLASS perturbations.c:7660-7690.
 - **E-mode source normalization**: source_E = 3*g*Pi/16 is correct. CLASS has
   sqrt(6)*g*Pi/8 as source and sqrt(3/8*(l+2)(l+1)*l*(l-1)) as radial factor;
   combined with our j_l/(kχ)² and prefactor, it matches.
