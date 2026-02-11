@@ -383,17 +383,61 @@ def _perturbation_rhs(tau, y, args):
     # === TCA CRITERION (shared helper, dual criteria matching CLASS) ===
     is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
 
-    # === EINSTEIN EQUATIONS (constraint approach, matching CLASS) ===
-    # cf. CLASS perturbations.c:6611-6644
-    # Uses raw hierarchy values (no RSA in ODE RHS — RSA is applied only
-    # during source function extraction to keep the ODE self-consistent).
+    # === RSA CRITERION (matching CLASS perturbations.c:10407-10426) ===
+    # After recombination, when photons/neutrinos are free-streaming,
+    # replace hierarchy values with algebraic RSA expressions in Einstein eqs.
+    # This prevents inaccurate truncated hierarchy from contaminating h', η'.
+    # cf. CLASS: perturbations_einstein() uses rsa_delta_g when rsa_on (line 8218-8224)
+    tau_k = tau * k
+    kd_over_aH = kappa_dot / jnp.maximum(a_prime_over_a, 1e-30)
+    is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
 
-    # Total density perturbation δρ = Σ ρ_i δ_i
-    delta_rho = rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm + rho_ur * delta_ur + rho_ncdm * delta_ur
+    # === EINSTEIN EQUATIONS with RSA substitution ===
+    # cf. CLASS perturbations.c:6611-6644, 8218-8265, 10407-10462
+    #
+    # Step 1: Compute h' from raw hierarchy (needed for RSA formulas).
+    # Step 2: Compute RSA delta_g/theta_g from h'.
+    # Step 3: Substitute RSA values into Einstein eqs for corrected h', eta'.
+    #
+    # This matches CLASS which uses RSA values from the previous timestep
+    # in perturbations_einstein(). Our one-step approach is equivalent.
 
-    # Total (ρ+p)θ
-    rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g + rho_b * theta_b
-                        + 4.0/3.0 * rho_ur * theta_ur + 4.0/3.0 * rho_ncdm * theta_ur)
+    # Raw delta_rho and h_prime (used to compute RSA values)
+    delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
+                     + rho_ur * delta_ur + rho_ncdm * delta_ur)
+    h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
+
+    # RSA photon values (synchronous gauge, rsa_MD_with_reio)
+    # cf. CLASS perturbations.c:10417-10425
+    rsa_delta_g_base = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta)
+    # Reionization correction for delta_g
+    rsa_delta_g = rsa_delta_g_base - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime_raw)
+    # RSA theta_g (base formula, cf. CLASS perturbations.c:10419)
+    # The reionization correction requires kappa'' which we don't track;
+    # the base formula is sufficient since theta_g enters Einstein eqs
+    # only through rho_plus_p_theta where photon contribution is subdominant
+    # after recombination.
+    rsa_theta_g = -0.5 * h_prime_raw
+
+    # RSA neutrino values (synchronous gauge, no reio correction)
+    # cf. CLASS perturbations.c:10445-10447
+    rsa_delta_ur = rsa_delta_g_base  # same formula as photons (no reio correction)
+    rsa_theta_ur = -0.5 * h_prime_raw
+
+    # Substitute RSA when active
+    delta_g_ein = jnp.where(is_rsa, rsa_delta_g, delta_g)
+    theta_g_ein = jnp.where(is_rsa, rsa_theta_g, theta_g)
+    delta_ur_ein = jnp.where(is_rsa, rsa_delta_ur, delta_ur)
+    theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur)
+
+    # Total density perturbation δρ with RSA substitution
+    delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
+
+    # Total (ρ+p)θ with RSA substitution
+    rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
+                        + 4.0/3.0 * rho_ur * theta_ur_ein
+                        + 4.0/3.0 * rho_ncdm * theta_ur_ein)
 
     # h' from 00 Einstein CONSTRAINT (NOT evolved!)
     # cf. CLASS line 6612: h' = (k2*eta + 1.5*a2*delta_rho) / (0.5*a'/a)
@@ -403,8 +447,8 @@ def _perturbation_rhs(tau, y, args):
     # cf. CLASS line 6635: η' = 1.5 * a² * (ρ+p)θ / k²  (flat space)
     eta_prime = 1.5 * a2 * rho_plus_p_theta / k2
 
-    # Total pressure perturbation δp = Σ ρ_i δ_i * w_i (for h'')
-    delta_p = rho_g * delta_g / 3.0 + rho_ur * delta_ur / 3.0
+    # Total pressure perturbation δp with RSA substitution
+    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0
 
     # α = (h' + 6η') / (2k²) -- gauge variable
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
