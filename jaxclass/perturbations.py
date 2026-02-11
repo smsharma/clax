@@ -686,6 +686,23 @@ def _extract_sources(y, k, tau, bg, th, idx):
     H_prime_conformal = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
     phi_prime = eta_prime - H_prime_conformal * alpha - a_prime_over_a * alpha_prime
 
+    # === RSA substitution in source functions (CLASS perturbations.c:7553-7567) ===
+    # After recombination, CLASS substitutes RSA-corrected values for delta_g and P:
+    #   delta_g → rsa_delta_g = 4/k²*(aH*h' - k²*eta) - 4/k²*kappa'*(theta_b + h'/2)
+    #   P → 0
+    # Condition: k*tau > 45 AND tau > tau_free_streaming (kappa'/aH < 5)
+    # cf. CLASS perturbations.c:7553-7556, 10417-10426
+    rsa_delta_g = (4.0 / k2) * (a_prime_over_a * h_prime - k2 * eta)
+    # Reionization correction (rsa_MD_with_reio, CLASS default)
+    # cf. CLASS perturbations.c:10424-10426
+    rsa_delta_g = rsa_delta_g - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime)
+
+    tau_k = tau * k
+    kd_over_aH = kappa_dot / jnp.maximum(a_prime_over_a, 1e-30)
+    is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
+    delta_g_src = jnp.where(is_rsa, rsa_delta_g, delta_g)
+    Pi_src = jnp.where(is_rsa, 0.0, Pi)
+
     # === Source functions (CLASS synchronous gauge IBP form) ===
     # cf. CLASS perturbations.c:7660-7678
     # C_l = 4π ∫ dlnk P_R(k) |T_l(k)|²  (Dodelson 2003, eq. 9.35)
@@ -694,13 +711,9 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # The IBP form is the gauge-invariant transfer function formula.
     # Doppler is integrated by parts: g*v_b*j_l' → (g'*v_b + g*v_b')/k² * j_l
 
-    # ℋ' = d(aH)/dτ
-    dH_dloga = bg.H_of_loga.derivative(loga)
-    H_prime_conformal = a_prime_over_a * (a_prime_over_a + a * dH_dloga)
-
-    # g' = dg/dτ
-    dg_dloga = th.g_of_loga.derivative(loga)
-    g_prime = dg_dloga * a_prime_over_a
+    # g' = dg/dτ (use pre-computed analytic value)
+    # CLASS thermodynamics.c:3482: g' = (κ̈ + κ̇²) e^{-κ}
+    g_prime = th.g_prime_of_loga.evaluate(loga)
 
     # θ_b' from the ODE RHS, consistent with TCA/full switching.
     # CRITICAL: CLASS (perturbations.c:7535) uses dy[theta_b] directly from the
@@ -724,7 +737,8 @@ def _extract_sources(y, k, tau, bg, th, idx):
     theta_b_prime_shifted = theta_b_prime + k2 * alpha_prime
 
     # SW: g*(δ_g/4 + α')  [cf. perturbations.c:7660]
-    source_SW = g * (delta_g / 4.0 + alpha_prime)
+    # Uses RSA-corrected delta_g when RSA is active
+    source_SW = g * (delta_g_src / 4.0 + alpha_prime)
 
     # ISW (visibility): g*(η - α' - 2ℋα)  [cf. perturbations.c:7662-7664]
     source_ISW_vis = g * (eta - alpha_prime - 2.0 * a_prime_over_a * alpha)
@@ -754,15 +768,15 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # cf. perturbations.c:7672-7674
     source_T1 = exp_m_kappa * k * (alpha_prime + 2.0 * a_prime_over_a * alpha - eta)
 
-    # S_T2: Quadrupole source
-    source_T2 = g * Pi
+    # S_T2: Quadrupole source (P → 0 under RSA)
+    source_T2 = g * Pi_src
 
-    # E-polarization source
+    # E-polarization source (P → 0 under RSA)
     # CLASS perturbations.c:7690: source_p = sqrt(6)*g*P where P = Pi/8
     # CLASS transfer.c:4197: radial factor = sqrt(3/8*(l+2)(l+1)l(l-1))
     # Combined factor: sqrt(6)*sqrt(3/8)/8 = 3/16 (no k² dependence!)
     # Our harmonic.py has E_l = sqrt((l+2)(l+1)l(l-1)) * int source_E * j_l/(kchi)^2 dtau
-    source_E = 3.0 * g * Pi / 16.0
+    source_E = 3.0 * g * Pi_src / 16.0
 
     # Lensing potential source
     source_lens = exp_m_kappa * 2.0 * phi_newt

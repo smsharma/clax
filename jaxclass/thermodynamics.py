@@ -62,6 +62,7 @@ _L_H_alpha = 8.225916453e6   # H Lyman-alpha [m^{-1}]
 _Lalpha_m = 1.0 / _L_H_alpha                # Lyman-alpha wavelength [m]
 _Lalpha_cm = _Lalpha_m * 100.0               # Lyman-alpha wavelength [cm]
 _CDB = _hP_SI * _c_SI * (_L_H_ion - _L_H_alpha) / _kB_SI  # 39,462 K (n=2 ionization temp)
+_CB1 = _hP_SI * _c_SI * _L_H_ion / _kB_SI                 # 157,807 K (ground-state ionization temp, = CDB + CL)
 _CL = _hP_SI * _c_SI * _L_H_alpha / _kB_SI                # 118,348 K (Lyman-alpha temp)
 _CK_CGS = _Lalpha_cm**3 / (8.0 * math.pi)  # Peebles K prefactor [cm^3]
 _CR_CGS = 2.0 * math.pi * (_me_CGS / _hP_CGS) * (_kB_CGS / _hP_CGS)  # NR number density [K^{-1} cm^{-2}]
@@ -111,6 +112,7 @@ class ThermoResult:
     kappa_dot_of_loga: CubicSpline
     exp_m_kappa_of_loga: CubicSpline
     g_of_loga: CubicSpline
+    g_prime_of_loga: CubicSpline  # dg/dτ, computed analytically
     cs2_of_loga: CubicSpline
     z_star: float
     z_rec: float
@@ -122,7 +124,7 @@ class ThermoResult:
         return [
             self.xe_of_loga, self.Tb_of_loga,
             self.kappa_dot_of_loga, self.exp_m_kappa_of_loga,
-            self.g_of_loga, self.cs2_of_loga,
+            self.g_of_loga, self.g_prime_of_loga, self.cs2_of_loga,
             self.z_star, self.z_rec, self.tau_star, self.rs_star, self.z_reio,
         ], None
 
@@ -457,22 +459,18 @@ def thermodynamics_solve(
         # Temperatures
         TR_half = T_cmb / ahalf
 
-        # Hydrogen ionization: RECFAST Peebles ODE for z < ~1700,
-        # MB95 for z > ~1700 (handles pre-H-recombination stably).
-        # Smooth sigmoid transition to avoid discontinuities.
         z_half = 1.0 / ahalf - 1.0
 
-        # --- Heun's method (predictor-corrector, 2nd order) ---
-        # Step 1: Evaluate rate at current state (predictor)
+        # --- Heun's method (predictor-corrector, 2nd order) for RECFAST ---
+        # Step 1: Evaluate rate at midpoint (predictor)
         dxHII_1 = _recfast_dxHII_dlna(
             xe, xHII, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
         xHII_pred = jnp.clip(xHII + dlna_step * dxHII_1, 0.0, 1.0)
 
-        # Step 2: Evaluate rate at predicted state using NEW step quantities
-        # (new_a, new_tb give quantities at end of step)
+        # Step 2: Evaluate rate at predicted state using end-of-step quantities
         z_new = 1.0 / new_a - 1.0
         nH_new = n_H_0_cgs / new_a**3
-        H_new = new_H * _c_over_Mpc  # [s^-1]
+        H_new = new_H * _c_over_Mpc
         TR_new = T_cmb / new_a
         xe_pred = xHII_pred + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
         dxHII_2 = _recfast_dxHII_dlna(
@@ -482,10 +480,33 @@ def thermodynamics_solve(
         new_xHII_recfast = jnp.clip(
             xHII + 0.5 * dlna_step * (dxHII_1 + dxHII_2), 0.0, 1.0)
 
-        new_xHII_mb95 = _ionize(tbhalf, ahalf, adothalf, dtau, xHII, Y_He, H0_kmsMpc, Omega_b)
+        # For z > 1600: hydrogen Saha equilibrium (CLASS thermodynamics.c:4074-4081).
+        # x_H*(x_H + xHeII)/(1 - x_H) = rhs, solved via quadratic formula.
+        # rhs = (CR*Tmat)^{3/2} * exp(-CB1/Tmat) / nH_physical
+        # where CB1 = hc*L_H_ion/kB ~ 157807 K (ground-state ionization temp).
+        T_saha = jnp.maximum(tbhalf, 100.0)  # clamp to avoid exp(-huge)
+        nH_saha = n_H_0_cgs / ahalf**3
+        # Clamp exponent to avoid underflow producing 0*inf NaN in gradients
+        saha_exp = jnp.exp(jnp.maximum(-_CB1 / T_saha, -500.0))
+        saha_rhs = jnp.maximum(
+            (_CR_CGS * T_saha)**1.5 * saha_exp / nH_saha, 1e-300)
+        # Helium electron contribution per H nucleus
+        xHeII_contrib = 0.25 * Y_He / (1.0 - Y_He) * xHeII
+        # Quadratic: x_H = 2/(1 + xHeII/rhs + sqrt((1+xHeII/rhs)^2 + 4/rhs))
+        inv_rhs = jnp.minimum(1.0 / saha_rhs, 1e100)  # clamp to avoid sqrt overflow
+        v_over_rhs = xHeII_contrib * inv_rhs
+        xHII_saha = 2.0 / (1.0 + v_over_rhs + jnp.sqrt(
+            (1.0 + v_over_rhs)**2 + 4.0 * inv_rhs))
+        # Stop gradient through Saha: at z>1600, x_HII ≈ 1 and the exact value
+        # barely affects C_l. Gradients should flow through the RECFAST ODE
+        # (z<1600) where recombination physics actually matters.
+        xHII_saha = jax.lax.stop_gradient(xHII_saha)
 
-        w_recfast = jax.nn.sigmoid(-0.02 * (z_half - 1700.0))
-        new_xHII = w_recfast * new_xHII_recfast + (1.0 - w_recfast) * new_xHII_mb95
+        # Below z~1600: use RECFAST Peebles ODE (accurate through recombination).
+        # Above z~1600: use Saha equilibrium (hydrogen fully ionized).
+        # Smooth sigmoid blend for differentiability (width=50, matching CLASS delta_z).
+        w_saha = jax.nn.sigmoid(0.1 * (z_half - 1600.0))
+        new_xHII = w_saha * xHII_saha + (1.0 - w_saha) * new_xHII_recfast
 
         # Helium (Saha iteration)
         new_xHeII, new_xHeIII = _ionHe(
@@ -558,6 +579,26 @@ def thermodynamics_solve(
     exp_m_kappa_grid = jnp.exp(-kappa_grid)
     g_grid = kappa_dot_grid * exp_m_kappa_grid
 
+    # --- g' = dg/dτ analytically (CLASS thermodynamics.c:3482-3483) ---
+    # g = κ̇ e^{-κ},  g' = (κ̈ + κ̇²) e^{-κ}
+    # where κ̈ = d(κ̇)/dτ.
+    # Compute κ̈ using spline derivative for accuracy (not finite differences).
+    # Build a temporary spline of κ̇(loga), then evaluate its derivative.
+    # dκ̇/dτ = (dκ̇/d(loga)) * (d(loga)/dτ) = (dκ̇/d(loga)) * (a'/a) / a
+    # But a'/a = aH, so d(loga)/dτ = (1/a)(da/dτ) = H (physical Hubble, not conformal).
+    # Actually: d(loga)/dτ = d(ln a)/dτ = (1/a)(da/dτ) = a'/a² ... no.
+    # loga = ln(a), d(loga)/dτ = (da/dτ)/a = a'/a = aH (conformal Hubble).
+    # Wait: a' = da/dτ (conformal time), so d(ln a)/dτ = a'/a = aH. Yes.
+    # So dκ̇/dτ = (dκ̇/d(loga)) * aH  where aH = a'(τ)/a(τ)
+    kd_spline_tmp = CubicSpline(loga_grid, kappa_dot_grid)
+    dkd_dloga_grid = jax.vmap(kd_spline_tmp.derivative)(loga_grid)
+    # a'/a = aH at each grid point
+    a_grid_loc = jnp.exp(loga_grid)
+    H_grid_loc = jax.vmap(bg.H_of_loga.evaluate)(loga_grid)
+    aH_grid = a_grid_loc * H_grid_loc
+    ddkappa_grid = dkd_dloga_grid * aH_grid
+    g_prime_grid = (ddkappa_grid + kappa_dot_grid**2) * exp_m_kappa_grid
+
     # --- Find z_star and z_rec ---
     idx_star = jnp.argmax(g_grid)
     z_star = z_grid[idx_star]
@@ -574,6 +615,7 @@ def thermodynamics_solve(
     kappa_dot_of_loga = CubicSpline(loga_grid, kappa_dot_grid)
     exp_m_kappa_of_loga = CubicSpline(loga_grid, exp_m_kappa_grid)
     g_of_loga = CubicSpline(loga_grid, g_grid)
+    g_prime_of_loga = CubicSpline(loga_grid, g_prime_grid)
     cs2_of_loga = CubicSpline(loga_grid, cs2_grid)
 
     return ThermoResult(
@@ -582,6 +624,7 @@ def thermodynamics_solve(
         kappa_dot_of_loga=kappa_dot_of_loga,
         exp_m_kappa_of_loga=exp_m_kappa_of_loga,
         g_of_loga=g_of_loga,
+        g_prime_of_loga=g_prime_of_loga,
         cs2_of_loga=cs2_of_loga,
         z_star=z_star,
         z_rec=z_rec,

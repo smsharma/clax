@@ -133,7 +133,7 @@ class PrecisionParams:
 
     # Thermodynamics
     th_z_max: float = 5e4           # max redshift for recombination
-    th_n_points: int = 10000        # number of z grid points
+    th_n_points: int = 20000        # number of z grid points
     th_tol: float = 1e-5            # ODE tolerance
 
     # Perturbations

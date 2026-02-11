@@ -1,5 +1,16 @@
 # jaxCLASS Development Guide
 
+## CRITICAL: Filesystem rules (HPC environment)
+
+- **NEVER** use `find /`, `find /ocean`, or scan outside the project directory.
+  The HPC filesystem has millions of files and these commands will hang forever.
+- **Reference CLASS source**: `../class_public-3.3.4/` — ALWAYS use this path.
+  Key files: `source/perturbations.c`, `source/transfer.c`, `source/harmonic.c`,
+  `source/thermodynamics.c`, `source/background.c`
+- **Project root**: the current working directory (use `.` or relative paths)
+- **Only search within** `.` and `../class_public-3.3.4/`
+- Use `grep` or `Grep` to search file contents — never `find` with broad paths.
+
 ## What is this?
 
 A fully differentiable reimplementation of the CLASS Boltzmann solver in JAX.
