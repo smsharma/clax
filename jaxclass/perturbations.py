@@ -614,7 +614,10 @@ def _perturbation_rhs(tau, y, args):
     #   F_{l+1} ≈ (2l+1)/(k*tau) * F_l - F_{l-1}
     # Substituting into the hierarchy gives:
     #   dF_l/dτ = k*F_{l-1} - (l+1)/tau * F_l - κ̇*F_l
-    tau_safe = jnp.maximum(tau, 1e-10)
+    # Cap truncation rate: for k*tau < 1, hierarchy at l_max is negligible
+    # (free-streaming hasn't developed to l_max yet), so capping is safe.
+    # This prevents extreme stiffness at early times with low l_max.
+    tau_safe = jnp.maximum(tau, 1.0 / jnp.maximum(k, 1e-10))
     F_lmax_prime_full = k*F_g[l_max_g-1] - (l_max_g+1.0)/tau_safe*F_g[l_max_g] - kappa_dot*F_g[l_max_g]
     F_lmax_prime_tca = -F_g[l_max_g] / tau_c
     F_lmax_prime = jnp.where(is_tca > 0.5, F_lmax_prime_tca, F_lmax_prime_full)
@@ -1354,7 +1357,7 @@ def _tensor_rhs(tau, y, args):
     dy = jax.lax.fori_loop(4, l_max_g, photon_tensor_step, dy)
 
     # l=l_max truncation (CLASS closure: cotKgen = 1/(k*tau) for flat space)
-    tau_safe_t = jnp.maximum(tau, 1e-10)
+    tau_safe_t = jnp.maximum(tau, 1.0 / jnp.maximum(k, 1e-10))
     dy = dy.at[idx['F_g_start'] + l_max_g].set(
         k * F_g[l_max_g - 1] - (l_max_g + 1.0) / tau_safe_t * F_g[l_max_g] - kappa_dot * F_g[l_max_g]
     )
