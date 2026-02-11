@@ -459,12 +459,18 @@ def _perturbation_rhs(tau, y, args):
     rsa_delta_g_base = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta)
     # Reionization correction for delta_g
     rsa_delta_g = rsa_delta_g_base - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime_raw)
-    # RSA theta_g (base formula, cf. CLASS perturbations.c:10419)
-    # The reionization correction requires kappa'' which we don't track;
-    # the base formula is sufficient since theta_g enters Einstein eqs
-    # only through rho_plus_p_theta where photon contribution is subdominant
-    # after recombination.
+    # RSA theta_g (base + reionization correction, cf. CLASS perturbations.c:10419-10435)
     rsa_theta_g = -0.5 * h_prime_raw
+    # Reionization correction for theta_g (rsa_MD_with_reio)
+    # cf. CLASS perturbations.c:10427-10435
+    dkd_dloga = th.kappa_dot_of_loga.derivative(loga)
+    ddkappa = dkd_dloga * a_prime_over_a  # d²κ/dτ²
+    rsa_theta_g = rsa_theta_g + (3.0 / k2) * (
+        ddkappa * (theta_b + 0.5 * h_prime_raw)
+        + kappa_dot * (-a_prime_over_a * theta_b
+                       + cs2 * k2 * delta_b
+                       - a_prime_over_a * h_prime_raw
+                       + k2 * eta))
 
     # RSA neutrino values (synchronous gauge, no reio correction)
     # cf. CLASS perturbations.c:10445-10447
@@ -602,9 +608,14 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['F_g_start'] + l].set(Fl_prime)
     dy = jax.lax.fori_loop(2, l_max_g, photon_hierarchy_step, dy)
 
-    # l=l_max (truncation)
-    tau0_minus_tau = jnp.maximum(bg.conformal_age - tau, 1e-10)
-    F_lmax_prime_full = k*F_g[l_max_g-1] - (l_max_g+1.0)/tau0_minus_tau*F_g[l_max_g] - kappa_dot*F_g[l_max_g]
+    # l=l_max (truncation using CLASS closure: cotKgen = 1/(k*tau) for flat space)
+    # cf. CLASS perturbations.c:8882-8893, 9159-9161
+    # The free-streaming solution j_l(k*tau) gives the closure relation:
+    #   F_{l+1} ≈ (2l+1)/(k*tau) * F_l - F_{l-1}
+    # Substituting into the hierarchy gives:
+    #   dF_l/dτ = k*F_{l-1} - (l+1)/tau * F_l - κ̇*F_l
+    tau_safe = jnp.maximum(tau, 1e-10)
+    F_lmax_prime_full = k*F_g[l_max_g-1] - (l_max_g+1.0)/tau_safe*F_g[l_max_g] - kappa_dot*F_g[l_max_g]
     F_lmax_prime_tca = -F_g[l_max_g] / tau_c
     F_lmax_prime = jnp.where(is_tca > 0.5, F_lmax_prime_tca, F_lmax_prime_full)
     dy = dy.at[idx['F_g_start'] + l_max_g].set(F_lmax_prime)
@@ -667,7 +678,7 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['G_g_start'] + l].set(Gl_prime)
     dy = jax.lax.fori_loop(2, l_max_pol, pol_hierarchy_step, dy)
 
-    G_lmax_prime_full = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau0_minus_tau*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
+    G_lmax_prime_full = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau_safe*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
     G_lmax_prime_tca = -G_g[l_max_pol] / tau_c
     dy = dy.at[idx['G_g_start'] + l_max_pol].set(jnp.where(is_tca > 0.5, G_lmax_prime_tca, G_lmax_prime_full))
 
@@ -684,7 +695,7 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['F_ur_start'] + l].set(Fl_prime)
     dy = jax.lax.fori_loop(2, l_max_ur, ur_hierarchy_step, dy)
 
-    F_ur_lmax_prime = k*F_ur[l_max_ur-1] - (l_max_ur+1.0)/tau0_minus_tau*F_ur[l_max_ur]
+    F_ur_lmax_prime = k*F_ur[l_max_ur-1] - (l_max_ur+1.0)/tau_safe*F_ur[l_max_ur]
     dy = dy.at[idx['F_ur_start'] + l_max_ur].set(F_ur_lmax_prime)
 
     # RSA damping for massless neutrinos (same physics as photons, no scattering)
@@ -789,6 +800,17 @@ def _extract_sources(y, k, tau, bg, th, idx):
     rsa_delta_g_ein = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta) \
                       - (4.0 / k2) * kappa_dot * (theta_b + 0.5 * h_prime_raw)
     rsa_theta_g = -0.5 * h_prime_raw
+    # Reionization correction for theta_g (rsa_MD_with_reio)
+    # cf. CLASS perturbations.c:10427-10435
+    dkd_dloga_src = th.kappa_dot_of_loga.derivative(loga)
+    ddkappa_src = dkd_dloga_src * a_prime_over_a  # d²κ/dτ²
+    cs2_src = th.cs2_of_loga.evaluate(loga)
+    rsa_theta_g = rsa_theta_g + (3.0 / k2) * (
+        ddkappa_src * (theta_b + 0.5 * h_prime_raw)
+        + kappa_dot * (-a_prime_over_a * theta_b
+                       + cs2_src * k2 * delta_b
+                       - a_prime_over_a * h_prime_raw
+                       + k2 * eta))
     rsa_delta_ur = (4.0 / k2) * (a_prime_over_a * h_prime_raw - k2 * eta)
     rsa_theta_ur = -0.5 * h_prime_raw
 
@@ -1331,10 +1353,10 @@ def _tensor_rhs(tau, y, args):
         return dy_acc.at[idx['F_g_start'] + l].set(Fl_prime)
     dy = jax.lax.fori_loop(4, l_max_g, photon_tensor_step, dy)
 
-    # l=l_max truncation
-    tau0_minus_tau = jnp.maximum(bg.conformal_age - tau, 1e-10)
+    # l=l_max truncation (CLASS closure: cotKgen = 1/(k*tau) for flat space)
+    tau_safe_t = jnp.maximum(tau, 1e-10)
     dy = dy.at[idx['F_g_start'] + l_max_g].set(
-        k * F_g[l_max_g - 1] - (l_max_g + 1.0) / tau0_minus_tau * F_g[l_max_g] - kappa_dot * F_g[l_max_g]
+        k * F_g[l_max_g - 1] - (l_max_g + 1.0) / tau_safe_t * F_g[l_max_g] - kappa_dot * F_g[l_max_g]
     )
 
     # === POLARIZATION TENSOR HIERARCHY ===
@@ -1352,7 +1374,7 @@ def _tensor_rhs(tau, y, args):
 
     # l=l_max truncation
     dy = dy.at[idx['G_g_start'] + l_max_pol].set(
-        k * G_g[l_max_pol - 1] - (l_max_pol + 1.0) / tau0_minus_tau * G_g[l_max_pol] - kappa_dot * G_g[l_max_pol]
+        k * G_g[l_max_pol - 1] - (l_max_pol + 1.0) / tau_safe_t * G_g[l_max_pol] - kappa_dot * G_g[l_max_pol]
     )
 
     # === NEUTRINO TENSOR HIERARCHY ===
@@ -1384,7 +1406,7 @@ def _tensor_rhs(tau, y, args):
 
     # l=l_max truncation
     dy = dy.at[idx['F_ur_start'] + l_max_ur].set(
-        k * F_ur[l_max_ur - 1] - (l_max_ur + 1.0) / tau0_minus_tau * F_ur[l_max_ur]
+        k * F_ur[l_max_ur - 1] - (l_max_ur + 1.0) / tau_safe_t * F_ur[l_max_ur]
     )
 
     return dy

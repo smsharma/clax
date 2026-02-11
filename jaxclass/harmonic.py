@@ -142,6 +142,26 @@ def _limber_transfer_ee(source_E, tau_grid, k_grid, tau_0, l):
 # Exact Bessel transfer functions
 # ---------------------------------------------------------------------------
 
+def _chunked_vmap(fn, n, chunk_size=2000):
+    """Apply fn via vmap in chunks to avoid GPU OOM.
+
+    Args:
+        fn: function mapping index -> scalar
+        n: total number of elements
+        chunk_size: max elements per vmap batch
+    Returns:
+        array of shape (n,)
+    """
+    if n <= chunk_size:
+        return jax.vmap(fn)(jnp.arange(n))
+    results = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunk = jax.vmap(fn)(jnp.arange(start, end))
+        results.append(chunk)
+    return jnp.concatenate(results)
+
+
 def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                        source_T1=None, source_T2=None, mode=None, **kwargs):
     """Exact Bessel transfer function T_l(k) for temperature.
@@ -191,7 +211,7 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
 
             return jnp.sum(integrand * dtau_mid)
 
-        return jax.vmap(transfer_single_k_nonibp)(jnp.arange(len(k_grid)))
+        return _chunked_vmap(transfer_single_k_nonibp, len(k_grid))
 
     # Standard IBP modes
     include_T1 = "T1" in mode and source_T1 is not None
@@ -224,7 +244,7 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
 
         return jnp.sum(integrand * dtau_mid)
 
-    return jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
+    return _chunked_vmap(transfer_single_k, len(k_grid))
 
 
 def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
@@ -241,7 +261,7 @@ def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
         radial_E = jl / (x_safe * x_safe)
         return prefactor * jnp.sum(source_E[ik, :] * radial_E * dtau_mid)
 
-    return jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
+    return _chunked_vmap(transfer_single_k, len(k_grid))
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +421,7 @@ def _interp_sources_to_fine_k(sources_list, log_k_coarse, log_k_fine):
 
 def compute_cl_tt_interp(
     pt, params, bg, l_values,
-    n_k_fine=3000,
+    n_k_fine=5000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
@@ -461,7 +481,7 @@ def compute_cl_tt_interp(
 
 def compute_cl_ee_interp(
     pt, params, bg, l_values,
-    n_k_fine=3000,
+    n_k_fine=5000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
 ):
     """Compute C_l^EE with source interpolation to a fine k-grid."""
@@ -487,7 +507,7 @@ def compute_cl_ee_interp(
 
 def compute_cl_te_interp(
     pt, params, bg, l_values,
-    n_k_fine=3000,
+    n_k_fine=5000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
@@ -589,7 +609,7 @@ def compute_cls_all(
 
 def compute_cls_all_interp(
     pt, params, bg, l_max=2500,
-    n_k_fine=3000, tt_mode=None,
+    n_k_fine=5000, tt_mode=None,
 ):
     """Compute all unlensed C_l spectra at l=2..l_max with source interpolation.
 

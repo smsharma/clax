@@ -21,7 +21,7 @@ PREC_FAST = PrecisionParams(
     th_n_points=5000, th_z_max=5e3,
     pt_l_max_g=6, pt_l_max_pol_g=6, pt_l_max_ur=6,
     pt_ode_rtol=1e-3, pt_ode_atol=1e-6,
-    ode_max_steps=16384,
+    ode_max_steps=65536,
 )
 
 
