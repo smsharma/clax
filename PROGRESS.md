@@ -38,29 +38,42 @@ at l_max=50** — photon moments above l=50 are zeroed, corrupting metric
 potentials at high k through Einstein equations. Agent confirmed l_max=80
 OOMs on V100-32GB.
 
-**Options (ordered by likely effectiveness):**
-1. **H100-80GB** — 2.5x more memory, could fit l_max=80-100. Costs 2 SU/hr.
-2. **Hard RSA switch** — replace hierarchy with algebraic expressions
-   post-recombination (what CLASS does). Eliminates truncation entirely.
-   But hard to make differentiable (jax.lax.cond with same-shape branches).
-3. **Gradient checkpointing** — trade compute for memory, allow higher l_max
-   on V100. May add 2-3x compute overhead.
-4. **Accept and mask** — exclude l>700 from likelihood. Loses information but
-   works for a proof-of-concept HMC.
+**Root cause**: hierarchy truncation at l_max=50. After recombination, photon
+moments cascade to high l via free-streaming. With only 50 moments, this energy
+rings back, corrupting lower moments and the metric via Einstein equations.
+Higher l_max just pushes the ringing further away — doesn't fix it.
+
+**Recommended fix: hard RSA switch** (what CLASS does). After recombination
+(`k*tau > 45`, `kappa_dot/aH < 5`), stop evolving the photon/neutrino
+hierarchies entirely and replace with algebraic expressions from the metric:
+`delta_g = 4/k²(aH*h' - k²*eta)`, `theta_g = -h'/2`, `F_l = 0 for l>=2`.
+No hierarchy → no truncation → no ringing. Implementation via `jnp.where`
+on the full state vector (both branches same shape, same pattern as TCA switch).
+This is both cheaper (stays at l_max=50) and more correct than brute-force
+higher l_max.
+
+**Diagnostic first**: try l_max=80 on H100-80GB (2 SU/hr, no code changes) to
+confirm truncation is the cause. If TT l=1000 improves substantially, proceed
+with hard RSA implementation. If not, the problem is elsewhere.
 
 ### Next steps (prioritized for HMC readiness)
 
-1. **High-l TT fix** (critical) — Try H100 with l_max=80, or implement hard
-   RSA switch. Required for Planck-like posteriors.
-2. **RSA validation** (high value) — Four-way A/B test + gradient smoothness.
-   Must pass before trusting HMC gradients.
-3. **Multi-cosmology regression** (high value, easy) — Run at 5-10 param
+1. **Diagnose high-l TT** (quick, critical) — Run l_max=80 on H100 to confirm
+   hierarchy truncation is the cause. No code changes, just GPU time. (30 min)
+2. **Hard RSA switch** (critical) — Implement proper RSA in the ODE: replace
+   hierarchy with algebraic expressions post-recombination. Eliminates
+   truncation ringing at any l_max. cf. CLASS perturbations.c:6235-6243.
+   Use `jnp.where` (same pattern as TCA switch). (moderate effort)
+3. **RSA validation** (high value) — Four-way A/B test (Einstein RSA only /
+   damping only / both / neither) + AD vs finite-diff gradient smoothness
+   across RSA boundary. Must pass before trusting HMC gradients. (1-2 hours)
+4. **Multi-cosmology regression** (high value, easy) — Run at 5-10 param
    points to catch bugs that cancel at fiducial. No code changes, just GPU time.
-4. **Full ncdm hierarchy** (high value, substantial) — Fix remaining TT ~1%
+5. **Full ncdm hierarchy** (high value, substantial) — Fix remaining TT ~1%
    from massless ncdm approximation. Implement Ψ_l(q) variables.
-5. **API cleanup** (medium value) — Consolidate code paths, remove dead scripts,
+6. **API cleanup** (medium value) — Consolidate code paths, remove dead scripts,
    single `compute_cls()` entry point.
-6. **HyRec upgrade** (low-medium, substantial) — Fix EE -0.15% systematic.
+7. **HyRec upgrade** (low-medium, substantial) — Fix EE -0.15% systematic.
    Only needed for sub-0.1% EE.
 
 ### Autonomous agent work (Feb 10-11, 2026 — Bridges-2 GPU loop)
