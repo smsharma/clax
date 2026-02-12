@@ -224,11 +224,15 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
    at these scales (only +0.15pp). The massive neutrino effect at l=30 is
    only 0.01% (confirmed via CLASS massive/massless comparison), so this
    is a CODE error, not a physics approximation issue.
-   Possible causes: (a) z_star differs from CLASS by 0.33% (1089 vs 1085),
-   shifting the visibility peak timing and affecting the ISW-visibility
-   correlation; (b) a subtle error in the ISW source (α'+2aHα-η) that
-   accumulates over the full conformal time integral.
-   **Effort: moderate (need to compare T_l(k) directly against CLASS).**
+   **ROOT CAUSE FOUND**: Newtonian potential Phi is 0.5% too high at
+   recombination due to massless ncdm approximation. The ncdm density
+   perturbation overshoots without proper free-streaming (k>k_fs=0.004
+   Mpc^{-1}), inflating delta_rho → h' → Phi. This Phi offset varies with
+   tau (0.4% at tau=200 to 0.6% at tau=350 to -0.3% at tau=10000),
+   affecting Phi' and the T1 ISW integral over the full conformal time
+   range. z_star matches CLASS perfectly (1088.78 vs 1088.78) — the
+   apparent 0.33% "error" was a naming confusion (our z_star = CLASS z_rec).
+   **Fix: implement full ncdm perturbation hierarchy Ψ_l(q).**
 
 2. **EE systematic bias ~-0.15%**: Present across l=20-700, from RECFAST
    physics accuracy (x_e error ~0.25% at z_star). Confirmed insensitive
