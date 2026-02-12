@@ -12,16 +12,14 @@
 - **Only search within** `.` and `../class_public-3.3.4/`
 - Use `grep` or `Grep` to search file contents — never `find` with broad paths.
 
-### GPU access (login node → compute node)
-You are running on the **login node**. A GPU batch job runs separately.
-To run python/pytest on the GPU, use the wrapper:
+### GPU access
+You are running **directly on a GPU compute node** (V100-32GB).
+Run python and pytest directly — no wrapper needed:
 ```bash
-bash scripts/gpu-run.sh "python scripts/gpu_planck_test.py"
-bash scripts/gpu-run.sh "pytest tests/ --fast -x -q"
-bash scripts/gpu-run.sh "python -c 'import jax; print(jax.devices())'"
+python scripts/gpu_planck_test.py
+pytest tests/ --fast -x -q
 ```
-This automatically finds the GPU job and runs the command there.
-Do NOT run python or pytest directly — the login node has no GPU.
+Do NOT use `gpu-run.sh` — that was for login-node use only.
 
 ## What is this?
 
