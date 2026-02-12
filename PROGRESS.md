@@ -71,11 +71,13 @@ Agent running via `scripts/gpu_claude_loop.sh` (Carlini-style while-true loop).
 - BashTool pre-flight check warnings (benign, resolved with CI=true).
 - Agent not updating PROGRESS.md (fixed in prompt).
 
-With `planck_cl` preset (k_max=1.0, 300 modes) + source interpolation:
-- **C_l^EE sub-0.3% from l=20 to l=1000** (0.10-0.30%)
-- **C_l^TT sub-0.6% from l=100 to l=1000** (0.02-0.57%)
-- **C_l^TE sub-0.4% from l=100 to l=700** (0.02-0.38%)
-- TT +1.5% at l=30-50 from massless neutrino approximation
+With `planck_cl` preset (k_max=1.0, 300 modes) + source interpolation + ncdm (ρ+p) correction:
+- **C_l^TT/EE/TE ALL <0.1% at l=150-300** (acoustic peaks, science-grade)
+- **C_l^TT sub-0.6% from l=100 to l=1000** (0.006-0.57%)
+- **C_l^EE sub-0.3% from l=100 to l=1000** (0.005-0.26%)
+- **C_l^TE sub-0.2% from l=100 to l=700** (0.01-0.19%)
+- TT +0.8% at l=30-50 from ncdm perturbation dynamics (needs full Ψ_l(q))
+- TT/EE -0.14 to -0.23% at l=500-700 from RECFAST x_e accuracy (needs HyRec)
 
 Bessel functions accurate to machine precision at l=2500.
 RSA damping in ODE for post-recombination hierarchy.
