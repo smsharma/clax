@@ -21,6 +21,48 @@ physics-consistency work remains before production-grade for Planck-like TT.
 3. Resolve remaining TT systematics (ncdm dynamics / approximation boundary)
 4. Clean up and harden API paths (mode handling / interp path edge cases)
 
+### High-l TT accuracy — critical for HMC/Planck
+
+**This is a blocker for HMC with Planck-like data** (most constraining power
+at l=30-1500). Current high-l status:
+
+| l | TT error | EE error |
+|---|----------|----------|
+| 500 | -0.57% | -0.25% |
+| 700 | -1.58% | -0.96% |
+| 1000 | -7.23% | -0.89% |
+| 2000 | ~17% | ~1% |
+
+EE is fine across all l. TT degrades above l~700 due to **hierarchy truncation
+at l_max=50** — photon moments above l=50 are zeroed, corrupting metric
+potentials at high k through Einstein equations. Agent confirmed l_max=80
+OOMs on V100-32GB.
+
+**Options (ordered by likely effectiveness):**
+1. **H100-80GB** — 2.5x more memory, could fit l_max=80-100. Costs 2 SU/hr.
+2. **Hard RSA switch** — replace hierarchy with algebraic expressions
+   post-recombination (what CLASS does). Eliminates truncation entirely.
+   But hard to make differentiable (jax.lax.cond with same-shape branches).
+3. **Gradient checkpointing** — trade compute for memory, allow higher l_max
+   on V100. May add 2-3x compute overhead.
+4. **Accept and mask** — exclude l>700 from likelihood. Loses information but
+   works for a proof-of-concept HMC.
+
+### Next steps (prioritized for HMC readiness)
+
+1. **High-l TT fix** (critical) — Try H100 with l_max=80, or implement hard
+   RSA switch. Required for Planck-like posteriors.
+2. **RSA validation** (high value) — Four-way A/B test + gradient smoothness.
+   Must pass before trusting HMC gradients.
+3. **Multi-cosmology regression** (high value, easy) — Run at 5-10 param
+   points to catch bugs that cancel at fiducial. No code changes, just GPU time.
+4. **Full ncdm hierarchy** (high value, substantial) — Fix remaining TT ~1%
+   from massless ncdm approximation. Implement Ψ_l(q) variables.
+5. **API cleanup** (medium value) — Consolidate code paths, remove dead scripts,
+   single `compute_cls()` entry point.
+6. **HyRec upgrade** (low-medium, substantial) — Fix EE -0.15% systematic.
+   Only needed for sub-0.1% EE.
+
 ### Autonomous agent work (Feb 10-11, 2026 — Bridges-2 GPU loop)
 
 Agent running via `scripts/gpu_claude_loop.sh` (Carlini-style while-true loop).
