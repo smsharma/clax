@@ -1,6 +1,6 @@
 # jaxCLASS Development Progress
 
-## Status: Sub-percent C_l — EE 0.1-0.3% at l=20-1000, TT 0.02-0.55% at l=100-700
+## Status: Science-grade C_l at acoustic peaks — TT/EE/TE <0.1% at l=150-300
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
