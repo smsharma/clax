@@ -5,6 +5,22 @@
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
 
+### External review (Feb 11, 2026)
+
+**Assessment: decent and close, but not done.** Meaningful validation and
+physics-consistency work remains before production-grade for Planck-like TT.
+
+- **EE**: very good (near/sub-percent over wide l range)
+- **TT**: good at acoustic peaks/mid-l, residual issues at low-l and high-l
+- **Main risk**: model consistency (RSA/hybrid switching logic), not basic numerics
+- **Tooling/diagnostics**: mature, can iterate quickly
+
+**Remaining for science-robust:**
+1. Lock down RSA strategy (consistency + differentiability + validation)
+2. Tight regression grid across presets/cosmologies (not just fiducial LCDM)
+3. Resolve remaining TT systematics (ncdm dynamics / approximation boundary)
+4. Clean up and harden API paths (mode handling / interp path edge cases)
+
 ### Autonomous agent work (Feb 10-11, 2026 — Bridges-2 GPU loop)
 
 Agent running via `scripts/gpu_claude_loop.sh` (Carlini-style while-true loop).
@@ -253,6 +269,16 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 5. **Single cosmology validated**: Only Planck 2018 fiducial tested.
    **Effort: trivial (GPU time only).**
+
+6. **RSA hybrid design needs validation**: Einstein equations and source
+   extraction use a hard `jnp.where(is_rsa, ...)` switch (lines 503-506,
+   871-874), while hierarchy evolution uses smooth sigmoid damping (line 680).
+   This hybrid is intentional (hard RSA switch isn't differentiable for the
+   hierarchy ODE), but could cause gradient artifacts at the RSA boundary.
+   **Recommended checks**: (a) A/B test: Einstein RSA only / damping only /
+   both / neither; (b) AD vs finite-diff gradient smoothness across RSA
+   threshold; (c) sweep RSA thresholds (45,5) for TT/TE stability l=30-1000.
+   **Effort: moderate (GPU diagnostic runs).**
 
 **Next steps (ordered by effort/impact):**
 
