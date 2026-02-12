@@ -225,17 +225,19 @@ class PrecisionParams:
 
     @staticmethod
     def planck_cl():
-        """Planck-quality preset targeting <1% C_l at l=2-2500.
+        """Planck-quality preset targeting <0.1% C_l at l=20-300.
 
         k_max=1.0 covers l~2500 with margin. 60 k/decade is sufficient
         when using source-interpolated C_l (compute_cl_tt_interp).
         l_max=50, 5000 tau points, tight ODE tolerance.
+        th_n_points=100000 for converged RECFAST stepping (Heun 2nd order).
         ~300 k-modes total. Use with compute_cls_all_interp.
         """
         return PrecisionParams(
             pt_k_max_cl=1.0,         # covers l~2500 with margin
             pt_k_per_decade=60,      # sufficient with source interpolation
             pt_tau_n_points=5000,
+            th_n_points=100000,      # converged RECFAST stepping (was 20000)
             pt_l_max_g=50,
             pt_l_max_pol_g=50,
             pt_l_max_ur=50,
