@@ -86,19 +86,34 @@ def compute_pk(
         P(k) in Mpc^3
     """
     import diffrax
-    from jaxclass.perturbations import _build_indices, _adiabatic_ic, _perturbation_rhs
+    from jaxclass.perturbations import (_build_indices, _adiabatic_ic,
+                                        _perturbation_rhs, _ncdm_quadrature)
 
     bg = background_solve(params, prec)
     th = thermodynamics_solve(params, prec, bg)
 
     l_max = prec.pt_l_max_g
-    idx = _build_indices(l_max, prec.pt_l_max_pol_g, prec.pt_l_max_ur)
+    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 and params.m_ncdm > 0 else 0
+    l_max_ncdm = prec.pt_l_max_ncdm
+    idx = _build_indices(l_max, prec.pt_l_max_pol_g, prec.pt_l_max_ur,
+                         n_q_ncdm, l_max_ncdm)
+
+    if n_q_ncdm > 0:
+        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
+    else:
+        q_ncdm = jnp.zeros(1)
+        w_ncdm = jnp.zeros(1)
+        M_ncdm = 0.0
+        dlnf0_ncdm = jnp.zeros(1)
+    args_ncdm = (q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
 
     tau_ini = 0.5
     tau_end = bg.conformal_age * 0.999
 
-    y0 = _adiabatic_ic(k, jnp.array(tau_ini), bg, params, idx, idx['n_eq'])
-    args = (k, bg, th, params, idx, l_max, prec.pt_l_max_pol_g, prec.pt_l_max_ur)
+    y0 = _adiabatic_ic(k, jnp.array(tau_ini), bg, params, idx, idx['n_eq'],
+                        args_ncdm=args_ncdm)
+    args = (k, bg, th, params, idx, l_max, prec.pt_l_max_pol_g, prec.pt_l_max_ur,
+            q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
 
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(_perturbation_rhs),

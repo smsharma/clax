@@ -50,7 +50,8 @@ _RSA_DAMPING_ENABLED = True
 # State vector index layout
 # ---------------------------------------------------------------------------
 
-def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int):
+def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int,
+                   n_q_ncdm: int = 0, l_max_ncdm: int = 17):
     """Build index mapping for the perturbation state vector.
 
     Returns a dict mapping variable names to indices.
@@ -88,14 +89,73 @@ def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int):
         idx[f'F_ur_{l}'] = i; i += 1
     idx['F_ur_end'] = i
 
-    # Massive neutrinos (ncdm) fluid approximation: 3 variables
-    # cf. CLASS perturbations.c:9537-9567 (ncdmfa_CLASS)
-    idx['delta_ncdm'] = i; i += 1
-    idx['theta_ncdm'] = i; i += 1
-    idx['shear_ncdm'] = i; i += 1
+    # Massive neutrinos (ncdm) — full Boltzmann hierarchy Ψ_l(q)
+    # Layout: [Ψ_0(q0), Ψ_1(q0), ..., Ψ_lmax(q0), Ψ_0(q1), ..., Ψ_lmax(qN)]
+    # Each q-bin has (l_max_ncdm + 1) multipoles.
+    # cf. CLASS perturbations.c:9575-9625
+    idx['psi_ncdm_start'] = i
+    idx['n_q_ncdm'] = n_q_ncdm
+    idx['l_max_ncdm'] = l_max_ncdm
+    n_ncdm_vars = n_q_ncdm * (l_max_ncdm + 1)
+    i += n_ncdm_vars
+    idx['psi_ncdm_end'] = i
 
     idx['n_eq'] = i
     return idx
+
+
+def _ncdm_quadrature(params, prec):
+    """Compute ncdm momentum quadrature quantities for perturbation hierarchy.
+
+    Returns: (q, w, M, dlnf0_dlnq) arrays for the momentum bins.
+    """
+    from jaxclass.background import _gauss_laguerre_nodes_weights
+    q, w = _gauss_laguerre_nodes_weights(prec.ncdm_q_size)
+
+    T_ncdm_K = params.T_ncdm_over_T_cmb * params.T_cmb
+    T_ncdm_eV = const.k_B_SI * T_ncdm_K / const.eV_SI
+    M = params.m_ncdm / params.N_ncdm / T_ncdm_eV  # dimensionless mass
+
+    # dlnf0/dlnq for Fermi-Dirac: d(ln f0)/d(ln q) = -q * exp(q) / (exp(q) + 1)
+    dlnf0_dlnq = -q * jnp.exp(q) / (jnp.exp(q) + 1.0)
+
+    return q, w, M, dlnf0_dlnq
+
+
+def _ncdm_integrated_moments(y, q, w, M, a, k, idx):
+    """Compute integrated density/velocity/shear moments from Ψ_l(q) hierarchy.
+
+    Returns: (rho_delta, rho_plus_p_theta, rho_plus_p_shear, delta_p)
+    All are UNNORMALIZED (need to multiply by factor/a^4, or equivalently
+    divide by the corresponding background integrals).
+
+    cf. CLASS perturbations.c:7090-7093
+    """
+    n_q = idx['n_q_ncdm']
+    l_max = idx['l_max_ncdm']
+    n_l = l_max + 1
+    start = idx['psi_ncdm_start']
+
+    epsilon = jnp.sqrt(q**2 + (M * a)**2)
+
+    # Extract Ψ_0, Ψ_1, Ψ_2 for each q-bin using array indexing
+    # Layout: psi_ncdm[start + iq * n_l + l]
+    iq_indices = jnp.arange(n_q)
+    psi_0 = y[start + iq_indices * n_l]
+    psi_1 = y[start + iq_indices * n_l + 1]
+    psi_2 = y[start + iq_indices * n_l + 2]
+
+    # Integrated moments (unnormalized)
+    rho_delta = jnp.dot(w * epsilon, psi_0)        # Σ w ε Ψ_0
+    rho_plus_p_theta = k * jnp.dot(w * q, psi_1)   # k Σ w q Ψ_1
+    rho_plus_p_shear = (2.0/3.0) * jnp.dot(w * q**2 / epsilon, psi_2)
+    delta_p = (1.0/3.0) * jnp.dot(w * q**2 / epsilon, psi_0)
+
+    # Background integrals for normalization
+    rho_unnorm = jnp.dot(w, epsilon)
+    p_unnorm = jnp.dot(w, q**2 / (3.0 * epsilon))
+
+    return rho_delta, rho_plus_p_theta, rho_plus_p_shear, delta_p, rho_unnorm, p_unnorm
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +208,7 @@ class PerturbationResult:
 # Adiabatic initial conditions (Ma & Bertschinger 1995)
 # ---------------------------------------------------------------------------
 
-def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq):
+def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq, args_ncdm=None):
     """Compute adiabatic initial conditions at conformal time tau_ini.
 
     Deep in the radiation era (kτ << 1), all modes are super-horizon.
@@ -253,12 +313,32 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq):
     y0 = y0.at[idx['F_ur_1']].set(4.0 * theta_ur / (3.0 * k))
     y0 = y0.at[idx['F_ur_2']].set(2.0 * shear_ur)  # F_2 = 2σ
 
-    # Massive neutrino (ncdm) fluid: at early times, ncdm is relativistic
-    # and behaves like massless neutrinos. Same adiabatic ICs.
-    # cf. CLASS perturbations.c:5453 (delta_ncdm = delta_ur at leading order)
-    y0 = y0.at[idx['delta_ncdm']].set(delta_ur)
-    y0 = y0.at[idx['theta_ncdm']].set(theta_ur)
-    y0 = y0.at[idx['shear_ncdm']].set(shear_ur)
+    # Massive neutrino (ncdm) Boltzmann hierarchy Ψ_l(q)
+    # At early times, ncdm is relativistic and ICs match massless neutrinos
+    # weighted by dlnf0/dlnq for each momentum bin.
+    # cf. CLASS perturbations.c:5815-5821
+    n_q = idx['n_q_ncdm']
+    l_max_ncdm = idx['l_max_ncdm']
+    n_l_ncdm = l_max_ncdm + 1
+    ncdm_start = idx['psi_ncdm_start']
+
+    if n_q > 0:
+        q_ncdm, w_ncdm, M_ncdm, dlnf0 = args_ncdm
+        epsilon_ini = jnp.sqrt(q_ncdm**2 + (M_ncdm * a_ini)**2)
+
+        for iq in range(n_q):
+            base = ncdm_start + iq * n_l_ncdm
+            # Ψ_0(q) = -1/4 * δ_ur * dlnf0/dlnq
+            y0 = y0.at[base].set(-0.25 * delta_ur * dlnf0[iq])
+            # Ψ_1(q) = -(ε/(3qk)) * θ_ur * dlnf0/dlnq
+            # θ_ur = 3kF_ur_1/4, so Ψ_1 = -(ε/(3qk)) * 3k*F_ur_1/4 * dlnf0
+            #       = -ε * F_ur_1 / (4q) * dlnf0
+            # But simpler: Ψ_1 = -(ε/(3qk)) * theta_ur * dlnf0
+            psi1_val = -(epsilon_ini[iq] / (3.0 * q_ncdm[iq] * k)) * theta_ur * dlnf0[iq]
+            y0 = y0.at[base + 1].set(psi1_val)
+            # Ψ_2(q) = -1/2 * σ_ur * dlnf0/dlnq
+            y0 = y0.at[base + 2].set(-0.5 * shear_ur * dlnf0[iq])
+            # Higher moments: 0
 
     # Polarization starts at 0 (correct for adiabatic IC)
 
@@ -402,7 +482,16 @@ def _perturbation_rhs(tau, y, args):
     cf. CLASS perturbations.c:9960-10200: perturbations_tca_slip_and_shear()
     cf. Ma & Bertschinger (1995) Eqs. (25)-(56)
     """
-    (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur) = args
+    (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur) = args[:8]
+    # ncdm quadrature arrays (static across k-modes, stored as extra args)
+    # Note: use _qw prefix to avoid collision with background w_ncdm (equation of state)
+    if len(args) > 8:
+        q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, dlnf0_ncdm_qw = args[8], args[9], args[10], args[11]
+    else:
+        q_ncdm_qw = jnp.zeros(1)
+        w_ncdm_qw = jnp.zeros(1)
+        M_ncdm_qw = 0.0
+        dlnf0_ncdm_qw = jnp.zeros(1)
 
     # Background quantities at this τ
     loga = bg.loga_of_tau.evaluate(tau)
@@ -441,10 +530,27 @@ def _perturbation_rhs(tau, y, args):
     delta_ur = F_ur[0]
     theta_ur = 3.0 * k * F_ur[1] / 4.0
 
-    # Massive neutrino fluid variables
-    delta_ncdm = y[idx['delta_ncdm']]
-    theta_ncdm = y[idx['theta_ncdm']]
-    shear_ncdm = y[idx['shear_ncdm']]
+    # Massive neutrino (ncdm) integrated moments from Ψ_l(q) hierarchy
+    # cf. CLASS perturbations.c:7047-7118
+    n_q = idx['n_q_ncdm']
+    l_max_ncdm = idx['l_max_ncdm']
+    if n_q > 0:
+        (rho_delta_ncdm, rho_plus_p_theta_ncdm, rho_plus_p_shear_ncdm,
+         delta_p_ncdm_raw, rho_unnorm_ncdm, p_unnorm_ncdm) = _ncdm_integrated_moments(
+            y, q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, a, k, idx)
+        # Convert to physical: δ_ncdm = rho_delta / rho_unnorm
+        delta_ncdm = rho_delta_ncdm / jnp.maximum(rho_unnorm_ncdm, 1e-30)
+        # θ_ncdm = rho_plus_p_theta / (rho_unnorm + p_unnorm)
+        theta_ncdm = rho_plus_p_theta_ncdm / jnp.maximum(rho_unnorm_ncdm + p_unnorm_ncdm, 1e-30)
+        # σ_ncdm = rho_plus_p_shear / (rho_unnorm + p_unnorm)
+        shear_ncdm_F2 = rho_plus_p_shear_ncdm / jnp.maximum(rho_unnorm_ncdm + p_unnorm_ncdm, 1e-30)
+        # δp_ncdm / ρ_ncdm
+        delta_p_over_rho_ncdm = delta_p_ncdm_raw / jnp.maximum(rho_unnorm_ncdm, 1e-30)
+    else:
+        delta_ncdm = delta_ur
+        theta_ncdm = theta_ur
+        shear_ncdm_F2 = F_ur[2] / 2.0
+        delta_p_over_rho_ncdm = delta_ur / 3.0
 
     Pi = F_g[2] + G_g[0] + G_g[2]
 
@@ -471,9 +577,9 @@ def _perturbation_rhs(tau, y, args):
     # in perturbations_einstein(). Our one-step approach is equivalent.
 
     # Raw delta_rho and h_prime (used to compute RSA values)
-    # ncdm uses F_ur hierarchy values but with correct density (same perturbations, proper background)
+    # ncdm uses integrated moments from full Ψ_l(q) hierarchy
     delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
-                     + rho_ur * delta_ur + rho_ncdm * delta_ur)
+                     + rho_ur * delta_ur + rho_ncdm * delta_ncdm)
     h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
 
     # RSA photon values (synchronous gauge, rsa_MD_with_reio)
@@ -506,17 +612,14 @@ def _perturbation_rhs(tau, y, args):
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur)
 
     # Total density perturbation δρ with RSA substitution
-    # ncdm uses F_ur hierarchy values (same perturbation dynamics as massless)
+    # ncdm uses integrated moments from full Ψ_l(q) hierarchy
+    # RSA for ncdm: use algebraic RSA values when RSA is active
+    delta_ncdm_ein = jnp.where(is_rsa, rsa_delta_ur, delta_ncdm)
+    theta_ncdm_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ncdm)
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
-                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein)
 
-    # Total (ρ+p)θ with RSA substitution
-    # KEY FIX: ncdm uses CORRECT (rho+p) = (rho_ncdm + p_ncdm) instead of (4/3)*rho_ncdm
-    # This accounts for the mass-dependent equation of state, which transitions from
-    # (4/3)*rho (relativistic, w=1/3) to rho (non-relativistic, w=0).
-    # The perturbation variable (theta_ur_ein) stays the same (massless hierarchy).
-    # cf. CLASS perturbations.c:7065-7068 (ncdm enters Einstein eqs via integrated moments)
-    theta_ncdm_ein = theta_ur_ein  # use massless hierarchy value
+    # Total (ρ+p)θ with RSA + ncdm hierarchy
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
                         + (rho_ncdm + p_ncdm) * theta_ncdm_ein)
@@ -530,8 +633,10 @@ def _perturbation_rhs(tau, y, args):
     eta_prime = 1.5 * a2 * rho_plus_p_theta / k2
 
     # Total pressure perturbation δp with RSA substitution
-    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 \
-              + rho_ncdm * delta_ur_ein / 3.0
+    # ncdm: use δp from integrated moments (NOT rho*delta/3 which assumes w=1/3)
+    delta_p_ncdm_ein = jnp.where(is_rsa, rho_ncdm * rsa_delta_ur / 3.0,
+                                  rho_ncdm * delta_p_over_rho_ncdm)
+    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 + delta_p_ncdm_ein
 
     # α = (h' + 6η') / (2k²) -- gauge variable
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
@@ -557,14 +662,12 @@ def _perturbation_rhs(tau, y, args):
     F_g_2_blended = jnp.where(is_tca > 0.5, tca_F_g_2_1st, F_g[2])
     F_g_2_blended = jnp.where(is_rsa, 0.0, F_g_2_blended)
     F_ur_2_blended = jnp.where(is_rsa, 0.0, F_ur[2])
-    # ncdm shear: use F_ur hierarchy with correct (ρ+p) weighting
-    # (ρ+p)*σ_ncdm = (rho_ncdm + p_ncdm) * F_ur_2/2
-    # For massless: (4/3)*rho * F_ur_2/2 = (2/3)*rho*F_ur_2
-    # For massive: (rho+p) * F_ur_2/2
-    F_ncdm_2_blended = F_ur_2_blended  # same hierarchy dynamics
+    # ncdm shear: use integrated moments from Ψ_l(q) hierarchy
+    # Under RSA, ncdm shear → 0 (same as photon/neutrino)
+    shear_ncdm_blended = jnp.where(is_rsa, 0.0, shear_ncdm_F2)
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_blended
                         + 2.0/3.0 * rho_ur * F_ur_2_blended
-                        + (rho_ncdm + p_ncdm) * F_ncdm_2_blended / 2.0)
+                        + (rho_ncdm + p_ncdm) * shear_ncdm_blended)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
@@ -616,6 +719,7 @@ def _perturbation_rhs(tau, y, args):
     # l=0 (monopole): δ'_γ = -4/3 θ_γ - 2/3 h'
     # In F_l convention: F'_0 = -k F_1 - 2/3 h'
     # Same in both TCA and full (monopole equation is identical)
+    # DEBUG: check shapes
     dy = dy.at[idx['F_g_0']].set(-k * F_g[1] - 2.0/3.0 * h_prime)
 
     # l=1 (dipole): different in TCA vs full
@@ -753,14 +857,63 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['G_g_start'] + l].add(-rsa_rate * G_g[l])
     dy = jax.lax.fori_loop(0, l_max_pol + 1, rsa_damp_pol_step, dy)
 
-    # === MASSIVE NEUTRINO (ncdm) DUMMY EVOLUTION ===
-    # The ncdm fluid variables mirror the massless neutrino hierarchy (F_ur)
-    # to provide the correct perturbation dynamics. The key improvement is in
-    # the Einstein equations where (rho_ncdm + p_ncdm) replaces (4/3)*rho_ncdm.
-    # cf. CLASS: ncdm enters Einstein eqs via integrated moments of Ψ_l(q)
-    dy = dy.at[idx['delta_ncdm']].set(0.0)
-    dy = dy.at[idx['theta_ncdm']].set(0.0)
-    dy = dy.at[idx['shear_ncdm']].set(0.0)
+    # === MASSIVE NEUTRINO (ncdm) BOLTZMANN HIERARCHY Ψ_l(q) ===
+    # Full phase-space evolution for each momentum bin q.
+    # cf. CLASS perturbations.c:9575-9625
+    #
+    # dΨ_0/dτ = -(kq/ε)Ψ_1 + (h'/6)*dlnf0/dlnq
+    # dΨ_1/dτ = (kq/ε)/3*(Ψ_0 - 2Ψ_2)  [metric_euler=0 sync gauge]
+    # dΨ_2/dτ = (kq/ε)/5*(2Ψ_1 - 3Ψ_3) - (2/15)*metric_shear*dlnf0/dlnq
+    # dΨ_l/dτ = (kq/ε)/(2l+1)*(lΨ_{l-1} - (l+1)Ψ_{l+1})  for l>2
+    # dΨ_lmax/dτ = (kq/ε)*Ψ_{lmax-1} - (lmax+1)/τ*Ψ_lmax  (Ma & Bertschinger closure)
+    n_l_ncdm = l_max_ncdm + 1
+    ncdm_start = idx['psi_ncdm_start']
+    epsilon_ncdm = jnp.sqrt(q_ncdm_qw**2 + (M_ncdm_qw * a)**2)
+
+    if n_q > 0:
+        def ncdm_hierarchy_all_q(iq, dy_acc):
+            """Evolve all multipoles for q-bin iq."""
+            q_i = q_ncdm_qw[iq]
+            eps_i = epsilon_ncdm[iq]
+            dlnf0_i = dlnf0_ncdm_qw[iq]
+            kq_over_eps = k * q_i / eps_i
+            base = ncdm_start + iq * n_l_ncdm
+
+            # Extract Ψ values for this q-bin
+            psi = jax.lax.dynamic_slice(y, (base,), (n_l_ncdm,))
+
+            # l=0: monopole
+            dpsi_0 = -kq_over_eps * psi[1] + (h_prime / 6.0) * dlnf0_i
+            dy_acc = dy_acc.at[base].set(dpsi_0)
+
+            # l=1: dipole (metric_euler = 0 in synchronous gauge)
+            dpsi_1 = kq_over_eps / 3.0 * (psi[0] - 2.0 * psi[2])
+            dy_acc = dy_acc.at[base + 1].set(dpsi_1)
+
+            # l=2: quadrupole (with metric shear source)
+            psi_3 = jnp.where(l_max_ncdm >= 3, psi[jnp.minimum(3, l_max_ncdm)], 0.0)
+            dpsi_2 = kq_over_eps / 5.0 * (2.0 * psi[1] - 3.0 * psi_3) \
+                      - (2.0 / 15.0) * metric_shear * dlnf0_i
+            dy_acc = dy_acc.at[base + 2].set(dpsi_2)
+
+            # l=3 to l_max-1: standard hierarchy
+            def ncdm_l_step(l, dy_inner):
+                psi_lm1 = psi[l - 1]
+                psi_lp1 = psi[jnp.minimum(l + 1, l_max_ncdm)]
+                dpsi_l = kq_over_eps / (2.0 * l + 1.0) * (
+                    l * psi_lm1 - (l + 1.0) * psi_lp1)
+                return dy_inner.at[base + l].set(dpsi_l)
+            dy_acc = jax.lax.fori_loop(3, l_max_ncdm, ncdm_l_step, dy_acc)
+
+            # l=l_max: truncation (Ma & Bertschinger closure)
+            # dΨ_lmax/dτ = (kq/ε)*Ψ_{lmax-1} - (lmax+1)/τ*Ψ_lmax
+            dpsi_lmax = kq_over_eps * psi[l_max_ncdm - 1] \
+                        - (l_max_ncdm + 1.0) / tau_safe * psi[l_max_ncdm]
+            dy_acc = dy_acc.at[base + l_max_ncdm].set(dpsi_lmax)
+
+            return dy_acc
+
+        dy = jax.lax.fori_loop(0, n_q, ncdm_hierarchy_all_q, dy)
 
     # === SET METRIC DERIVATIVES ===
     dy = dy.at[idx['eta']].set(eta_prime)
@@ -778,7 +931,8 @@ def _perturbation_rhs(tau, y, args):
 # Source function extraction
 # ---------------------------------------------------------------------------
 
-def _extract_sources(y, k, tau, bg, th, idx):
+def _extract_sources(y, k, tau, bg, th, idx,
+                     q_ncdm=None, w_ncdm=None, M_ncdm=0.0):
     """Extract CMB source functions from the perturbation state.
 
     Uses the non-IBP form: S_T0 × j_l + S_T1 × j_l' in the transfer integral.
@@ -819,11 +973,6 @@ def _extract_sources(y, k, tau, bg, th, idx):
     F_ur_1 = y[idx['F_ur_1']]
     F_ur_2 = y[idx['F_ur_2']]
 
-    # Massive neutrino fluid variables
-    delta_ncdm = y[idx['delta_ncdm']]
-    theta_ncdm = y[idx['theta_ncdm']]
-    shear_ncdm = y[idx['shear_ncdm']]
-
     # Background densities
     rho_g = bg.rho_g_of_loga.evaluate(loga)
     rho_b = bg.rho_b_of_loga.evaluate(loga)
@@ -832,10 +981,21 @@ def _extract_sources(y, k, tau, bg, th, idx):
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
     p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
 
+    # Massive neutrino integrated moments from Ψ_l(q) hierarchy
+    n_q = idx['n_q_ncdm']
+    if n_q > 0 and q_ncdm is not None:
+        (rho_delta_ncdm_s, rho_plus_p_theta_ncdm_s, rho_plus_p_shear_ncdm_s,
+         _, rho_unnorm_s, p_unnorm_s) = _ncdm_integrated_moments(
+            y, q_ncdm, w_ncdm, M_ncdm, a, k, idx)
+        delta_ncdm_src = rho_delta_ncdm_s / jnp.maximum(rho_unnorm_s, 1e-30)
+        theta_ncdm_src = rho_plus_p_theta_ncdm_s / jnp.maximum(rho_unnorm_s + p_unnorm_s, 1e-30)
+        shear_ncdm_F2_src = rho_plus_p_shear_ncdm_s / jnp.maximum(rho_unnorm_s + p_unnorm_s, 1e-30)
+    else:
+        delta_ncdm_src = F_ur_0
+        theta_ncdm_src = 3.0 * k * F_ur_1 / 4.0
+        shear_ncdm_F2_src = F_ur_2 / 2.0
+
     # --- Einstein constraints WITH RSA substitution ---
-    # CLASS perturbations_source_functions() calls perturbations_einstein() which
-    # applies RSA corrections. We must do the same to get correct h', η', α, α'.
-    # cf. CLASS perturbations.c:8218-8265, 10407-10462
     theta_g_raw = 3.0 * k * F_g_1 / 4.0
     theta_ur_raw = 3.0 * k * F_ur_1 / 4.0
 
@@ -845,8 +1005,9 @@ def _extract_sources(y, k, tau, bg, th, idx):
     is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
 
     # First compute raw h' (needed for RSA algebraic values)
+    # ncdm: use integrated moments from hierarchy
     delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
-                     + rho_ur * F_ur_0 + rho_ncdm * F_ur_0)
+                     + rho_ur * F_ur_0 + rho_ncdm * delta_ncdm_src)
     h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
 
     # RSA photon/neutrino values (cf. CLASS perturbations.c:10417-10447)
@@ -873,11 +1034,12 @@ def _extract_sources(y, k, tau, bg, th, idx):
     delta_ur_ein = jnp.where(is_rsa, rsa_delta_ur, F_ur_0)
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur_raw)
 
+    # ncdm: use integrated moments; RSA override when active
+    delta_ncdm_ein_src = jnp.where(is_rsa, rsa_delta_ur, delta_ncdm_src)
+    theta_ncdm_ein_src = jnp.where(is_rsa, rsa_theta_ur, theta_ncdm_src)
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
-                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein_src)
 
-    # ncdm: correct (ρ+p) weighting with F_ur hierarchy values
-    theta_ncdm_ein_src = theta_ur_ein
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
                         + (rho_ncdm + p_ncdm) * theta_ncdm_ein_src)
@@ -899,9 +1061,10 @@ def _extract_sources(y, k, tau, bg, th, idx):
     # For RSA: photon shear → 0, neutrino shear → 0
     F_g_2_ein = jnp.where(is_rsa, 0.0, F_g_2)
     F_ur_2_ein = jnp.where(is_rsa, 0.0, F_ur_2)
+    shear_ncdm_ein_src = jnp.where(is_rsa, 0.0, shear_ncdm_F2_src)
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_ein
                         + 2.0/3.0 * rho_ur * F_ur_2_ein
-                        + (rho_ncdm + p_ncdm) * F_ur_2_ein / 2.0)
+                        + (rho_ncdm + p_ncdm) * shear_ncdm_ein_src)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
@@ -1077,8 +1240,22 @@ def perturbations_solve(
     l_max_pol = prec.pt_l_max_pol_g
     l_max_ur = prec.pt_l_max_ur
 
-    idx = _build_indices(l_max_g, l_max_pol, l_max_ur)
+    # ncdm quadrature (momentum bins, weights, mass, dlnf0/dlnq)
+    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 and params.m_ncdm > 0 else 0
+    l_max_ncdm = prec.pt_l_max_ncdm
+
+    idx = _build_indices(l_max_g, l_max_pol, l_max_ur, n_q_ncdm, l_max_ncdm)
     n_eq = idx['n_eq']
+
+    # Compute ncdm quadrature quantities
+    if n_q_ncdm > 0:
+        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
+    else:
+        q_ncdm = jnp.zeros(1)
+        w_ncdm = jnp.zeros(1)
+        M_ncdm = 0.0
+        dlnf0_ncdm = jnp.zeros(1)
+    args_ncdm = (q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
 
     # k-grid
     k_grid = _k_grid(prec)
@@ -1101,10 +1278,12 @@ def perturbations_solve(
     def solve_single_k(k):
         """Solve for a single k-mode."""
         # Initial conditions
-        y0 = _adiabatic_ic(k, jnp.array(tau_ini), bg, params, idx, n_eq)
+        y0 = _adiabatic_ic(k, jnp.array(tau_ini), bg, params, idx, n_eq,
+                           args_ncdm=args_ncdm)
 
-        # ODE args
-        ode_args = (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur)
+        # ODE args (includes ncdm quadrature info)
+        ode_args = (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur,
+                    q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
 
         # Solve
         sol = diffrax.diffeqsolve(
@@ -1127,7 +1306,8 @@ def perturbations_solve(
         def extract_at_tau(i):
             y_i = sol.ys[i]
             tau_i = tau_grid[i]
-            return _extract_sources(y_i, k, tau_i, bg, th, idx)
+            return _extract_sources(y_i, k, tau_i, bg, th, idx,
+                                    q_ncdm=q_ncdm, w_ncdm=w_ncdm, M_ncdm=M_ncdm)
 
         sources = jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
         return sources  # tuple of 12 arrays, each shape (n_tau,)
