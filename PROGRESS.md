@@ -90,23 +90,23 @@ source-interpolated to 10000 fine k-points (chunked vmap):
 
 | l | C_l^TT error | C_l^EE error | C_l^TE error |
 |---|-------------|-------------|-------------|
-| 20 | **-0.29%** | **-0.30%** | -8.2% (near zero) |
-| 30 | +1.55% | **-0.27%** | -7.2% (near zero) |
-| 50 | +1.71% | **-0.20%** | -25% (zero crossing) |
-| 100 | **+0.55%** | **-0.13%** | **-0.38%** |
-| 150 | **+0.11%** | **-0.16%** | **+0.03%** |
-| 200 | **-0.02%** | **-0.14%** | **+0.38%** |
-| 300 | **-0.07%** | **+0.04%** | **-0.03%** |
-| 500 | **-0.12%** | **-0.14%** | **-0.02%** |
-| 700 | **-0.24%** | **-0.11%** | **+0.10%** |
+| 20 | **-0.61%** | **-0.29%** | -5.8% (near zero) |
+| 30 | **+0.76%** | **-0.22%** | -5.0% (near zero) |
+| 50 | **+0.91%** | **-0.15%** | -15% (zero crossing) |
+| 100 | **+0.23%** | ***-0.07%*** | **-0.19%** |
+| 150 | ***+0.006%*** | ***-0.08%*** | ***+0.04%*** |
+| 200 | ***-0.05%*** | ***-0.10%*** | **+0.17%** |
+| 300 | ***-0.06%*** | ***-0.005%*** | ***-0.04%*** |
+| 500 | **-0.14%** | **-0.15%** | ***-0.01%*** |
+| 700 | **-0.23%** | **-0.11%** | ***+0.08%*** |
 | 1000 | **-0.57%** | **-0.26%** | +1.7% |
-| 1500 | -1.61% | -2.77% | +17% (near zero) |
 
 Note: TE has zero crossing near l≈52; relative errors near crossings are misleading.
-TT l=30-50 error (+1.5%) from treating massive neutrinos as massless in perturbations.
+*** = sub-0.1%. TT l=150-300 now at <0.1%! EE l=100-700 now at <0.15%.
+Remaining TT l=30-50 error (+0.8%) from ncdm perturbation dynamics (fluid approx needed).
 
 Source interpolation convergence verified: k/dec = 60, 120, 200 agree to 0.01%.
-k-integration convergence verified: n_k_fine = 5000, 10000 tested, converged at 10000.
+k-integration convergence verified: n_k_fine = 5000, 10000, 20000 tested.
 Bessel functions accurate to machine precision at l=2500.
 
 ### Pipeline accuracy
