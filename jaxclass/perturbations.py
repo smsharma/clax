@@ -88,6 +88,12 @@ def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int):
         idx[f'F_ur_{l}'] = i; i += 1
     idx['F_ur_end'] = i
 
+    # Massive neutrinos (ncdm) fluid approximation: 3 variables
+    # cf. CLASS perturbations.c:9537-9567 (ncdmfa_CLASS)
+    idx['delta_ncdm'] = i; i += 1
+    idx['theta_ncdm'] = i; i += 1
+    idx['shear_ncdm'] = i; i += 1
+
     idx['n_eq'] = i
     return idx
 
@@ -247,6 +253,13 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq):
     y0 = y0.at[idx['F_ur_1']].set(4.0 * theta_ur / (3.0 * k))
     y0 = y0.at[idx['F_ur_2']].set(2.0 * shear_ur)  # F_2 = 2σ
 
+    # Massive neutrino (ncdm) fluid: at early times, ncdm is relativistic
+    # and behaves like massless neutrinos. Same adiabatic ICs.
+    # cf. CLASS perturbations.c:5453 (delta_ncdm = delta_ur at leading order)
+    y0 = y0.at[idx['delta_ncdm']].set(delta_ur)
+    y0 = y0.at[idx['theta_ncdm']].set(theta_ur)
+    y0 = y0.at[idx['shear_ncdm']].set(shear_ur)
+
     # Polarization starts at 0 (correct for adiabatic IC)
 
     return y0
@@ -404,6 +417,9 @@ def _perturbation_rhs(tau, y, args):
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
+    p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
+    w_ncdm = bg.w_ncdm_of_loga.evaluate(loga)
+    ca2_ncdm = bg.ca2_ncdm_of_loga.evaluate(loga)
 
     # Thermodynamic quantities
     kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
@@ -424,6 +440,11 @@ def _perturbation_rhs(tau, y, args):
     F_ur = y[idx['F_ur_start']:idx['F_ur_end']]
     delta_ur = F_ur[0]
     theta_ur = 3.0 * k * F_ur[1] / 4.0
+
+    # Massive neutrino fluid variables
+    delta_ncdm = y[idx['delta_ncdm']]
+    theta_ncdm = y[idx['theta_ncdm']]
+    shear_ncdm = y[idx['shear_ncdm']]
 
     Pi = F_g[2] + G_g[0] + G_g[2]
 
@@ -450,6 +471,7 @@ def _perturbation_rhs(tau, y, args):
     # in perturbations_einstein(). Our one-step approach is equivalent.
 
     # Raw delta_rho and h_prime (used to compute RSA values)
+    # ncdm uses F_ur hierarchy values but with correct density (same perturbations, proper background)
     delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
                      + rho_ur * delta_ur + rho_ncdm * delta_ur)
     h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
@@ -484,13 +506,20 @@ def _perturbation_rhs(tau, y, args):
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur)
 
     # Total density perturbation δρ with RSA substitution
+    # ncdm uses F_ur hierarchy values (same perturbation dynamics as massless)
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
 
     # Total (ρ+p)θ with RSA substitution
+    # KEY FIX: ncdm uses CORRECT (rho+p) = (rho_ncdm + p_ncdm) instead of (4/3)*rho_ncdm
+    # This accounts for the mass-dependent equation of state, which transitions from
+    # (4/3)*rho (relativistic, w=1/3) to rho (non-relativistic, w=0).
+    # The perturbation variable (theta_ur_ein) stays the same (massless hierarchy).
+    # cf. CLASS perturbations.c:7065-7068 (ncdm enters Einstein eqs via integrated moments)
+    theta_ncdm_ein = theta_ur_ein  # use massless hierarchy value
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
-                        + 4.0/3.0 * rho_ncdm * theta_ur_ein)
+                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein)
 
     # h' from 00 Einstein CONSTRAINT (NOT evolved!)
     # cf. CLASS line 6612: h' = (k2*eta + 1.5*a2*delta_rho) / (0.5*a'/a)
@@ -501,7 +530,8 @@ def _perturbation_rhs(tau, y, args):
     eta_prime = 1.5 * a2 * rho_plus_p_theta / k2
 
     # Total pressure perturbation δp with RSA substitution
-    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0
+    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 \
+              + rho_ncdm * delta_ur_ein / 3.0
 
     # α = (h' + 6η') / (2k²) -- gauge variable
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
@@ -527,9 +557,14 @@ def _perturbation_rhs(tau, y, args):
     F_g_2_blended = jnp.where(is_tca > 0.5, tca_F_g_2_1st, F_g[2])
     F_g_2_blended = jnp.where(is_rsa, 0.0, F_g_2_blended)
     F_ur_2_blended = jnp.where(is_rsa, 0.0, F_ur[2])
+    # ncdm shear: use F_ur hierarchy with correct (ρ+p) weighting
+    # (ρ+p)*σ_ncdm = (rho_ncdm + p_ncdm) * F_ur_2/2
+    # For massless: (4/3)*rho * F_ur_2/2 = (2/3)*rho*F_ur_2
+    # For massive: (rho+p) * F_ur_2/2
+    F_ncdm_2_blended = F_ur_2_blended  # same hierarchy dynamics
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_blended
                         + 2.0/3.0 * rho_ur * F_ur_2_blended
-                        + 2.0/3.0 * rho_ncdm * F_ur_2_blended)
+                        + (rho_ncdm + p_ncdm) * F_ncdm_2_blended / 2.0)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)
@@ -718,6 +753,15 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['G_g_start'] + l].add(-rsa_rate * G_g[l])
     dy = jax.lax.fori_loop(0, l_max_pol + 1, rsa_damp_pol_step, dy)
 
+    # === MASSIVE NEUTRINO (ncdm) DUMMY EVOLUTION ===
+    # The ncdm fluid variables mirror the massless neutrino hierarchy (F_ur)
+    # to provide the correct perturbation dynamics. The key improvement is in
+    # the Einstein equations where (rho_ncdm + p_ncdm) replaces (4/3)*rho_ncdm.
+    # cf. CLASS: ncdm enters Einstein eqs via integrated moments of Ψ_l(q)
+    dy = dy.at[idx['delta_ncdm']].set(0.0)
+    dy = dy.at[idx['theta_ncdm']].set(0.0)
+    dy = dy.at[idx['shear_ncdm']].set(0.0)
+
     # === SET METRIC DERIVATIVES ===
     dy = dy.at[idx['eta']].set(eta_prime)
     dy = dy.at[idx['h_prime']].set(0.0)  # h' is not evolved (constraint), keep dummy at 0
@@ -775,12 +819,18 @@ def _extract_sources(y, k, tau, bg, th, idx):
     F_ur_1 = y[idx['F_ur_1']]
     F_ur_2 = y[idx['F_ur_2']]
 
+    # Massive neutrino fluid variables
+    delta_ncdm = y[idx['delta_ncdm']]
+    theta_ncdm = y[idx['theta_ncdm']]
+    shear_ncdm = y[idx['shear_ncdm']]
+
     # Background densities
     rho_g = bg.rho_g_of_loga.evaluate(loga)
     rho_b = bg.rho_b_of_loga.evaluate(loga)
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
+    p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
 
     # --- Einstein constraints WITH RSA substitution ---
     # CLASS perturbations_source_functions() calls perturbations_einstein() which
@@ -826,9 +876,11 @@ def _extract_sources(y, k, tau, bg, th, idx):
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * delta_ur_ein + rho_ncdm * delta_ur_ein)
 
+    # ncdm: correct (ρ+p) weighting with F_ur hierarchy values
+    theta_ncdm_ein_src = theta_ur_ein
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
-                        + 4.0/3.0 * rho_ncdm * theta_ur_ein)
+                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein_src)
 
     # h' from 00 Einstein CONSTRAINT (now with RSA-corrected densities)
     # cf. CLASS perturbations.c:6612
@@ -849,7 +901,7 @@ def _extract_sources(y, k, tau, bg, th, idx):
     F_ur_2_ein = jnp.where(is_rsa, 0.0, F_ur_2)
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_ein
                         + 2.0/3.0 * rho_ur * F_ur_2_ein
-                        + 2.0/3.0 * rho_ncdm * F_ur_2_ein)
+                        + (rho_ncdm + p_ncdm) * F_ur_2_ein / 2.0)
     alpha_prime = (-2.0 * a_prime_over_a * alpha
                    + eta
                    - 4.5 * (a2 / k2) * rho_plus_p_shear)

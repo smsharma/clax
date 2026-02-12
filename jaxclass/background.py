@@ -66,6 +66,8 @@ class BackgroundResult:
     rho_ur_of_loga: CubicSpline       # ultra-relativistic density
     rho_ncdm_of_loga: CubicSpline     # massive neutrino density
     p_ncdm_of_loga: CubicSpline       # massive neutrino pressure
+    w_ncdm_of_loga: CubicSpline       # ncdm equation of state w = p/rho
+    ca2_ncdm_of_loga: CubicSpline     # ncdm adiabatic sound speed squared
     rho_de_of_loga: CubicSpline       # dark energy density
     rho_lambda_of_loga: CubicSpline   # cosmological constant density
     rs_of_loga: CubicSpline           # comoving sound horizon
@@ -93,6 +95,7 @@ class BackgroundResult:
             self.H_of_loga, self.rho_g_of_loga, self.rho_b_of_loga,
             self.rho_cdm_of_loga, self.rho_ur_of_loga,
             self.rho_ncdm_of_loga, self.p_ncdm_of_loga,
+            self.w_ncdm_of_loga, self.ca2_ncdm_of_loga,
             self.rho_de_of_loga, self.rho_lambda_of_loga,
             self.rs_of_loga, self.D_of_loga, self.f_of_loga,
             self.conformal_age, self.age_Gyr, self.z_eq, self.tau_eq,
@@ -273,8 +276,11 @@ def _ncdm_momenta(
 
     rho_unnorm = jnp.dot(w, epsilon)
     P_unnorm = jnp.dot(w, q**2 / (3.0 * epsilon))
+    # Pseudo-pressure for ncdm sound speed: Σ w_i * q^4 / (3 * epsilon^3)
+    # cf. CLASS background.c: background_ncdm_momenta() pseudo_p term
+    pseudo_p_unnorm = jnp.dot(w, q**4 / (3.0 * epsilon**3))
 
-    return rho_unnorm, P_unnorm
+    return rho_unnorm, P_unnorm, pseudo_p_unnorm
 
 
 def _pretabulate_ncdm(
@@ -355,19 +361,21 @@ def _pretabulate_ncdm(
 
     def compute_log_at_a(a):
         # Compute the unnormalized integrals (these are O(1) for any a)
-        rho_unnorm, P_unnorm = _ncdm_momenta(q, w, M, a)
+        rho_unnorm, P_unnorm, pseudo_p_unnorm = _ncdm_momenta(q, w, M, a)
         # The full density is: prefactor * (1+z)^4 * rho_unnorm = prefactor / a^4 * rho_unnorm
         # Work in log space to avoid overflow at small a:
         log_rho = jnp.log(prefactor) - 4.0 * jnp.log(a) + jnp.log(rho_unnorm)
         log_P = jnp.log(prefactor) - 4.0 * jnp.log(a) + jnp.log(P_unnorm)
-        return log_rho, log_P
+        log_pseudo_p = jnp.log(prefactor) - 4.0 * jnp.log(a) + jnp.log(pseudo_p_unnorm)
+        return log_rho, log_P, log_pseudo_p
 
-    log_rho_grid, log_P_grid = jax.vmap(compute_log_at_a)(a_grid)
+    log_rho_grid, log_P_grid, log_pseudo_p_grid = jax.vmap(compute_log_at_a)(a_grid)
 
     log_rho_spline = CubicSpline(loga_grid, log_rho_grid)
     log_P_spline = CubicSpline(loga_grid, log_P_grid)
+    log_pseudo_p_spline = CubicSpline(loga_grid, log_pseudo_p_grid)
 
-    return log_rho_spline, log_P_spline
+    return log_rho_spline, log_P_spline, log_pseudo_p_spline
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +540,7 @@ def background_solve(
     loga_min = jnp.log(prec.bg_a_ini_default)
     loga_max = 0.0  # log(1) = 0
     ncdm_loga_grid = jnp.linspace(loga_min, loga_max, prec.ncdm_bg_n_points)
-    log_rho_ncdm_spline, log_P_ncdm_spline = _pretabulate_ncdm(
+    log_rho_ncdm_spline, log_P_ncdm_spline, log_pseudo_p_ncdm_spline = _pretabulate_ncdm(
         params, prec, ncdm_loga_grid, H0
     )
 
@@ -645,7 +653,17 @@ def background_solve(
     rho_cdm_of_loga = CubicSpline(loga_grid, rho_cdm_grid)
     rho_ur_of_loga = CubicSpline(loga_grid, rho_ur_grid)
     rho_ncdm_of_loga = CubicSpline(loga_grid, rho_ncdm_grid)
-    p_ncdm_of_loga = CubicSpline(loga_grid, jnp.exp(log_P_ncdm_spline.evaluate(loga_grid)))
+    P_ncdm_at_grid = jnp.exp(log_P_ncdm_spline.evaluate(loga_grid))
+    p_ncdm_of_loga = CubicSpline(loga_grid, P_ncdm_at_grid)
+    # ncdm equation of state and adiabatic sound speed
+    w_ncdm_grid = P_ncdm_at_grid / jnp.maximum(rho_ncdm_grid, 1e-100)
+    pseudo_p_ncdm_grid = jnp.exp(log_pseudo_p_ncdm_spline.evaluate(loga_grid))
+    # c_a² = w/(3*(1+w)) * (5 - pseudo_p/p)
+    # cf. CLASS perturbations.c:9513
+    ca2_ncdm_grid = w_ncdm_grid / (3.0 * (1.0 + w_ncdm_grid)) * (
+        5.0 - pseudo_p_ncdm_grid / jnp.maximum(P_ncdm_at_grid, 1e-100))
+    w_ncdm_of_loga = CubicSpline(loga_grid, w_ncdm_grid)
+    ca2_ncdm_of_loga = CubicSpline(loga_grid, ca2_ncdm_grid)
     rho_de_of_loga = CubicSpline(loga_grid, rho_de_grid)
     rho_lambda_of_loga = CubicSpline(loga_grid, rho_lambda_grid)
     rs_of_loga = CubicSpline(loga_grid, rs_grid)
@@ -668,9 +686,8 @@ def background_solve(
     # cf. CLASS background.c:523-528: split ncdm into relativistic and non-relativistic
     # rho_r += 3 * P_ncdm (relativistic contribution)
     # rho_m += rho_ncdm - 3 * P_ncdm (non-relativistic contribution)
-    P_ncdm_grid = jnp.exp(log_P_ncdm_spline.evaluate(loga_grid))
-    rho_m_grid = rho_b_grid + rho_cdm_grid + (rho_ncdm_grid - 3.0 * P_ncdm_grid)
-    rho_r_grid = rho_g_grid + rho_ur_grid + 3.0 * P_ncdm_grid
+    rho_m_grid = rho_b_grid + rho_cdm_grid + (rho_ncdm_grid - 3.0 * P_ncdm_at_grid)
+    rho_r_grid = rho_g_grid + rho_ur_grid + 3.0 * P_ncdm_at_grid
     # ncdm relativistic contribution: 3*P_ncdm
     # Find where rho_m crosses rho_r
     diff = rho_m_grid - rho_r_grid
@@ -697,6 +714,8 @@ def background_solve(
         rho_ur_of_loga=rho_ur_of_loga,
         rho_ncdm_of_loga=rho_ncdm_of_loga,
         p_ncdm_of_loga=p_ncdm_of_loga,
+        w_ncdm_of_loga=w_ncdm_of_loga,
+        ca2_ncdm_of_loga=ca2_ncdm_of_loga,
         rho_de_of_loga=rho_de_of_loga,
         rho_lambda_of_loga=rho_lambda_of_loga,
         rs_of_loga=rs_of_loga,
