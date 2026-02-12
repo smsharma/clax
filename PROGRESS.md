@@ -219,25 +219,27 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
 
 **Accuracy bottlenecks (ordered by impact):**
 
-1. **TT l=30-50 at ~1.5%**: Converged across k-densities, ODE precision,
-   and tau resolution. Source functions and radial functions verified to
-   match CLASS exactly. The error is from **treating massive neutrinos as
-   massless** in the perturbation hierarchy: this over-estimates the
-   radiation fraction at z<100, boosting the early ISW contribution at
-   l~30-50. Fix: implement full ncdm perturbation hierarchy Ψ_l(q).
-   **Effort: moderate (1 session, 2x compute cost).**
+1. **TT l=30-50 at ~1.5%**: The T1 (ISW dipole, j_l' radial) contribution
+   is ~7% too small at l=30. T2 (polarization quadrupole) is negligible
+   at these scales (only +0.15pp). The massive neutrino effect at l=30 is
+   only 0.01% (confirmed via CLASS massive/massless comparison), so this
+   is a CODE error, not a physics approximation issue.
+   Possible causes: (a) z_star differs from CLASS by 0.33% (1089 vs 1085),
+   shifting the visibility peak timing and affecting the ISW-visibility
+   correlation; (b) a subtle error in the ISW source (α'+2aHα-η) that
+   accumulates over the full conformal time integral.
+   **Effort: moderate (need to compare T_l(k) directly against CLASS).**
 
-2. **TT/EE l>1000**: Residual 0.6-1.6% error from k-integration, converging
-   slowly with n_k_fine. With n_k_fine=10000, l=1000 at -0.57%. Higher
-   n_k_fine or a hybrid linear/log k-grid would help.
-   **Effort: easy (just increase n_k_fine or implement smart grid).**
+2. **EE systematic bias ~-0.15%**: Present across l=20-700, from RECFAST
+   physics accuracy (x_e error ~0.25% at z_star). Confirmed insensitive
+   to thermo grid resolution (n_points=5000 vs 20000 identical). Fix:
+   improve RECFAST (use HyRec/CosmoRec) or accept ~0.15% systematic.
+   **Effort: substantial.**
 
-3. **ncdm as massless in perturbations**: Dominant remaining error source.
-   Treating 0.06 eV neutrino as massless affects C_l through early ISW
-   (l=30-50: +1.5%), Silk damping tail (l=1000: -0.5%), and metric
-   perturbations at all l>55. Fix: implement full Ψ_l(q) hierarchy.
-   **Effort: moderate (1 session, 2x compute cost). THIS IS THE #1 PRIORITY
-   for achieving <0.1% everywhere.**
+3. **TT/EE l>1000**: Residual 0.6-1.6% error partly from k-integration
+   convergence (still improving with n_k_fine), partly from ncdm mass
+   effect (~0.3% at l=1000) and Silk damping accuracy.
+   **Effort: easy for k-resolution, moderate for physics.**
 
 4. **SW plateau (l<15)**: ~5% error from gauge-dependent source at
    super-horizon scales. Low priority for most applications.
@@ -255,8 +257,13 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
       normalization factor 1/8 all match CLASS exactly)
 - [x] k-integration resolution fix — n_k_fine=3000→5000 default, chunked vmap
       for n_k_fine=10000+, TT l=700 from -1.6% to -0.24%
-- [ ] **Full ncdm perturbation hierarchy Ψ_l(q)** — #1 PRIORITY for <0.1%
-      everywhere. Currently the dominant error source at all l. (~1 session)
+- [ ] **Diagnose T1 ISW dipole deficit at l=30** — #1 PRIORITY for TT accuracy.
+      T1 contribution is 7% too small. Compare T_l(k) against CLASS transfer
+      function. Check if z_star offset (0.33%) explains the discrepancy.
+      (hours, targeted debugging)
+- [ ] Full ncdm perturbation hierarchy Ψ_l(q) — needed for <0.1% at l>100
+      (ncdm mass effect ~0.2-0.3% at l=100-1000). (~1 session)
+- [ ] Improve RECFAST → HyRec/CosmoRec — for EE systematic bias ~0.15%
 - [ ] Multi-cosmology validation at 5+ parameter points (GPU time only)
 - [ ] Gradient tests for C_l: d(C_l)/d(params)
 - [ ] Hybrid linear/log fine k-grid for better convergence at l>1500
