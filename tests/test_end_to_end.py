@@ -19,10 +19,10 @@ from jaxclass import CosmoParams, PrecisionParams
 PREC_FAST = PrecisionParams(
     bg_n_points=200, ncdm_bg_n_points=100, bg_tol=1e-8,
     th_n_points=5000, th_z_max=5e3,
-    pt_l_max_g=6, pt_l_max_pol_g=6, pt_l_max_ur=6,
-    pt_k_max_cl=1.0,  # Don't need k=5 for quick tests
+    pt_l_max_g=17, pt_l_max_pol_g=17, pt_l_max_ur=17,
+    pt_k_max_cl=0.3,
     pt_ode_rtol=1e-3, pt_ode_atol=1e-6,
-    ode_max_steps=131072,
+    ode_max_steps=262144,
 )
 
 
