@@ -404,6 +404,24 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
   20 to 2000. The smooth RSA damping already fully prevents hierarchy truncation
   ringing. The high-l error is from k-integration resolution (n_k_fine), not
   hierarchy truncation. Hard RSA is NOT needed for accuracy.
+- **Linear k-grid for fine integration**: Tested linear vs log-uniform k-grid
+  with n_k_fine=10000 and 20000. Both give IDENTICAL results. The k-integration
+  is fully converged at n_k=10000 regardless of grid type. The remaining errors
+  at l>500 are from physics (ncdm, RECFAST), not numerics.
+- **ncdm fluid approximation with k-blend (3 approaches tested, Feb 12)**:
+  (1) Full fluid + blend at k_fs=0.008: fixed TT l=20 (-0.61%→-0.07%) but
+  made EE MUCH worse (+0.6 to +0.9% at l=20-150). Fluid shear/velocity
+  contaminate the metric.
+  (2) Full fluid + blend at k_fs=0.003 (sharper): similar problem, EE still
+  +0.6% worse at l=20-50.
+  (3) Density-only blend (no velocity/shear): EE no longer catastrophically
+  worse, but TT l=30-50 got WORSE (+0.75%→+1.0%). The fluid density
+  overcorrects at these scales.
+  **Conclusion**: the ncdm fluid approximation does NOT work well with
+  k-blending. The phase-space dynamics at the free-streaming scale are too
+  subtle for a 3-variable fluid. The full Ψ_l(q) Boltzmann hierarchy (15 q-bins
+  × 18 multipoles = 270 new state variables) is needed for correct ncdm physics.
+  This is the ONLY remaining path to sub-0.1% TT at l=20-100.
 
 ---
 
