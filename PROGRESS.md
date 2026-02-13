@@ -322,11 +322,16 @@ Result: g(tau_star) from -2.6% to **-0.04%**.
    apparent 0.33% "error" was a naming confusion (our z_star = CLASS z_rec).
    **Fix: implement full ncdm perturbation hierarchy Ψ_l(q).**
 
-2. **EE systematic bias ~-0.15%**: Present across l=20-700, from RECFAST
-   physics accuracy (x_e error ~0.25% at z_star). Confirmed insensitive
-   to thermo grid resolution (n_points=5000 vs 20000 identical). Fix:
-   improve RECFAST (use HyRec/CosmoRec) or accept ~0.15% systematic.
-   **Effort: substantial.**
+2. **RECFAST helium Saha → Peebles upgrade needed**: ROOT CAUSE found
+   (Feb 12): Saha equilibrium for helium recombines He too early at
+   z=2000-2500 (x_e error 3-4% there), cascading to 0.15% x_e error at
+   z=1100 via Thomson cooling. CLASS RECFAST uses a proper Peebles ODE
+   for He (recfast_dx_He_dz with Verner-Ferland coefficients, Sobolev
+   escape, Boltzmann factor). Implementing this correctly requires careful
+   study of CLASS's coefficient conventions.
+   The RECFAST-HyRec C_l difference is only ~0.05% (TT) and ~0.08% (EE),
+   so correct RECFAST would give sub-0.1% vs HyRec.
+   **Effort: moderate (helium Peebles ODE, ~100 lines).**
 
 3. **TT/EE l>1000**: Residual 0.6-1.6% error partly from k-integration
    convergence (still improving with n_k_fine), partly from ncdm mass
