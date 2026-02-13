@@ -90,6 +90,29 @@ _zGauss2 = 6.73    # in ln(1+z)
 _wGauss1 = 0.18
 _wGauss2 = 0.33
 
+# --- RECFAST/CLASS helium recombination constants ---
+# CLASS wrap_recfast.h uses SI units (m^3/s) for rates. We convert to CGS (*1e6).
+_L_He1_ion = 1.98310772e7     # HeI ionization [m^{-1}]
+_L_He_2s = 1.66277434e7       # He 2s [m^{-1}]
+_L_He_2p = 1.71134891e7       # He 2p [m^{-1}]
+_Lalpha_He_cm = 100.0 / _L_He_2p  # He Lyman-alpha wavelength [cm]
+_CDB_He = _hP_SI * _c_SI * (_L_He1_ion - _L_He_2s) / _kB_SI   # He 2s ionization [K]
+_CL_He = _c_SI * _hP_SI * _L_He_2s / _kB_SI                    # He 2s energy [K]
+_CK_He_CGS = _Lalpha_He_cm**3 / (8.0 * math.pi)                # He K prefactor [cm^3]
+_CDB_He2s2p = _hP_SI * _c_SI * (_L_He_2p - _L_He_2s) / _kB_SI  # 2p-2s splitting [K]
+_Lambda_He = 51.3              # He 2s→1s transition rate [s^{-1}]
+_A2P_s_He = 1.798287e9        # He 2^1P singlet radiative rate [s^{-1}]
+_sigma_He_2Ps = 1.436289e-22  # cross section for 2^1P He singlet [m^2] → [cm^2] = 1.436289e-18
+_sigma_He_2Ps_cgs = 1.436289e-22 * 1e4  # [cm^2]
+_not4 = 3.9715               # mHe / mH (not exactly 4)
+_RECFAST_FUDGE_He = 0.86     # helium fudge factor (CLASS default)
+# Verner & Ferland (1996) He case-B: convert from SI (m^3/s) to CGS (cm^3/s)
+# CLASS: _a_VF_ = 10^{-16.744} [m^3/s]; CGS = SI * 1e6
+_a_VF_He_CGS = 10.0**(-16.744) * 1e6  # ≈ 1.803e-11 cm^3/s
+_b_VF_He = 0.711
+_T_0_He = 10.0**0.477121      # ≈ 3.0 K
+_T_1_He = 10.0**5.114         # ≈ 1.3e5 K
+
 # Legacy constants kept for MB95 helium Saha / _ionize
 _EI_eV = 13.598286071938324     # H ionization energy [eV]
 _kBoltz_eV = 8.617343e-5        # Boltzmann constant [eV/K]
@@ -198,6 +221,54 @@ def _recfast_dxHII_dlna(xe, xHII, nH, Hz, z, TM, TR):
     ) * C / Hz_safe
 
     return dxHII_dlna
+
+
+def _recfast_dxHe_dlna(xe, xHe, nH, Hz, z, TM, TR, fHe):
+    """Helium Peebles equation: dxHe/d(lna).
+
+    cf. CLASS wrap_recfast.c:198-349 (Heflag=0 mode, simplest K_He).
+    All inputs in CGS. Returns dxHe/dlna.
+    """
+    TM_safe = jnp.maximum(TM, 1e-30)
+    Hz_safe = jnp.maximum(Hz, 1e-30)
+    n_He = fHe * nH
+
+    # Verner & Ferland case-B He recombination (CGS)
+    sq_0 = jnp.sqrt(TM_safe / _T_0_He)
+    sq_1 = jnp.sqrt(TM_safe / _T_1_He)
+    Rdown_He = _a_VF_He_CGS / (sq_0 * (1.0 + sq_0)**(1.0 - _b_VF_He)
+                                * (1.0 + sq_1)**(1.0 + _b_VF_He))
+
+    # Photoionization (detailed balance, Tmat mode)
+    Rup_He = 4.0 * Rdown_He * (_CR_CGS * TM_safe)**1.5 * jnp.exp(
+        jnp.maximum(-_CDB_He / TM_safe, -500.0))
+
+    # K_He with Sobolev escape probability (Heflag>=2 in CLASS)
+    # cf. wrap_recfast.c:259-274
+    # Basic: K_He = CK_He / Hz
+    # Sobolev: τ_s = A2P_s * CK_He * 3 * n_He * (1-xHe) / Hz
+    #          p_s = (1 - exp(-τ_s)) / τ_s
+    #          K_He = 1 / (A2P_s * p_s * 3 * n_He * (1-xHe))
+    n_1s_He = jnp.maximum(n_He * (1.0 - xHe), 1e-30)
+    # K_He with Sobolev escape (CLASS Heflag=0)
+    # cf. wrap_recfast.c:254-260
+    tauHe_s = _A2P_s_He * _CK_He_CGS * 3.0 * n_1s_He / Hz_safe
+    tauHe_s_safe = jnp.maximum(tauHe_s, 1e-30)
+    pHe_s = (1.0 - jnp.exp(-tauHe_s_safe)) / tauHe_s_safe
+    K_He = 1.0 / jnp.maximum(_A2P_s_He * pHe_s * 3.0 * n_1s_He, 1e-30)
+
+    # Peebles C_He with Boltzmann 2s-2p factor
+    He_Boltz = jnp.exp(jnp.minimum(_CDB_He2s2p / TM_safe, 500.0))
+    C_He = (1.0 + K_He * _Lambda_He * n_1s_He * He_Boltz) / jnp.maximum(
+        1.0 + K_He * (_Lambda_He + Rup_He) * n_1s_He * He_Boltz, 1e-30)
+    C_He = jnp.where((xHe < 1e-15) | (xHe > 0.999), 1.0, C_He)
+
+    dxHe_dlna = -(
+        xe * xHe * nH * Rdown_He
+        - Rup_He * (1.0 - xHe) * jnp.exp(jnp.maximum(-_CL_He / TM_safe, -500.0))
+    ) * C_He / Hz_safe
+
+    return dxHe_dlna
 
 
 # ---------------------------------------------------------------------------
@@ -461,24 +532,25 @@ def thermodynamics_solve(
 
         z_half = 1.0 / ahalf - 1.0
 
-        # --- Heun's method (predictor-corrector, 2nd order) for RECFAST ---
-        # Step 1: Evaluate rate at midpoint (predictor)
-        dxHII_1 = _recfast_dxHII_dlna(
-            xe, xHII, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
-        xHII_pred = jnp.clip(xHII + dlna_step * dxHII_1, 0.0, 1.0)
-
-        # Step 2: Evaluate rate at predicted state using end-of-step quantities
+        # --- RK4 (4th order) for hydrogen RECFAST ---
+        # Heun (2nd order) leaves ~0.15% x_e residual. RK4 converges as O(h^4).
         z_new = 1.0 / new_a - 1.0
         nH_new = n_H_0_cgs / new_a**3
         H_new = new_H * _c_over_Mpc
         TR_new = T_cmb / new_a
-        xe_pred = xHII_pred + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
-        dxHII_2 = _recfast_dxHII_dlna(
-            xe_pred, xHII_pred, nH_new, H_new, z_new, new_tb, TR_new)
 
-        # Step 3: Corrector (trapezoidal average)
+        k1 = _recfast_dxHII_dlna(xe, xHII, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
+        xHII_2 = jnp.clip(xHII + 0.5 * dlna_step * k1, 0.0, 1.0)
+        xe_2 = xHII_2 + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
+        k2 = _recfast_dxHII_dlna(xe_2, xHII_2, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
+        xHII_3 = jnp.clip(xHII + 0.5 * dlna_step * k2, 0.0, 1.0)
+        xe_3 = xHII_3 + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
+        k3 = _recfast_dxHII_dlna(xe_3, xHII_3, n_H_cgs, H_cgs, z_half, tbhalf, TR_half)
+        xHII_4 = jnp.clip(xHII + dlna_step * k3, 0.0, 1.0)
+        xe_4 = xHII_4 + 0.25 * Y_He / (1.0 - Y_He) * (xHeII + 2.0 * xHeIII)
+        k4 = _recfast_dxHII_dlna(xe_4, xHII_4, nH_new, H_new, z_new, new_tb, TR_new)
         new_xHII_recfast = jnp.clip(
-            xHII + 0.5 * dlna_step * (dxHII_1 + dxHII_2), 0.0, 1.0)
+            xHII + dlna_step / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4), 0.0, 1.0)
 
         # For z > 1600: hydrogen Saha equilibrium (CLASS thermodynamics.c:4074-4081).
         # x_H*(x_H + xHeII)/(1 - x_H) = rhs, solved via quadratic formula.
@@ -508,10 +580,38 @@ def thermodynamics_solve(
         w_saha = jax.nn.sigmoid(0.1 * (z_half - 1600.0))
         new_xHII = w_saha * xHII_saha + (1.0 - w_saha) * new_xHII_recfast
 
-        # Helium (Saha iteration)
-        new_xHeII, new_xHeIII = _ionHe(
+        # Helium: Peebles ODE for HeII→HeI (replaces Saha at z<5000)
+        # HeIII→HeII uses Saha (accurate at z>5000)
+        fHe = Y_He / (4.0 * (1.0 - Y_He))
+        _, new_xHeIII = _ionHe(
             new_tb, new_a, new_xHII, xHeII, xHeIII, Y_He, H0_kmsMpc, Omega_b
         )
+
+        # HeII Peebles ODE with sub-stepped Heun (10 sub-steps for stability)
+        # The helium Peebles rate can be ~200/efold, requiring dlna << 0.005.
+        # Main steps have dlna~0.02, so we sub-step to avoid overshoot.
+        n_He_sub = 10
+        dlna_He_sub = dlna_step / n_He_sub
+        def he_sub_step(i, xHe_i):
+            xe_i = new_xHII + 0.25 * Y_He / (1.0 - Y_He) * (xHe_i + 2.0 * new_xHeIII)
+            dxHe_1 = _recfast_dxHe_dlna(
+                xe_i, xHe_i, n_H_cgs, H_cgs, z_half, tbhalf, TR_half, fHe)
+            xHe_pred = jnp.clip(xHe_i + dlna_He_sub * dxHe_1, 0.0, 1.0)
+            xe_pred = new_xHII + 0.25 * Y_He / (1.0 - Y_He) * (xHe_pred + 2.0 * new_xHeIII)
+            dxHe_2 = _recfast_dxHe_dlna(
+                xe_pred, xHe_pred, nH_new, H_new, z_new, new_tb, TR_new, fHe)
+            return jnp.clip(xHe_i + 0.5 * dlna_He_sub * (dxHe_1 + dxHe_2), 0.0, 1.0)
+        new_xHeII_peebles = jax.lax.fori_loop(0, n_He_sub, he_sub_step, xHeII)
+
+        # Saha fallback for z>5000 (HeIII→HeII epoch, Peebles not needed)
+        new_xHeII_saha, _ = _ionHe(
+            new_tb, new_a, new_xHII, xHeII, xHeIII, Y_He, H0_kmsMpc, Omega_b
+        )
+        new_xHeII_saha = jax.lax.stop_gradient(new_xHeII_saha)
+
+        # Blend: Saha at z>5000, Peebles below
+        w_saha_He = jax.nn.sigmoid(0.05 * (z_half - 5000.0))
+        new_xHeII = w_saha_He * new_xHeII_saha + (1.0 - w_saha_He) * new_xHeII_peebles
 
         # Total ionization fraction
         new_xe = new_xHII + 0.25 * Y_He / (1.0 - Y_He) * (new_xHeII + 2.0 * new_xHeIII)
