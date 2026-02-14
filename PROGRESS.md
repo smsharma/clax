@@ -7,23 +7,19 @@ C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
 
 ### Feb 14, 2026: RECFAST upgrade + A_s fix + ncdm hierarchy overcorrection found
 
-**RECFAST upgrade (RK4 + He Peebles):**
-- x_e at z_star matches CLASS RECFAST to **-0.006%** (was -0.08% vs HyRec)
-- T_b matches CLASS to machine precision everywhere
-- kappa_dot at z_star: **-0.017%** vs CLASS RECFAST
-- He Peebles equation at z=1500-2000: 0.6-3.4% (Heflag=6 corrections needed)
+**Fixes applied (Feb 14):**
+1. RECFAST RK4 + He Peebles: x_e at z_star matches CLASS RECFAST to -0.006%
+2. A_s: ln10A_s 3.044→3.0445224377 (exact match to A_s=2.1e-9, was 0.05% bias)
+3. ncdm q-bins 15→5 to match CLASS (TT l=1000: -0.57%→+0.06%)
+4. n_k_fine 5000→10000 (converged for l≤1200)
+5. Reionization: additive formula, proton mass fix, He-4 mass ratio (_NOT4=3.9715)
+6. sigma_T, Y_He matched to CLASS values
+7. Bisection 20→40 iterations for z_reio
 
-**A_s fix:** ln10A_s corrected from 3.044 to 3.0445224377 (exact match to A_s=2.1e-9).
-Previously 0.05% C_l bias at all l.
+**Source decomposition diagnostic:** ISW accurate to <0.08%. The TT +0.12% bump
+at l=400-800 is in the SW+Doppler source amplitude (~0.06% too high).
 
-**ncdm q-bins fix: 15→5 to match CLASS default.**
-CLASS uses only 5 q-bins for perturbation ncdm hierarchy (adaptive quadrature,
-`get_qsampling`). Our 15-bin Gauss-Laguerre was OVERCORRECTING at high l.
-With 5 bins: **TT l=1000 from -0.57% to +0.06%!**
-
-Current accuracy (ncdm_q_size=5, vs CLASS RECFAST):
-
-Dense l-sampling (n_k_fine=20000, vs CLASS RECFAST, ncdm_q_size=5):
+Current accuracy (n_k_fine=20000, ncdm_q_size=5, vs CLASS RECFAST):
 
 | l | TT err% | EE err% | Notes |
 |---|---------|---------|-------|
@@ -61,12 +57,33 @@ T2 effect test: removing T2 (quadrupole) makes l=300-700 MUCH worse (>2%),
 confirming T2 is essential and correctly implemented. The +0.12% bump is NOT
 from T2 — it's the residual after all terms combine.
 
+**vs CLASS HyRec (primary reference):**
+- TT sub-0.1%: l=20,50,100,200,300,400,700,1000 **(8/11 at l≤1000)**
+- TT worst: l=500 at +0.13%
+- EE sub-0.1%: l=50,100,200,300,400,700 **(6/11 at l≤1000)**
+- EE worst: l=20 (-0.13%), l=1000 (+0.18%)
+
+**Accuracy floor analysis:**
+- kappa_dot at z_star: +0.037% (n_H_0 computation chain, 0.001 z_reio offset)
+- Background rho_g, rho_b: match CLASS to 0.01% (accounting for z-offset)
+- Visibility g: matches CLASS to sub-0.01% near z_star
+- ISW contribution: accurate to <0.08%
+- SW+Doppler: +0.12% excess (perturbation variable amplitude ~0.06% too high)
+
 **Remaining blockers (ordered by impact):**
-1. TT l=400-800: +0.10-0.18% bump — source function amplitude ~0.06% high at k~0.03
-2. EE l=20-30: -0.10 to -0.19% — RECFAST visibility or reionization at large scales
-3. EE l=900-1000: +0.19-0.22% — damping tail sensitivity
+1. TT l=400-800: +0.10-0.16% bump — SW+Doppler source ~0.06% excess at k~0.03
+2. EE l=20: -0.13% (vs HyRec) — reionization z_reio offset (0.001) + RECFAST physics
+3. EE l=1000: +0.18% — polarization damping tail sensitivity
 4. l>1200: n_k_fine=10000 under-resolved (need 20000+ or hybrid k-grid)
 5. TE zero crossings: inherently large relative errors where C_l^TE ≈ 0
+
+**Root cause of 0.12% SW+Doppler excess:** Unknown. All equations, constants,
+and normalization verified against CLASS source code. Background, thermodynamics,
+visibility function, and ISW all match CLASS to high precision. The remaining
+error is likely from accumulated numerical differences in the perturbation ODE
+evolution (different ODE solver: Kvaerno5 vs CLASS ndf15, different TCA switch
+timing via smooth sigmoid vs CLASS hard switch, etc.). Further improvement
+would require matching CLASS's exact numerical implementation, not just physics.
 
 ### External review (Feb 11, 2026)
 
