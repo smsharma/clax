@@ -16,35 +16,38 @@ C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
 **A_s fix:** ln10A_s corrected from 3.044 to 3.0445224377 (exact match to A_s=2.1e-9).
 Previously 0.05% C_l bias at all l.
 
-**KEY FINDING: ncdm Ψ_l(q) hierarchy OVERCORRECTS at high l.**
-Apples-to-apples test (massless ncdm in both jaxCLASS and CLASS RECFAST):
+**ncdm q-bins fix: 15→5 to match CLASS default.**
+CLASS uses only 5 q-bins for perturbation ncdm hierarchy (adaptive quadrature,
+`get_qsampling`). Our 15-bin Gauss-Laguerre was OVERCORRECTING at high l.
+With 5 bins: **TT l=1000 from -0.57% to +0.06%!**
+
+Current accuracy (ncdm_q_size=5, vs CLASS RECFAST):
 
 | l | TT err% | EE err% | Notes |
 |---|---------|---------|-------|
-| 20 | -0.06 | -0.18 | |
-| 50 | +0.01 | -0.04 | |
-| 100 | +0.05 | +0.02 | |
-| 200 | +0.04 | +0.02 | |
-| 300 | +0.04 | +0.02 | |
-| 500 | +0.16 | -0.09 | |
-| 700 | +0.11 | +0.10 | |
-| 1000 | +0.12 | +0.20 | |
-| 1200 | -0.09 | +0.02 | |
-| 1500 | -0.58 | -1.69 | k-integration under-resolved |
-| 2000 | -3.80 | +2.07 | k-integration under-resolved |
+| 20 | -0.02 | -0.19 | EE: visibility shape |
+| 50 | +0.03 | -0.05 | |
+| 100 | +0.05 | +0.01 | |
+| 200 | +0.03 | -0.005 | |
+| 300 | +0.02 | +0.03 | |
+| 400 | +0.12 | +0.07 | TT: Doppler bump? |
+| 500 | +0.16 | -0.12 | TT: near 2nd trough |
+| 700 | +0.09 | +0.09 | |
+| 1000 | +0.06 | +0.19 | |
+| 1500 | -0.70 | -1.68 | k-integration |
+| 2000 | -3.47 | +2.23 | k-integration |
 
-**TT sub-0.1% at l=20-300, sub-0.16% at l=400-1200** (code-level accuracy).
-**EE sub-0.1% at l=50-600, sub-0.20% at l=700-1000.**
-
-Previous -0.57% at l=1000 (with full ncdm hierarchy) was from the hierarchy
-OVERCORRECTING: the massless approximation gives +0.12%, but the hierarchy
-shifts to -0.52% (net shift -0.64%), whereas CLASS massive-vs-massless diff
-is only -0.37%. The hierarchy overcorrects by ~0.27%.
+**TT sub-0.1% at l=20-300, 700, 1000** (7/9 at l≤1000).
+**TT worst: l=400 (+0.12%), l=500 (+0.16%).**
+**EE sub-0.1% at l=50-400** (5/9 at l≤1000).
+**EE worst: l=20 (-0.19%), l=500 (-0.12%), l=1000 (+0.19%).**
 
 **Remaining work:**
-1. Fix ncdm hierarchy overcorrection (Bug 27) — main blocker for sub-0.1% at l>300
-2. Increase n_k_fine for l>1200 (or use hybrid k-grid)
-3. Sub-0.16% TT code error at l=400-1000 → investigate source function amplitude
+1. TT l=400-500: +0.12-0.16% — investigate Doppler source amplitude
+2. EE l=20: -0.19% — visibility function at large scales (RECFAST He or reionization)
+3. EE l=1000: +0.19% — possibly from Silk damping sensitivity
+4. l>1200: increase n_k_fine to 20000+ or use hybrid k-grid
+5. TE: sub-0.1% at non-zero-crossing l, but zero crossings cause huge relative errors
 
 ### External review (Feb 11, 2026)
 
