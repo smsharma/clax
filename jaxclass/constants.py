@@ -47,8 +47,9 @@ T_cmb_default = 2.7255
 """Default CMB temperature today in Kelvin (Fixsen 2009)."""
 
 # --- Helium fraction ---
-Y_He_default = 0.2454006
-"""Default primordial helium mass fraction Y_He (BBN-consistent for standard LCDM)."""
+Y_He_default = 0.2453009
+"""Default primordial helium mass fraction Y_He (BBN output for fiducial LCDM,
+matches CLASS computed YHe for omega_b=0.02237)."""
 
 # --- Neutrino temperature ratio ---
 # T_ncdm / T_gamma = (4/11)^(1/3), standard value
