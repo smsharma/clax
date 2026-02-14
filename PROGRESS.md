@@ -1,6 +1,6 @@
 # jaxCLASS Development Progress
 
-## Status: Core code accuracy sub-0.1% at l=20-300, sub-0.16% at l=400-1200
+## Status: TT sub-0.1% at 8/11 multipoles vs CLASS HyRec (l=20-1000)
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
@@ -139,6 +139,33 @@ high-l errors are entirely from k-integration (Bessel oscillation under-resoluti
    single `compute_cls()` entry point.
 8. **HyRec upgrade** (low-medium, substantial) — Fix EE -0.15% systematic.
    Only needed for sub-0.1% EE.
+
+### v1 feature completeness (prioritized for usable HMC, Feb 14 2026)
+
+Must-have for running a Planck-like likelihood with HMC:
+
+1. **Lensed EE and TE** (HIGH PRIORITY) — Currently only lensed TT exists
+   (lens_cl_tt in lensing.py). Planck likelihood requires lensed TT+TE+EE.
+   Extend the correlation function lensing method to EE and TE (different
+   Legendre polynomials / spin-2 transforms). Without this, cannot run any
+   real CMB likelihood.
+2. **Lensing accuracy 5% → <1%** (HIGH PRIORITY) — Current lensed C_l has
+   ~5% error vs CLASS. This propagates directly into parameter biases. Need
+   to diagnose whether error is in C_l^phiphi, the correlation function
+   transform, or numerical resolution (theta grid, l_max in sums).
+3. **Multi-cosmology validation** (HIGH PRIORITY) — Everything tested at ONE
+   fiducial LCDM point. Must validate at omega_b ±20%, omega_cdm ±20%,
+   h ±10%, n_s ±5%, tau_reio ±30%. Bugs that cancel at fiducial will silently
+   bias HMC chains. No code changes needed, just GPU time.
+
+Should-have:
+
+4. **P(k,z) at arbitrary z** — Currently only z=0 in transfer.py. Needed for
+   any LSS cross-correlation or growth-rate constraint. Straightforward:
+   interpolate delta_m from perturbation output at arbitrary z.
+5. **BB tensor accuracy** — Currently factor ~2 off CLASS. Matters for
+   constraining r. Lower priority than lensed EE/TE.
+
 
 ### Autonomous agent work (Feb 10-11, 2026 — Bridges-2 GPU loop)
 
