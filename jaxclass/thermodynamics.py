@@ -797,7 +797,7 @@ def _find_z_reio(tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid,
         z_hi = jnp.where(tau_mid < tau_reio_target, z_hi, z_mid)
         return (z_lo, z_hi), None
 
-    (z_lo, z_hi), _ = jax.lax.scan(bisect_step, (4.0, 25.0), jnp.arange(20))
+    (z_lo, z_hi), _ = jax.lax.scan(bisect_step, (4.0, 25.0), jnp.arange(40))
     return 0.5 * (z_lo + z_hi)
 
 
