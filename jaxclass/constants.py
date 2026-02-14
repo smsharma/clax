@@ -111,8 +111,8 @@ m_p_eV = 938.272046e6
 """Proton mass in eV/c^2."""
 
 # Thomson cross section in m^2
-sigma_T = 6.6524587158e-29
-"""Thomson scattering cross section in m^2."""
+sigma_T = 6.6524616e-29
+"""Thomson scattering cross section in m^2, cf. CLASS thermodynamics.h:708."""
 
 # Hydrogen ionization energy in eV
 E_ion_H = 13.605693122994
