@@ -421,7 +421,7 @@ def _interp_sources_to_fine_k(sources_list, log_k_coarse, log_k_fine):
 
 def compute_cl_tt_interp(
     pt, params, bg, l_values,
-    n_k_fine=5000,
+    n_k_fine=10000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
@@ -437,7 +437,7 @@ def compute_cl_tt_interp(
     k-grid density.
 
     Args:
-        n_k_fine: number of fine k-points (default 3000, ~660 k/decade)
+        n_k_fine: number of fine k-points (default 10000, converged for l≤1200)
     """
     if tt_mode is None:
         tt_mode = _DEFAULT_TT_MODE
@@ -481,7 +481,7 @@ def compute_cl_tt_interp(
 
 def compute_cl_ee_interp(
     pt, params, bg, l_values,
-    n_k_fine=5000,
+    n_k_fine=10000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
 ):
     """Compute C_l^EE with source interpolation to a fine k-grid."""
@@ -507,7 +507,7 @@ def compute_cl_ee_interp(
 
 def compute_cl_te_interp(
     pt, params, bg, l_values,
-    n_k_fine=5000,
+    n_k_fine=10000,
     l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DELTA_L,
     tt_mode=None,
 ):
@@ -609,7 +609,7 @@ def compute_cls_all(
 
 def compute_cls_all_interp(
     pt, params, bg, l_max=2500,
-    n_k_fine=5000, tt_mode=None,
+    n_k_fine=10000, tt_mode=None,
 ):
     """Compute all unlensed C_l spectra at l=2..l_max with source interpolation.
 

@@ -23,31 +23,50 @@ With 5 bins: **TT l=1000 from -0.57% to +0.06%!**
 
 Current accuracy (ncdm_q_size=5, vs CLASS RECFAST):
 
+Dense l-sampling (n_k_fine=20000, vs CLASS RECFAST, ncdm_q_size=5):
+
 | l | TT err% | EE err% | Notes |
 |---|---------|---------|-------|
 | 20 | -0.02 | -0.19 | EE: visibility shape |
+| 30 | +0.02 | -0.10 | |
 | 50 | +0.03 | -0.05 | |
 | 100 | +0.05 | +0.01 | |
+| 150 | +0.04 | +0.01 | |
 | 200 | +0.03 | -0.005 | |
+| 250 | +0.02 | -0.02 | |
 | 300 | +0.02 | +0.03 | |
-| 400 | +0.12 | +0.07 | TT: Doppler bump? |
-| 500 | +0.16 | -0.12 | TT: near 2nd trough |
-| 700 | +0.09 | +0.09 | |
-| 1000 | +0.06 | +0.19 | |
-| 1500 | -0.70 | -1.68 | k-integration |
-| 2000 | -3.47 | +2.23 | k-integration |
+| 350 | +0.02 | +0.08 | |
+| 400 | +0.12 | +0.07 | TT: Doppler bump |
+| 420 | +0.18 | +0.04 | TT: peak of bump |
+| 450 | +0.16 | +0.02 | |
+| 500 | +0.16 | -0.12 | |
+| 600 | +0.11 | +0.05 | |
+| 700 | +0.10 | +0.09 | |
+| 800 | +0.11 | +0.09 | |
+| 900 | +0.11 | +0.22 | |
+| 1000 | +0.09 | +0.19 | |
+| 1200 | -0.07 | +0.03 | |
+| 1500 | -0.63 | -1.68 | k-under-resolved |
+| 2000 | -3.67 | +2.24 | k-under-resolved |
 
-**TT sub-0.1% at l=20-300, 700, 1000** (7/9 at l≤1000).
-**TT worst: l=400 (+0.12%), l=500 (+0.16%).**
-**EE sub-0.1% at l=50-400** (5/9 at l≤1000).
-**EE worst: l=20 (-0.19%), l=500 (-0.12%), l=1000 (+0.19%).**
+**k-convergence (10k vs 20k)**: <0.01% at l≤700, 0.03% at l=1000, 0.07% at l=1500.
+k-integration NOT the bottleneck at l≤1200.
 
-**Remaining work:**
-1. TT l=400-500: +0.12-0.16% — investigate Doppler source amplitude
-2. EE l=20: -0.19% — visibility function at large scales (RECFAST He or reionization)
-3. EE l=1000: +0.19% — possibly from Silk damping sensitivity
-4. l>1200: increase n_k_fine to 20000+ or use hybrid k-grid
-5. TE: sub-0.1% at non-zero-crossing l, but zero crossings cause huge relative errors
+**TT sub-0.1% at l=20-350, l=1000, l=1200** (13/20 at l≤1200).
+**TT worst: l=420 (+0.18%), bump at l=400-800 peaking near 2nd acoustic trough.**
+**EE sub-0.1% at l=50-800** (17/24 at l≤1200).
+**EE worst: l=20 (-0.19%), l=900-1000 (+0.19-0.22%).**
+
+T2 effect test: removing T2 (quadrupole) makes l=300-700 MUCH worse (>2%),
+confirming T2 is essential and correctly implemented. The +0.12% bump is NOT
+from T2 — it's the residual after all terms combine.
+
+**Remaining blockers (ordered by impact):**
+1. TT l=400-800: +0.10-0.18% bump — source function amplitude ~0.06% high at k~0.03
+2. EE l=20-30: -0.10 to -0.19% — RECFAST visibility or reionization at large scales
+3. EE l=900-1000: +0.19-0.22% — damping tail sensitivity
+4. l>1200: n_k_fine=10000 under-resolved (need 20000+ or hybrid k-grid)
+5. TE zero crossings: inherently large relative errors where C_l^TE ≈ 0
 
 ### External review (Feb 11, 2026)
 
