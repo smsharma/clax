@@ -127,7 +127,7 @@ class PrecisionParams:
     bg_tol: float = 1e-10           # ODE tolerance
 
     # NCDM (massive neutrino) quadrature
-    ncdm_q_size: int = 15           # number of momentum bins
+    ncdm_q_size: int = 5            # CLASS default: 5 for perturbation, 11 for background
     ncdm_q_max: float = 15.0        # max comoving momentum q
     ncdm_bg_n_points: int = 512     # points for pre-tabulation grid
 
