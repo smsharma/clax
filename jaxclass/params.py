@@ -60,7 +60,7 @@ class CosmoParams:
     deg_ncdm: float = 1.0         # degeneracy factor
 
     # Primordial
-    ln10A_s: float = 3.044
+    ln10A_s: float = 3.0445224377  # matches A_s=2.1e-9 exactly
     n_s: float = 0.9649
     alpha_s: float = 0.0          # running of spectral index
     r_t: float = 0.0              # tensor-to-scalar ratio

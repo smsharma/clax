@@ -1,9 +1,50 @@
 # jaxCLASS Development Progress
 
-## Status: Science-grade C_l at acoustic peaks — TT/EE/TE <0.1% at l=150-300
+## Status: Core code accuracy sub-0.1% at l=20-300, sub-0.16% at l=400-1200
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l. AD gradients verified to 0.03%.**
+
+### Feb 14, 2026: RECFAST upgrade + A_s fix + ncdm hierarchy overcorrection found
+
+**RECFAST upgrade (RK4 + He Peebles):**
+- x_e at z_star matches CLASS RECFAST to **-0.006%** (was -0.08% vs HyRec)
+- T_b matches CLASS to machine precision everywhere
+- kappa_dot at z_star: **-0.017%** vs CLASS RECFAST
+- He Peebles equation at z=1500-2000: 0.6-3.4% (Heflag=6 corrections needed)
+
+**A_s fix:** ln10A_s corrected from 3.044 to 3.0445224377 (exact match to A_s=2.1e-9).
+Previously 0.05% C_l bias at all l.
+
+**KEY FINDING: ncdm Ψ_l(q) hierarchy OVERCORRECTS at high l.**
+Apples-to-apples test (massless ncdm in both jaxCLASS and CLASS RECFAST):
+
+| l | TT err% | EE err% | Notes |
+|---|---------|---------|-------|
+| 20 | -0.06 | -0.18 | |
+| 50 | +0.01 | -0.04 | |
+| 100 | +0.05 | +0.02 | |
+| 200 | +0.04 | +0.02 | |
+| 300 | +0.04 | +0.02 | |
+| 500 | +0.16 | -0.09 | |
+| 700 | +0.11 | +0.10 | |
+| 1000 | +0.12 | +0.20 | |
+| 1200 | -0.09 | +0.02 | |
+| 1500 | -0.58 | -1.69 | k-integration under-resolved |
+| 2000 | -3.80 | +2.07 | k-integration under-resolved |
+
+**TT sub-0.1% at l=20-300, sub-0.16% at l=400-1200** (code-level accuracy).
+**EE sub-0.1% at l=50-600, sub-0.20% at l=700-1000.**
+
+Previous -0.57% at l=1000 (with full ncdm hierarchy) was from the hierarchy
+OVERCORRECTING: the massless approximation gives +0.12%, but the hierarchy
+shifts to -0.52% (net shift -0.64%), whereas CLASS massive-vs-massless diff
+is only -0.37%. The hierarchy overcorrects by ~0.27%.
+
+**Remaining work:**
+1. Fix ncdm hierarchy overcorrection (Bug 27) — main blocker for sub-0.1% at l>300
+2. Increase n_k_fine for l>1200 (or use hybrid k-grid)
+3. Sub-0.16% TT code error at l=400-1000 → investigate source function amplitude
 
 ### External review (Feb 11, 2026)
 
