@@ -377,11 +377,15 @@ def _ionHe(tempb, a, x0, x1, x2, Y_He, H0, Omega_b):
 # Reionization (tanh model)
 # ---------------------------------------------------------------------------
 
-def _reionization_xe(z, z_reio, Y_He):
-    """Tanh reionization, cf. CLASS reio_camb."""
-    fHe = Y_He / (4.0 * (1.0 - Y_He))  # simplified He fraction
-    xe_after = 1.0 + fHe
+_NOT4 = 3.9715  # He-4/H mass ratio, cf. CLASS thermodynamics.h:707
 
+
+def _reionization_xe_fraction(z, z_reio):
+    """Compute the reionization FRACTION (0 to 1) from tanh profile.
+
+    Returns the fraction of full reionization completed at redshift z.
+    cf. CLASS thermodynamics.c: reio_camb tanh formula.
+    """
     reio_exponent = 1.5
     reio_width = 0.5
 
@@ -390,11 +394,32 @@ def _reionization_xe(z, z_reio, Y_He):
         / (reio_exponent * (1.0 + z_reio) ** (reio_exponent - 1.0))
         / reio_width
     )
-    xe_reio = xe_after * (jnp.tanh(argument) + 1.0) / 2.0
+    return (jnp.tanh(argument) + 1.0) / 2.0
+
+
+def _reionization_xe(z, z_reio, Y_He, xe_before=0.0):
+    """Tanh reionization following CLASS reio_camb convention.
+
+    CLASS formula: xe = xe_before + (xe_after - xe_before) * tanh_fraction
+    This smoothly transitions from xe_before to xe_after, avoiding the
+    kink from max(xe_raw, xe_reio).
+
+    cf. CLASS thermodynamics.c: thermodynamics_reionization_function()
+    """
+    # fHe = n_He/n_H; CLASS uses _not4_=3.9715 instead of exactly 4
+    # cf. CLASS thermodynamics.c:1207
+    fHe = Y_He / (_NOT4 * (1.0 - Y_He))
+    xe_after = 1.0 + fHe  # H + singly-ionized He
+
+    # Hydrogen reionization (CLASS reio_camb)
+    frac_H = _reionization_xe_fraction(z, z_reio)
+    xe_reio = xe_before + (xe_after - xe_before) * frac_H
 
     # Helium double reionization at z ~ 3.5
+    # cf. CLASS thermodynamics.c:1338-1358
     arg_He = (3.5 - z) / 0.5
-    xe_reio += fHe * (jnp.tanh(arg_He) + 1.0) / 2.0
+    frac_He = (jnp.tanh(arg_He) + 1.0) / 2.0
+    xe_reio += fHe * frac_He
 
     return xe_reio
 
@@ -645,7 +670,8 @@ def thermodynamics_solve(
     z_grid = 1.0 / a_grid - 1.0
     mu_H = 1.0 / (1.0 - Y_He)
     _bigH = 3.2407792902755102e-18  # H0=100 km/s/Mpc in s^-1
-    n_H_0 = 3.0 * (_bigH * params.h)**2 / (8.0 * math.pi * const.G_SI * 1.67353284e-27 * mu_H) * Omega_b
+    _m_p = 1.672621637e-27  # proton mass [kg], cf. CLASS thermodynamics.h:705
+    n_H_0 = 3.0 * (_bigH * params.h)**2 / (8.0 * math.pi * const.G_SI * _m_p * mu_H) * Omega_b
     # kappa_dot prefactor: kappa_dot(z) = xe * n_H_0 * (1+z)^2 * sigma_T * c/Mpc
     kd_prefactor = n_H_0 * (1.0 + z_grid)**2 * const.sigma_T * const.Mpc_over_m
     dtau_grid = jnp.diff(tau_grid)
@@ -665,8 +691,10 @@ def thermodynamics_solve(
         params.tau_reio, xe_raw_grid, kd_prefactor, dtau_grid,
         z_grid, Y_He, kappa_raw_total)
 
-    xe_reio_grid = jax.vmap(lambda z: _reionization_xe(z, z_reio, Y_He))(z_grid)
-    xe_grid = jnp.maximum(xe_raw_grid, xe_reio_grid)
+    # CLASS-style additive reionization: xe = xe_before + (xe_after - xe_before) * frac
+    xe_grid = jax.vmap(
+        lambda z, xe_raw: _reionization_xe(z, z_reio, Y_He, xe_before=xe_raw)
+    )(z_grid, xe_raw_grid)
 
     # --- Optical depth ---
     kappa_dot_grid = xe_grid * kd_prefactor
@@ -746,9 +774,15 @@ def _find_z_reio(tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid,
     Memory-efficient: only one _reionization_xe evaluation per iteration.
     """
     def _tau_reio_for_zreio(z_reio_cand):
-        """Compute reionization-only optical depth for a given z_reio."""
-        xe_reio = jax.vmap(lambda z: _reionization_xe(z, z_reio_cand, Y_He))(z_grid)
-        xe_extra = jnp.maximum(xe_reio - xe_raw_grid, 0.0)
+        """Compute reionization-only optical depth for a given z_reio.
+
+        Uses CLASS-style additive formula: xe_total = xe_before + (xe_after - xe_before) * frac.
+        The extra optical depth from reionization is ∫ (xe_total - xe_raw) * kd_prefactor dτ.
+        """
+        xe_total = jax.vmap(
+            lambda z, xe_raw: _reionization_xe(z, z_reio_cand, Y_He, xe_before=xe_raw)
+        )(z_grid, xe_raw_grid)
+        xe_extra = jnp.maximum(xe_total - xe_raw_grid, 0.0)
         kd_extra = xe_extra * kd_prefactor
         kappa_integ = 0.5 * (kd_extra[:-1] + kd_extra[1:]) * dtau_grid
         return jnp.sum(kappa_integ)
