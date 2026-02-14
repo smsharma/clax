@@ -297,7 +297,10 @@ def _pretabulate_ncdm(
     Returns splines of log(rho_ncdm) and log(P_ncdm) vs log(a),
     in CLASS units (so that rho_ncdm [Mpc^-2] can be used directly in Friedmann).
     """
-    q, w = _gauss_laguerre_nodes_weights(prec.ncdm_q_size)
+    # Use separate (higher) q-size for background accuracy
+    # CLASS uses 11 for background, 5 for perturbation
+    bg_q_size = getattr(prec, 'ncdm_bg_q_size', prec.ncdm_q_size)
+    q, w = _gauss_laguerre_nodes_weights(bg_q_size)
 
     # Dimensionless mass M = m_ncdm [eV] / (k_B * T_ncdm [K])
     # T_ncdm = T_ncdm_over_T_cmb * T_cmb
