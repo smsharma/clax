@@ -7,12 +7,13 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.**
 
 ### Feb 15, 2026: Multi-cosmology validation + chunked vmap
 
-**Multi-cosmology validation passed** (4 parameter points, medium_cl preset):
-- omega_b_high (+20%), omega_cdm_high (+20%), omega_cdm_low (-20%), h_high (+10%)
-- TT: sub-0.3% everywhere across all cosmologies (no fiducial-specific bugs)
-- EE: sub-0.3% at l≥50, ~1% at l=20 (RECFAST visibility shape, known)
-- TE: ~1% near l=50 zero-crossing (relative error near sign change), sub-0.5% elsewhere
-- Consistent error pattern across all tested cosmologies
+**Multi-cosmology validation passed** (ALL 10 parameter points, medium_cl preset):
+- omega_b ±20%, omega_cdm ±20%, h ±10%, n_s ±5%, tau_reio ±30%
+- **TT: sub-0.5% at ALL l for ALL 10 cosmologies** (worst: 0.49% h_low l=500)
+- **EE: sub-0.3% at l≥100** for all cosmologies; ~1% at l=20 (RECFAST visibility)
+- **TE: ~1-2.6% near l=50 zero-crossing** for tau variations, sub-0.5% elsewhere
+- omega_b_low and h_low are hardest cosmologies (TT ~0.5% at l=500 from Doppler bump)
+- No fiducial-specific bugs — error pattern consistent across all cosmologies
 
 **Chunked vmap for V100 memory**: Added `pt_k_chunk_size` parameter to PrecisionParams.
 Uses `jax.lax.map` to process k-modes in chunks. Fixes OOM on V100-32GB with planck_cl.
@@ -56,7 +57,7 @@ The deflection field is spin-1, requiring d^l_{11} for its correlation function.
 **v1 feature completeness status:**
 1. ~~Lensed EE and TE~~ — **DONE** (was BLOCKING)
 2. ~~Lensing accuracy 5% → <1%~~ — **DONE** (0.02% TT, 0.01% EE mean)
-3. ~~Multi-cosmology validation~~ — **DONE** (4 cosmologies, consistent sub-0.3% TT/EE)
+3. ~~Multi-cosmology validation~~ — **DONE** (ALL 10 cosmologies, TT sub-0.5%, EE sub-0.3% at l≥100)
 4. ~~P(k,z) at arbitrary z~~ — **DONE** (transfer.py: interpolate delta_m along tau axis)
 5. BB tensor accuracy — lensing BB now accurate, primordial BB still ~2x off
 6. Chunked vmap — **DONE** (pt_k_chunk_size param, V100 memory fix)

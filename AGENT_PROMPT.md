@@ -32,8 +32,8 @@ Lensed accuracy is SCIENCE-GRADE (Feb 15):
 1. ~~**Lensed EE and TE**~~ — **DONE** (Feb 15). Full spin-2 lensing.
 2. ~~**Lensing accuracy 5% → <1%**~~ — **DONE** (Feb 15). Now sub-0.2%.
 
-3. ~~**Multi-cosmology validation**~~ — **DONE** (Feb 15). 4 LCDM variations,
-   all sub-0.3% TT/EE. No fiducial-specific bugs found.
+3. ~~**Multi-cosmology validation**~~ — **DONE** (Feb 15). ALL 10 LCDM variations,
+   TT sub-0.5%, EE sub-0.3% at l≥100. No fiducial-specific bugs.
 
 4. ~~**P(k,z) at arbitrary z**~~ — **DONE** (Feb 15). transfer.py interpolates
    delta_m along tau axis.
@@ -44,8 +44,7 @@ Lensed accuracy is SCIENCE-GRADE (Feb 15):
 6. **Performance**: C_l computation takes ~40 min per cosmology (medium_cl).
    Need XLA persistent cache or AOT compilation for practical HMC use.
 
-7. **Remaining cosmology variations**: tau_reio ±30%, n_s ±5% not yet tested
-   (lower priority — same code paths as tested variations).
+7. ~~**Remaining cosmology variations**~~ — **DONE** (Feb 15). All 10 tested.
 
 ## Approach
 
