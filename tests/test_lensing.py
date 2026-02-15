@@ -1,4 +1,4 @@
-"""Test lensing module: C_l^phiphi and lensed C_l^TT against CLASS reference data."""
+"""Test lensing module: C_l^phiphi and lensed C_l^TT/EE/TE/BB against CLASS reference."""
 
 import os
 
@@ -13,7 +13,7 @@ from jaxclass import CosmoParams, PrecisionParams
 from jaxclass.background import background_solve
 from jaxclass.thermodynamics import thermodynamics_solve
 from jaxclass.perturbations import perturbations_solve
-from jaxclass.lensing import compute_cl_pp, lens_cl_tt
+from jaxclass.lensing import compute_cl_pp, lens_cl_tt, lens_cls
 
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
@@ -138,3 +138,63 @@ class TestLensedTT:
             diff = abs(cl_lensed - cl_unlensed) / abs(cl_unlensed)
             print(f"l={l}: lensing effect = {diff:.4%}")
             assert diff > 1e-6, f"Lensing had no effect at l={l}"
+
+
+class TestLensCls:
+    """Test full lens_cls (TT+EE+TE+BB) against CLASS lensed reference.
+
+    Uses CLASS unlensed C_l and C_l^pp as input to isolate the lensing algorithm.
+    """
+
+    @pytest.fixture(scope="class")
+    def lensed_all(self):
+        """Compute all lensed spectra from CLASS reference inputs."""
+        cls_ref = _load_cls_ref()
+        cl_tt = jnp.array(cls_ref['tt'])
+        cl_ee = jnp.array(cls_ref['ee'])
+        cl_te = jnp.array(cls_ref['te'])
+        cl_bb = jnp.array(cls_ref['bb'])
+        cl_pp = jnp.array(cls_ref['pp'])
+        tt, ee, te, bb = lens_cls(cl_tt, cl_ee, cl_te, cl_bb, cl_pp, l_max=2500)
+        return {
+            'tt': np.array(tt), 'ee': np.array(ee),
+            'te': np.array(te), 'bb': np.array(bb),
+        }
+
+    def test_lens_cls_shapes(self, lensed_all):
+        """All lensed arrays should have shape (2501,)."""
+        for key in ['tt', 'ee', 'te', 'bb']:
+            assert lensed_all[key].shape == (2501,), \
+                f"Lensed {key} shape {lensed_all[key].shape}, expected (2501,)"
+
+    def test_lensed_tt_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
+        """Lensed TT should match CLASS to <1% at l=10-2000."""
+        tt_ref = lcdm_cls_lensed_ref['tt']
+        for l in [10, 100, 500, 1000, 1500]:
+            err = abs(lensed_all['tt'][l] - tt_ref[l]) / abs(tt_ref[l])
+            print(f"Lensed TT l={l}: err={err:.4%}")
+            assert err < 0.01, f"Lensed TT l={l}: err={err:.2%} exceeds 1%"
+
+    def test_lensed_ee_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
+        """Lensed EE should match CLASS to <1% at l=10-2000."""
+        ee_ref = lcdm_cls_lensed_ref['ee']
+        for l in [10, 100, 500, 1000, 1500]:
+            err = abs(lensed_all['ee'][l] - ee_ref[l]) / abs(ee_ref[l])
+            print(f"Lensed EE l={l}: err={err:.4%}")
+            assert err < 0.01, f"Lensed EE l={l}: err={err:.2%} exceeds 1%"
+
+    def test_lensed_bb_positive(self, lensed_all):
+        """Lensed BB should be positive (generated from E-mode lensing)."""
+        for l in [10, 100, 500, 1000]:
+            val = float(lensed_all['bb'][l])
+            print(f"Lensed BB l={l}: {val:.4e}")
+            assert val > 0, f"Lensed BB(l={l}) = {val:.4e} not positive"
+
+    def test_lensed_bb_vs_class(self, lensed_all, lcdm_cls_lensed_ref):
+        """Lensed BB should match CLASS to <5% at l=50-500."""
+        bb_ref = lcdm_cls_lensed_ref['bb']
+        for l in [50, 100, 200, 500]:
+            ratio = lensed_all['bb'][l] / bb_ref[l]
+            print(f"Lensed BB l={l}: ratio={ratio:.4f}")
+            assert abs(ratio - 1) < 0.05, \
+                f"Lensed BB l={l}: ratio={ratio:.4f} exceeds 5% error"
