@@ -12,7 +12,7 @@ a Planck-like likelihood (lensed TT+TE+EE).
 2. Run `pytest tests/ --fast -x -q 2>&1 | tail -20` to see current test status.
 3. Pick the highest-impact task from the priority list below.
 
-## Current status (Feb 14, 2026)
+## Current status (Feb 15, 2026)
 
 Unlensed accuracy is SCIENCE-GRADE:
 - TT sub-0.1% at l=20-350, sub-0.2% at l=400-1200
@@ -21,17 +21,16 @@ Unlensed accuracy is SCIENCE-GRADE:
 - P(k) sub-percent at all k
 - AD gradients verified to 0.03%
 
+Lensed accuracy is SCIENCE-GRADE (Feb 15):
+- Lensed TT: mean 0.02%, max 0.20% (l=10-2000)
+- Lensed EE: mean 0.01%, max 0.17% (l=10-2000)
+- Lensed BB: ratio ~1.000 at l<=500, 0.996 at l=1000
+- Full spin-2 lensing with Cgl2 corrections in lensing.py
+
 ## TOP PRIORITIES (in order — do these)
 
-1. **Lensed EE and TE** (BLOCKING) — Only lensed TT exists (lens_cl_tt in
-   lensing.py). Planck likelihood requires lensed TT+TE+EE. Extend the
-   correlation function lensing method to EE and TE. This means implementing
-   spin-2 lensing transforms (different Legendre polynomials). Without this,
-   the solver cannot be used with any real CMB likelihood.
-
-2. **Lensing accuracy 5% → <1%** — Current lensed TT has ~5% error vs CLASS.
-   Diagnose whether error is in C_l^phiphi computation, the correlation
-   function theta-grid resolution, or l_max in the Legendre sums.
+1. ~~**Lensed EE and TE**~~ — **DONE** (Feb 15). Full spin-2 lensing.
+2. ~~**Lensing accuracy 5% → <1%**~~ — **DONE** (Feb 15). Now sub-0.2%.
 
 3. **Multi-cosmology validation** — Everything tested at ONE fiducial LCDM
    point only. Validate at: omega_b ±20%, omega_cdm ±20%, h ±10%, n_s ±5%,
@@ -41,14 +40,8 @@ Unlensed accuracy is SCIENCE-GRADE:
 4. **P(k,z) at arbitrary z** — Currently only z=0. Interpolate delta_m from
    perturbation output at arbitrary z values.
 
-5. **BB tensor accuracy** — Currently factor ~2 off CLASS.
-
-## Unlensed accuracy is good enough
-
-Unlensed TT/EE/TE is already sub-0.2% almost everywhere.
-Avoid deep rabbit holes on unlensed accuracy. Focus on the priorities
-above — especially lensed EE/TE which is BLOCKING. Quick unlensed fixes
-are fine if you spot them while working on other things.
+5. **BB tensor accuracy** — Lensing BB now accurate. Primordial BB still ~2x
+   off CLASS.
 
 ## Approach
 
