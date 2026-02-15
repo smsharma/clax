@@ -1,9 +1,48 @@
 # jaxCLASS Development Progress
 
-## Status: Full lensing (TT/EE/TE/BB) at sub-0.2% accuracy
+## Status: Full lensing (TT/EE/TE/BB) at sub-0.2% accuracy, JIT-cached (487s on H100)
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.**
+
+### Feb 14, 2026: JIT compilation — 2x speedup on H100
+
+**Root cause of slow execution**: Zero `@jax.jit` decorators anywhere in the codebase.
+Every call re-traced through XLA — vmap over k-modes compiled from scratch each time.
+
+**Changes:**
+1. Added `@functools.partial(jax.jit, static_argnums=(1,))` to all solve functions:
+   `background_solve`, `thermodynamics_solve`, `perturbations_solve`,
+   `tensor_perturbations_solve`, `compute()` — PrecisionParams is the static arg (frozen dataclass, hashable)
+2. Added per-l JIT to harmonic inner functions: `_exact_transfer_tt`, `_exact_transfer_ee`,
+   `_cl_k_integral`, `_cl_k_integral_cross`, `_interp_single_source` — l is static arg
+3. Fixed all `float(bg.conformal_age)` → `bg.conformal_age` (breaks JIT tracing, 6 instances)
+4. Fixed `_k_grid`: `jnp.log10` → `math.log10` (prec args are concrete Python floats)
+5. Refactored `_exact_transfer_tt` from `**kwargs` to explicit keyword args (required for static_argnums)
+
+**Why NOT JIT the outer compute_cl_* functions**: The Python for-loop over l_values
+gets unrolled into the XLA graph, creating a massive program where all l-values'
+intermediates coexist → GPU OOM (9.4 GiB allocation failed on H100-80GB).
+Per-l JIT on inner functions avoids this: each l compiles independently, O(1) memory.
+
+**H100-80GB timing (planck_cl preset, 300 k-modes, ells=(20,100,500,1000)):**
+
+| Step | 1st call (compile) | 2nd call | 3rd call (cached) |
+|------|-------------------|----------|-------------------|
+| background | 8s | 3s | **1s** |
+| thermodynamics | 66s | 63s | **53s** |
+| perturbations | 810s | 566s | **401s** |
+| harmonic | 68s | 33s | **33s** |
+| **TOTAL** | **952s** | **664s** | **487s** |
+
+**2x speedup** (952s → 487s). JIT caching works: background 8→1s, harmonic 68→33s.
+
+**Execution floors (not reducible by JIT):**
+- Perturbations ~400s: 300 k-modes × Kvaerno5 adaptive solver. vmap pads all modes
+  to max_steps=131072; early-finishing modes waste GPU cycles.
+- Thermodynamics ~53s: 20000 sequential lax.scan steps (inherently serial).
+- **For HMC target (30-60s)**: need fewer k-modes (30-50), lower tau_n_points,
+  or fixed-step solver.
 
 ### Feb 15, 2026: Multi-cosmology validation + chunked vmap
 
@@ -233,16 +272,18 @@ Must-have for running a Planck-like likelihood with HMC:
    Cgl2 corrections. TT/EE sub-0.2%, BB ratio ~1.000 at l<=500.
 2. ~~**Lensing accuracy 5% → <1%**~~ — **DONE** (Feb 15). Root cause was
    Cgl using P_l instead of d^l_{11}. Now 0.02% TT, 0.01% EE mean.
-3. **Multi-cosmology validation** (HIGH PRIORITY) — Everything tested at ONE
-   fiducial LCDM point. Must validate at omega_b ±20%, omega_cdm ±20%,
-   h ±10%, n_s ±5%, tau_reio ±30%. No code changes needed, just GPU time.
+3. ~~**Multi-cosmology validation**~~ — **DONE** (Feb 15). ALL 10 cosmologies,
+   TT sub-0.5%, EE sub-0.3% at l>=100.
+4. ~~**P(k,z) at arbitrary z**~~ — **DONE** (Feb 15). transfer.py interpolation.
+5. ~~**Chunked vmap**~~ — **DONE** (Feb 15). pt_k_chunk_size param, V100 memory fix.
+6. ~~**JIT compilation**~~ — **DONE** (Feb 14). 2x speedup (952s → 487s on H100).
+   All solve functions + per-l harmonic inner functions cached.
 
-Should-have:
+Remaining:
 
-4. **P(k,z) at arbitrary z** — Currently only z=0 in transfer.py. Needed for
-   any LSS cross-correlation or growth-rate constraint. Straightforward:
-   interpolate delta_m from perturbation output at arbitrary z.
-5. **BB tensor accuracy** — Lensing BB now accurate (<0.5% at l<=1000).
+7. **Speed for HMC** — 487s still too slow for HMC (target 30-60s). Needs fewer
+   k-modes, lower tau_n_points, or fixed-step solver.
+8. **BB tensor accuracy** — Lensing BB now accurate (<0.5% at l<=1000).
    Primordial BB still ~2x off CLASS. Lower priority.
 
 
