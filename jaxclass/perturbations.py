@@ -1312,8 +1312,29 @@ def perturbations_solve(
         sources = jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
         return sources  # tuple of 12 arrays, each shape (n_tau,)
 
-    # Vectorize over k-modes
-    all_sources = jax.vmap(solve_single_k)(k_grid)
+    # Vectorize over k-modes, with optional chunking for memory-limited GPUs
+    chunk_size = prec.pt_k_chunk_size
+    n_k = len(k_grid)
+    if chunk_size <= 0 or chunk_size >= n_k:
+        # Full vmap — fastest on GPUs with enough memory
+        all_sources = jax.vmap(solve_single_k)(k_grid)
+    else:
+        # Chunked vmap: process chunk_size k-modes at a time
+        # Pad k_grid to multiple of chunk_size
+        n_pad = (chunk_size - n_k % chunk_size) % chunk_size
+        k_padded = jnp.concatenate([k_grid, jnp.full(n_pad, k_grid[-1])])
+        k_chunks = k_padded.reshape(-1, chunk_size)
+
+        def solve_chunk(k_chunk):
+            return jax.vmap(solve_single_k)(k_chunk)
+
+        # Use lax.map for sequential execution of chunks (saves memory)
+        chunk_results = jax.lax.map(solve_chunk, k_chunks)
+        # chunk_results is a tuple of 12 arrays, each shape (n_chunks, chunk_size, n_tau)
+        # Reshape to (n_k_padded, n_tau) and trim
+        all_sources = jax.tree.map(
+            lambda x: x.reshape(-1, x.shape[-1])[:n_k], chunk_results
+        )
     # all_sources is a tuple of 12 arrays, each shape (n_k, n_tau)
 
     return PerturbationResult(

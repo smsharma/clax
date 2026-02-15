@@ -17,7 +17,8 @@ from jaxclass.lensing import compute_cl_pp, lens_cl_tt, lens_cls
 
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
-PREC = PrecisionParams.fast_cl()
+from dataclasses import replace as _dc_replace
+PREC = _dc_replace(PrecisionParams.fast_cl(), pt_k_chunk_size=20)
 
 
 @pytest.fixture(scope="module")
@@ -118,8 +119,8 @@ class TestLensedTT:
             ratio = cl_us / cl_class
             print(f"C_l^TT_lensed(l={l}): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
             # Correlation function method should be accurate when given exact inputs
-            assert abs(ratio - 1) < 0.20, (
-                f"C_l^TT_lensed(l={l}): ratio={ratio:.4f}, expected within 20%"
+            assert abs(ratio - 1) < 0.005, (
+                f"C_l^TT_lensed(l={l}): ratio={ratio:.4f}, expected within 0.5%"
             )
 
     def test_lens_cl_tt_positive(self, lensed_tt):
@@ -168,20 +169,30 @@ class TestLensCls:
                 f"Lensed {key} shape {lensed_all[key].shape}, expected (2501,)"
 
     def test_lensed_tt_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed TT should match CLASS to <1% at l=10-2000."""
+        """Lensed TT should match CLASS to <0.2% at l=10-1500."""
         tt_ref = lcdm_cls_lensed_ref['tt']
         for l in [10, 100, 500, 1000, 1500]:
             err = abs(lensed_all['tt'][l] - tt_ref[l]) / abs(tt_ref[l])
             print(f"Lensed TT l={l}: err={err:.4%}")
-            assert err < 0.01, f"Lensed TT l={l}: err={err:.2%} exceeds 1%"
+            assert err < 0.002, f"Lensed TT l={l}: err={err:.4%} exceeds 0.2%"
 
     def test_lensed_ee_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed EE should match CLASS to <1% at l=10-2000."""
+        """Lensed EE should match CLASS to <0.2% at l=10-1500."""
         ee_ref = lcdm_cls_lensed_ref['ee']
         for l in [10, 100, 500, 1000, 1500]:
             err = abs(lensed_all['ee'][l] - ee_ref[l]) / abs(ee_ref[l])
             print(f"Lensed EE l={l}: err={err:.4%}")
-            assert err < 0.01, f"Lensed EE l={l}: err={err:.2%} exceeds 1%"
+            assert err < 0.002, f"Lensed EE l={l}: err={err:.4%} exceeds 0.2%"
+
+    def test_lensed_te_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
+        """Lensed TE should match CLASS to <1% at l=10-1500."""
+        te_ref = lcdm_cls_lensed_ref['te']
+        for l in [10, 100, 500, 1000, 1500]:
+            if abs(te_ref[l]) < 1e-30:
+                continue
+            err = abs(lensed_all['te'][l] - te_ref[l]) / abs(te_ref[l])
+            print(f"Lensed TE l={l}: err={err:.4%}")
+            assert err < 0.01, f"Lensed TE l={l}: err={err:.2%} exceeds 1%"
 
     def test_lensed_bb_positive(self, lensed_all):
         """Lensed BB should be positive (generated from E-mode lensing)."""

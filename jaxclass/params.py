@@ -166,6 +166,9 @@ class PrecisionParams:
     ode_max_steps: int = 65536
     ode_adjoint: str = "recursive_checkpoint"  # or "direct"
 
+    # Memory management
+    pt_k_chunk_size: int = 0  # k-modes per chunk (0 = full vmap, no chunking)
+
     @staticmethod
     def fast_cl():
         """Fast preset for C_l iteration.

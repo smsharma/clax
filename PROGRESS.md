@@ -44,9 +44,10 @@ The deflection field is spin-1, requiring d^l_{11} for its correlation function.
 **v1 feature completeness status:**
 1. ~~Lensed EE and TE~~ — **DONE** (was BLOCKING)
 2. ~~Lensing accuracy 5% → <1%~~ — **DONE** (0.02% TT, 0.01% EE mean)
-3. Multi-cosmology validation — still needed
-4. P(k,z) at arbitrary z — still needed
+3. Multi-cosmology validation — IN PROGRESS (reference data generated, running diagnostics)
+4. ~~P(k,z) at arbitrary z~~ — **DONE** (transfer.py: interpolate delta_m along tau axis)
 5. BB tensor accuracy — lensing BB now accurate, primordial BB still ~2x off
+6. Chunked vmap — **DONE** (pt_k_chunk_size param, V100 memory fix)
 
 ### Feb 14, 2026: RECFAST upgrade + A_s fix + ncdm hierarchy overcorrection found
 
