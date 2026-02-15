@@ -86,48 +86,98 @@ def compute_cl_pp(
 
 # =============================================================================
 # Wigner d-matrix recurrence coefficients (Kostelec & Rockmore 2003)
-# cf. CLASS lensing.c:1256-1597
+# cf. CLASS lensing.c:1256-1964
 #
 # All recurrences act on rescaled functions: sqrt((2l+1)/2) * d^l_{mm'}
 # General form: rescaled[l+1] = fac1[l]*f(mu)*rescaled[l] - fac3[l]*rescaled[l-1]
 # Actual d = rescaled * sqrt(2/(2l+1))
 # =============================================================================
 
-def _precompute_d11_fac(l_max):
-    """d^l_{11} recurrence coefficients. cf. CLASS lensing.c:1329-1334."""
-    fac1 = np.zeros(l_max + 1)
-    fac2 = np.zeros(l_max + 1)
-    fac3 = np.zeros(l_max + 1)
-    for l in range(2, l_max + 1):
+def _precompute_d_facs(l_max):
+    """Precompute recurrence coefficients for all Wigner d-functions.
+
+    Returns dict of (fac1, fac2, fac3) tuples for each d-function type.
+    fac2 is None for d-functions that use plain mu (d00, d20, d40).
+
+    cf. CLASS lensing.c:1256-1964 for all recurrence formulas.
+    """
+    n = l_max + 1
+    facs = {}
+
+    # d11/d1m1 (shared facs, sign of fac2 differs in recurrence)
+    # cf. lensing.c:1329-1334
+    f1, f2, f3 = np.zeros(n), np.zeros(n), np.zeros(n)
+    for l in range(2, n):
         ll = float(l)
-        fac1[l] = np.sqrt((2*ll+3)/(2*ll+1)) * (ll+1)*(2*ll+1) / (ll*(ll+2))
-        fac2[l] = 1.0 / (ll*(ll+1))
-        fac3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-1)*(ll+1) / (ll*(ll+2)) * (ll+1)/ll
-    return fac1, fac2, fac3
+        f1[l] = np.sqrt((2*ll+3)/(2*ll+1)) * (ll+1)*(2*ll+1) / (ll*(ll+2))
+        f2[l] = 1.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-1)*(ll+1) / (ll*(ll+2)) * (ll+1)/ll
+    facs['d11'] = (f1.copy(), f2.copy(), f3.copy())
 
-
-def _precompute_d22_fac(l_max):
-    """d^l_{22} and d^l_{2,-2} recurrence coefficients. cf. CLASS lensing.c:1508-1513."""
-    fac1 = np.zeros(l_max + 1)
-    fac2 = np.zeros(l_max + 1)
-    fac3 = np.zeros(l_max + 1)
-    for l in range(2, l_max + 1):
+    # d22/d2m2 (shared facs)  cf. lensing.c:1508-1513
+    f1[:] = f2[:] = f3[:] = 0
+    for l in range(2, n):
         ll = float(l)
-        fac1[l] = np.sqrt((2*ll+3)/(2*ll+1)) * (ll+1)*(2*ll+1) / ((ll-1)*(ll+3))
-        fac2[l] = 4.0 / (ll*(ll+1))
-        fac3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-2)*(ll+2) / ((ll-1)*(ll+3)) * (ll+1)/ll
-    return fac1, fac2, fac3
+        f1[l] = np.sqrt((2*ll+3)/(2*ll+1)) * (ll+1)*(2*ll+1) / ((ll-1)*(ll+3))
+        f2[l] = 4.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-2)*(ll+2) / ((ll-1)*(ll+3)) * (ll+1)/ll
+    facs['d22'] = (f1.copy(), f2.copy(), f3.copy())
 
-
-def _precompute_d20_fac(l_max):
-    """d^l_{20} recurrence coefficients. cf. CLASS lensing.c:1567-1571."""
-    fac1 = np.zeros(l_max + 1)
-    fac3 = np.zeros(l_max + 1)
-    for l in range(2, l_max + 1):
+    # d20 (no fac2)  cf. lensing.c:1567-1571
+    f1[:] = f3[:] = 0
+    for l in range(2, n):
         ll = float(l)
-        fac1[l] = np.sqrt((2*ll+3)*(2*ll+1) / ((ll-1)*(ll+3)))
-        fac3[l] = np.sqrt((2*ll+3)*(ll-2)*(ll+2) / ((2*ll-1)*(ll-1)*(ll+3)))
-    return fac1, fac3
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1) / ((ll-1)*(ll+3)))
+        f3[l] = np.sqrt((2*ll+3)*(ll-2)*(ll+2) / ((2*ll-1)*(ll-1)*(ll+3)))
+    facs['d20'] = (f1.copy(), None, f3.copy())
+
+    # d31/d3m1 (shared facs, l>=3)  cf. lensing.c:1626-1632
+    f1[:] = f2[:] = f3[:] = 0
+    for l in range(3, n):
+        ll = float(l)
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1)/((ll-2)*(ll+4)*ll*(ll+2))) * (ll+1)
+        f2[l] = 3.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)/(2*ll-1)*(ll-3)*(ll+3)*(ll-1)*(ll+1)
+                         / ((ll-2)*(ll+4)*ll*(ll+2))) * (ll+1)/ll
+    facs['d31'] = (f1.copy(), f2.copy(), f3.copy())
+
+    # d3m3 (l>=3)  cf. lensing.c:1748-1754
+    f1[:] = f2[:] = f3[:] = 0
+    for l in range(3, n):
+        ll = float(l)
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1)) * (ll+1) / ((ll-2)*(ll+4))
+        f2[l] = 9.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-3)*(ll+3)*(ll+1) / ((ll-2)*(ll+4)*ll)
+    facs['d3m3'] = (f1.copy(), f2.copy(), f3.copy())
+
+    # d40 (no fac2, l>=4)  cf. lensing.c:1808-1813
+    f1[:] = f3[:] = 0
+    for l in range(4, n):
+        ll = float(l)
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1) / ((ll-3)*(ll+5)))
+        f3[l] = np.sqrt((2*ll+3)*(ll-4)*(ll+4) / ((2*ll-1)*(ll-3)*(ll+5)))
+    facs['d40'] = (f1.copy(), None, f3.copy())
+
+    # d4m2 (l>=4)  cf. lensing.c:1869-1875
+    f1[:] = f2[:] = f3[:] = 0
+    for l in range(4, n):
+        ll = float(l)
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1)/((ll-3)*(ll+5)*(ll-1)*(ll+3))) * (ll+1)
+        f2[l] = 8.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)*(ll-4)*(ll+4)*(ll-2)*(ll+2)
+                         / ((2*ll-1)*(ll-3)*(ll+5)*(ll-1)*(ll+3))) * (ll+1)/ll
+    facs['d4m2'] = (f1.copy(), f2.copy(), f3.copy())
+
+    # d4m4 (l>=4)  cf. lensing.c:1931-1937
+    f1[:] = f2[:] = f3[:] = 0
+    for l in range(4, n):
+        ll = float(l)
+        f1[l] = np.sqrt((2*ll+3)*(2*ll+1)) * (ll+1) / ((ll-3)*(ll+5))
+        f2[l] = 16.0 / (ll*(ll+1))
+        f3[l] = np.sqrt((2*ll+3)/(2*ll-1)) * (ll-4)*(ll+4)*(ll+1) / ((ll-3)*(ll+5)*ll)
+    facs['d4m4'] = (f1.copy(), f2.copy(), f3.copy())
+
+    return facs
 
 
 def lens_cls(
@@ -142,27 +192,17 @@ def lens_cls(
            Float[Array, "Nl"], Float[Array, "Nl"]]:
     """Compute lensed TT, EE, TE, BB using the correlation function method.
 
-    Uses the CLASS addback technique: compute the lensed-minus-unlensed
-    difference in correlation function space, then add back unlensed C_l.
-    This avoids numerical cancellation at low l where lensing is small.
-
-    The deflection correlation Cgl uses the Wigner d^l_{11} function
-    (not Legendre P_l) as required for spin-1 deflection fields.
-    cf. CLASS lensing.c:498-509.
-
-    Algorithm (cf. CLASS lensing.c, fast mode):
-    1. Compute Cgl(mu) = sum_l (2l+1)/(4pi) l(l+1) C_l^pp d^l_{11}(mu)
-    2. sigma2(mu) = Cgl(1) - Cgl(mu)
-    3. Forward: build ksi, ksiX, ksip, ksim using addback kernels
-    4. Inverse: GL quadrature with appropriate d-functions
-    5. Add back unlensed C_l
+    Uses the CLASS addback technique with Cgl2 corrections for accurate
+    BB and EE lensing. Implements the full lensing kernels from CLASS
+    lensing.c:619-682, including first-order (O(Cgl2)) and second-order
+    (O(Cgl2^2)) corrections using 12 Wigner d-functions.
 
     Args:
-        cl_tt_unlensed: unlensed TT, shape (l_max+1,), indexed by l
-        cl_ee_unlensed: unlensed EE, shape (l_max+1,), indexed by l
-        cl_te_unlensed: unlensed TE, shape (l_max+1,), indexed by l
-        cl_bb_unlensed: unlensed BB, shape (l_max+1,), indexed by l
-        cl_pp: lensing potential C_l^phiphi, shape (l_max+1,), indexed by l
+        cl_tt_unlensed: unlensed TT, shape (>=l_max+1,), indexed by l
+        cl_ee_unlensed: unlensed EE
+        cl_te_unlensed: unlensed TE
+        cl_bb_unlensed: unlensed BB
+        cl_pp: lensing potential C_l^phiphi
         l_max: maximum multipole (default 2500)
         n_gauss: number of GL quadrature points (default 4096)
 
@@ -175,196 +215,349 @@ def lens_cls(
     x_gl = jnp.array(x_gl_np)
     w_gl = jnp.array(w_gl_np)
 
-    # =====================================================================
-    # PASS 1: Compute Cgl(mu) using d^l_{11} recurrence
-    # cf. CLASS lensing.c:498-509
-    # Cgl = sum_l (2l+1)/(4pi) * l*(l+1) * C_l^pp * d^l_{11}(mu)
-    # =====================================================================
-    fac1_11, fac2_11, fac3_11 = _precompute_d11_fac(l_max)
-    fac1_11_j = jnp.array(fac1_11)
-    fac2_11_j = jnp.array(fac2_11)
-    fac3_11_j = jnp.array(fac3_11)
+    # Precompute all recurrence coefficients
+    facs = _precompute_d_facs(l_max)
 
-    # d11 initial conditions (rescaled = sqrt((2l+1)/2) * d11)
-    # l=1: rescaled = (1+mu)/2 * sqrt(3/2)  cf. lensing.c:1343
-    # l=2: rescaled = (1+mu)/2*(2mu-1) * sqrt(5/2)  cf. lensing.c:1345
+    # Convert to JAX arrays
+    f1_11, f2_11, f3_11 = [jnp.array(x) for x in facs['d11']]
+    f1_22, f2_22, f3_22 = [jnp.array(x) for x in facs['d22']]
+    f1_20, _, f3_20 = facs['d20']
+    f1_20, f3_20 = jnp.array(f1_20), jnp.array(f3_20)
+    f1_31, f2_31, f3_31 = [jnp.array(x) for x in facs['d31']]
+    f1_3m3, f2_3m3, f3_3m3 = [jnp.array(x) for x in facs['d3m3']]
+    f1_40, _, f3_40 = facs['d40']
+    f1_40, f3_40 = jnp.array(f1_40), jnp.array(f3_40)
+    f1_4m2, f2_4m2, f3_4m2 = [jnp.array(x) for x in facs['d4m2']]
+    f1_4m4, f2_4m4, f3_4m4 = [jnp.array(x) for x in facs['d4m4']]
+
+    # =====================================================================
+    # PASS 1: Compute Cgl(mu) and Cgl2(mu) using d11 and d1m1 scans
+    # cf. CLASS lensing.c:498-509
+    # Cgl  = sum_l (2l+1)/(4pi) * l(l+1) * C_l^pp * d^l_{11}(mu)
+    # Cgl2 = sum_l (2l+1)/(4pi) * l(l+1) * C_l^pp * d^l_{1,-1}(mu)
+    # =====================================================================
+
+    # d11 initial conditions  cf. lensing.c:1342-1346
     d11_r1 = (1.0 + x_gl) / 2.0 * jnp.sqrt(3.0 / 2.0)
     d11_r2 = (1.0 + x_gl) / 2.0 * (2.0 * x_gl - 1.0) * jnp.sqrt(5.0 / 2.0)
-    d11_l2_actual = d11_r2 * jnp.sqrt(2.0 / 5.0)
+    d11_l2 = d11_r2 * jnp.sqrt(2.0 / 5.0)
 
-    # Initialize Cgl with l=2 contribution
-    cgl_init = 5.0 / (4.0 * jnp.pi) * 6.0 * cl_pp[2] * d11_l2_actual
+    # d1m1 initial conditions  cf. lensing.c:1401-1405
+    d1m1_r1 = (1.0 - x_gl) / 2.0 * jnp.sqrt(3.0 / 2.0)
+    d1m1_r2 = (1.0 - x_gl) / 2.0 * (2.0 * x_gl + 1.0) * jnp.sqrt(5.0 / 2.0)
+    d1m1_l2 = d1m1_r2 * jnp.sqrt(2.0 / 5.0)
 
-    def _d11_scan(carry, l_idx):
-        """Scan computing d11 at l_idx+1 and accumulating Cgl."""
-        dlm1, dl, cgl_acc = carry
-        # Compute rescaled d11 at l_idx+1 using fac at l_idx
-        # cf. lensing.c:1349
-        dlp1 = fac1_11_j[l_idx] * (x_gl - fac2_11_j[l_idx]) * dl \
-            - fac3_11_j[l_idx] * dlm1
-        # Actual d11 at l_idx+1
+    # l=2 contributions
+    coeff_l2 = 5.0 / (4.0 * jnp.pi) * 6.0 * cl_pp[2]
+    cgl_init = coeff_l2 * d11_l2
+    cgl2_init = coeff_l2 * d1m1_l2
+
+    def _cgl_scan(carry, l_idx):
+        """Compute d11/d1m1 at l_idx+1, accumulate Cgl/Cgl2."""
+        d11_lm1, d11_l, d1m1_lm1, d1m1_l, cgl, cgl2 = carry
+        # d11: (mu - fac2)  cf. lensing.c:1349
+        d11_lp1 = f1_11[l_idx] * (x_gl - f2_11[l_idx]) * d11_l \
+            - f3_11[l_idx] * d11_lm1
+        # d1m1: (mu + fac2)  cf. lensing.c:1408
+        d1m1_lp1 = f1_11[l_idx] * (x_gl + f2_11[l_idx]) * d1m1_l \
+            - f3_11[l_idx] * d1m1_lm1
         l_new = (l_idx + 1).astype(jnp.float64)
-        d11_val = dlp1 * jnp.sqrt(2.0 / (2.0 * l_new + 1.0))
-        # Accumulate Cgl for l = l_idx + 1
+        sn = jnp.sqrt(2.0 / (2.0 * l_new + 1.0))
         coeff = (2.0 * l_new + 1.0) / (4.0 * jnp.pi) * l_new * (l_new + 1.0) \
             * cl_pp[l_idx + 1]
-        cgl_acc = cgl_acc + coeff * d11_val
-        return (dl, dlp1, cgl_acc), None
+        cgl = cgl + coeff * d11_lp1 * sn
+        cgl2 = cgl2 + coeff * d1m1_lp1 * sn
+        return (d11_l, d11_lp1, d1m1_l, d1m1_lp1, cgl, cgl2), None
 
-    # Scan l_idx=2,...,l_max-1 → computes d11 at l=3,...,l_max
-    (_, _, Cgl), _ = jax.lax.scan(
-        _d11_scan,
-        (d11_r1, d11_r2, cgl_init),
+    (_, _, _, _, Cgl, Cgl2), _ = jax.lax.scan(
+        _cgl_scan,
+        (d11_r1, d11_r2, d1m1_r1, d1m1_r2, cgl_init, cgl2_init),
         jnp.arange(2, l_max),
     )
 
     # sigma2(mu) = Cgl(mu=1) - Cgl(mu)
-    # At mu=1: d11(l,1)=1 for all l, so Cgl(1) = sum_l (2l+1)/(4pi)*l(l+1)*C_l^pp
     l_arr = jnp.arange(l_max + 1, dtype=jnp.float64)
     sigma2_total = jnp.sum(
-        (2.0 * l_arr[2:] + 1.0) / (4.0 * jnp.pi) * l_arr[2:] * (l_arr[2:] + 1.0)
-        * cl_pp[2:]
+        (2.0 * l_arr[2:] + 1.0) / (4.0 * jnp.pi)
+        * l_arr[2:] * (l_arr[2:] + 1.0) * cl_pp[2:]
     )
     sigma2 = sigma2_total - Cgl
 
     # =====================================================================
-    # PASS 2: Forward transform — build lensed correlation functions
-    # Using addback: kernel = (exp_factor - 1) * d_function
+    # PASS 2: Forward transform with full Cgl2-corrected kernels
     #
-    # Lensing exponentials (zeroth order in Cgl2):
-    #   TT:    X_000^2     = exp(-l(l+1)/2 * sigma2)
-    #   TE:    X_022*X_000 = exp(-(l(l+1)/2 - 1) * sigma2)
-    #   EE/BB: X_022^2     = exp(-(l(l+1)/2 - 2) * sigma2)
-    # cf. CLASS lensing.c:588-616
+    # Uses 12 Wigner d-functions: d00, d11, d1m1, d20, d22, d2m2,
+    # d31, d3m1, d3m3, d40, d4m2, d4m4
     #
-    # Correlation functions:
-    #   ksi  (TT):  sum_l (2l+1)/(4pi) * C_l^TT * (exp_TT-1) * d00
-    #   ksiX (TE):  sum_l (2l+1)/(4pi) * C_l^TE * (exp_TE-1) * d20
-    #   ksip (EE+): sum_l (2l+1)/(4pi) * (C_l^EE+C_l^BB) * (exp_EE-1) * d22
-    #   ksim (EE-): sum_l (2l+1)/(4pi) * (C_l^EE-C_l^BB) * (exp_EE-1) * d2m2
-    # cf. CLASS lensing.c:619-682
+    # X variables (truncated at sigma2^k * Cgl2^m with k+m <= 2):
+    #   cf. CLASS lensing.c:588-615
+    #
+    # Kernels (cf. CLASS lensing.c:619-682):
+    #   TT:    X_000^2*d00 + Cgl2*8/(ll1)*X_p000^2*d1m1
+    #          + Cgl2^2*(X_p000^2*d00 + X_220^2*d2m2)
+    #   TE:    X_022*X_000*d20 + Cgl2*2*X_p000/s5*(X_121*d11+X_132*d3m1)
+    #          + Cgl2^2*0.5*((2*X_p022*X_p000+X_220^2)*d20+X_220*X_242*d4m2)
+    #   EE+BB: X_022^2*d22 + 2*Cgl2*X_132*X_121*d31
+    #          + Cgl2^2*(X_p022^2*d22 + X_242*X_220*d40)
+    #   EE-BB: X_022^2*d2m2 + Cgl2*(X_121^2*d1m1 + X_132^2*d3m3)
+    #          + Cgl2^2*0.5*(2*X_p022^2*d2m2 + X_220^2*d00 + X_242^2*d4m4)
+    #
+    # With addback: subtract d00/d20/d22/d2m2 from zeroth-order terms.
     # =====================================================================
-    fac1_22, fac2_22, fac3_22 = _precompute_d22_fac(l_max)
-    fac1_20, fac3_20 = _precompute_d20_fac(l_max)
-    fac1_22_j = jnp.array(fac1_22)
-    fac2_22_j = jnp.array(fac2_22)
-    fac3_22_j = jnp.array(fac3_22)
-    fac1_20_j = jnp.array(fac1_20)
-    fac3_20_j = jnp.array(fac3_20)
 
-    # Combined spectra for EE/BB
     cl_ee_plus_bb = cl_ee_unlensed + cl_bb_unlensed
     cl_ee_minus_bb = cl_ee_unlensed - cl_bb_unlensed
 
-    # --- Initial conditions at l=2 ---
-    # d00 (Legendre): P_0=1, P_1=x, P_2=(3x^2-1)/2
+    # --- Initial conditions at l=2 for all d-functions ---
+    zeros_gl = jnp.zeros(n_gauss)
+
+    # d00: P_2 = (3x^2-1)/2
     d00_l2 = (3.0 * x_gl**2 - 1.0) / 2.0
 
-    # d20 rescaled at l=1: 0; l=2: sqrt(15)/4*(1-mu^2)  cf. lensing.c:1582
-    d20_r1 = jnp.zeros(n_gauss)
+    # d20 rescaled  cf. lensing.c:1582
+    d20_r1 = zeros_gl
     d20_r2 = jnp.sqrt(15.0) / 4.0 * (1.0 - x_gl**2)
-    d20_l2_actual = d20_r2 * jnp.sqrt(2.0 / 5.0)
+    d20_l2 = d20_r2 * jnp.sqrt(2.0 / 5.0)
 
-    # d22 rescaled at l=1: 0; l=2: (1+mu)^2/4*sqrt(5/2)  cf. lensing.c:1524
-    d22_r1 = jnp.zeros(n_gauss)
+    # d22 rescaled  cf. lensing.c:1524
+    d22_r1 = zeros_gl
     d22_r2 = (1.0 + x_gl)**2 / 4.0 * jnp.sqrt(5.0 / 2.0)
-    d22_l2_actual = d22_r2 * jnp.sqrt(2.0 / 5.0)
+    d22_l2 = d22_r2 * jnp.sqrt(2.0 / 5.0)
 
-    # d2m2 rescaled at l=1: 0; l=2: (1-mu)^2/4*sqrt(5/2)  cf. lensing.c:1464
-    d2m2_r1 = jnp.zeros(n_gauss)
+    # d2m2 rescaled  cf. lensing.c:1464
+    d2m2_r1 = zeros_gl
     d2m2_r2 = (1.0 - x_gl)**2 / 4.0 * jnp.sqrt(5.0 / 2.0)
-    d2m2_l2_actual = d2m2_r2 * jnp.sqrt(2.0 / 5.0)
+    d2m2_l2 = d2m2_r2 * jnp.sqrt(2.0 / 5.0)
 
-    # Lensing factors at l=2
-    fac_l2 = 2.0 * 3.0 / 2.0  # l(l+1)/2 = 3
-    exp_tt_l2 = jnp.exp(-fac_l2 * sigma2) - 1.0
-    exp_te_l2 = jnp.exp(-(fac_l2 - 1.0) * sigma2) - 1.0
-    exp_ee_l2 = jnp.exp(-(fac_l2 - 2.0) * sigma2) - 1.0
+    # d31 rescaled: d31[l<=2]=0, d31[l=3]=initial  cf. lensing.c:1639-1644
+    d31_r_l3 = jnp.sqrt(105.0 / 2.0) * (1.0 + x_gl)**2 * (1.0 - x_gl) / 8.0
+
+    # d3m1 rescaled: d3m1[l<=2]=0, d3m1[l=3]=initial  cf. lensing.c:1700-1705
+    d3m1_r_l3 = jnp.sqrt(105.0 / 2.0) * (1.0 + x_gl) * (1.0 - x_gl)**2 / 8.0
+
+    # d3m3 rescaled: d3m3[l<=2]=0, d3m3[l=3]=initial  cf. lensing.c:1761-1766
+    d3m3_r_l3 = jnp.sqrt(7.0 / 2.0) * (1.0 - x_gl)**3 / 8.0
+
+    # d40 rescaled: d40[l<=3]=0, d40[l=4]=initial  cf. lensing.c:1820-1826
+    d40_r_l4 = jnp.sqrt(315.0) * (1.0 + x_gl)**2 * (1.0 - x_gl)**2 / 16.0
+
+    # d4m2 rescaled: d4m2[l<=3]=0, d4m2[l=4]=initial  cf. lensing.c:1882-1888
+    d4m2_r_l4 = jnp.sqrt(126.0) * (1.0 + x_gl) * (1.0 - x_gl)**3 / 16.0
+
+    # d4m4 rescaled: d4m4[l<=3]=0, d4m4[l=4]=initial  cf. lensing.c:1944-1950
+    d4m4_r_l4 = jnp.sqrt(9.0 / 2.0) * (1.0 - x_gl)**4 / 16.0
+
+    # --- Compute l=2 kernel contributions ---
+    # At l=2: d31=d3m1=d3m3=d40=d4m2=d4m4=0
+    # sqrt values at l=2
+    ll2 = 2.0
+    s1_2 = jnp.sqrt(4.0 * 3.0 * 2.0 * 1.0)  # sqrt(24)
+    s2_2 = jnp.sqrt(4.0 * 1.0)  # 2
+    s5_2 = jnp.sqrt(6.0)
+    # s3_2 = sqrt(5*0) = 0, s4_2 = sqrt(6*5*0*(-1)) → 0
+
+    fac_c2 = ll2 * (ll2 + 1.0) / 4.0  # 1.5
+    X000_2 = jnp.exp(-fac_c2 * sigma2)
+    Xp000_2 = -fac_c2 * X000_2
+    X022_2 = X000_2 * (1.0 + sigma2 * (1.0 + 0.5 * sigma2))
+    Xp022_2 = -(fac_c2 - 1.0) * X022_2
+    X220_2 = 0.25 * s1_2 * X000_2
+    X121_2 = -0.5 * s2_2 * X000_2 * (1.0 + 2.0 / 3.0 * sigma2)
+    # X_132, X_242 = 0 at l=2
+
     pref_l2 = 5.0 / (4.0 * jnp.pi)
+    ll1_2 = ll2 * (ll2 + 1.0)
 
-    # Initialize correlation functions with l=2 contributions
-    ksi_init = pref_l2 * cl_tt_unlensed[2] * exp_tt_l2 * d00_l2
-    ksiX_init = pref_l2 * cl_te_unlensed[2] * exp_te_l2 * d20_l2_actual
-    ksip_init = pref_l2 * cl_ee_plus_bb[2] * exp_ee_l2 * d22_l2_actual
-    ksim_init = pref_l2 * cl_ee_minus_bb[2] * exp_ee_l2 * d2m2_l2_actual
+    # TT kernel at l=2 (addback: subtract d00)
+    kern_tt_2 = ((X000_2 * X000_2 - 1.0) * d00_l2
+                 + Xp000_2**2 * d1m1_l2 * Cgl2 * 8.0 / ll1_2
+                 + (Xp000_2**2 * d00_l2 + X220_2**2 * d2m2_l2) * Cgl2**2)
+
+    # TE kernel at l=2 (addback: subtract d20)
+    kern_te_2 = ((X022_2 * X000_2 - 1.0) * d20_l2
+                 + Cgl2 * 2.0 * Xp000_2 / s5_2 * X121_2 * d11_l2
+                 + 0.5 * Cgl2**2 * (2.0 * Xp022_2 * Xp000_2 + X220_2**2) * d20_l2)
+
+    # lensp kernel at l=2 (addback: subtract d22)
+    kern_p_2 = (X022_2**2 - 1.0) * d22_l2 + Cgl2**2 * Xp022_2**2 * d22_l2
+
+    # lensm kernel at l=2 (addback: subtract d2m2)
+    kern_m_2 = ((X022_2**2 - 1.0) * d2m2_l2
+                + Cgl2 * X121_2**2 * d1m1_l2
+                + 0.5 * Cgl2**2 * (2.0 * Xp022_2**2 * d2m2_l2
+                                    + X220_2**2 * d00_l2))
+
+    ksi_init = pref_l2 * cl_tt_unlensed[2] * kern_tt_2
+    ksiX_init = pref_l2 * cl_te_unlensed[2] * kern_te_2
+    ksip_init = pref_l2 * cl_ee_plus_bb[2] * kern_p_2
+    ksim_init = pref_l2 * cl_ee_minus_bb[2] * kern_m_2
 
     def _forward_scan(carry, l_idx):
-        """Forward scan: compute d-functions at l_idx+1, accumulate correlations."""
-        (d00_pm1, d00_p,          # P[l_idx-1], P[l_idx]
-         d20_rp, d20_rc,          # rescaled d20 at l_idx-1, l_idx
-         d22_rp, d22_rc,          # rescaled d22 at l_idx-1, l_idx
-         d2m2_rp, d2m2_rc,        # rescaled d2m2 at l_idx-1, l_idx
+        """Forward scan: compute all d-functions at l_idx+1, apply kernels."""
+        (d00_pm1, d00_p,
+         d11_rp, d11_rc, d1m1_rp, d1m1_rc,
+         d20_rp, d20_rc,
+         d22_rp, d22_rc, d2m2_rp, d2m2_rc,
+         d31_rp, d31_rc, d3m1_rp, d3m1_rc, d3m3_rp, d3m3_rc,
+         d40_rp, d40_rc, d4m2_rp, d4m2_rc, d4m4_rp, d4m4_rc,
          ksi, ksiX, ksip, ksim) = carry
 
-        l_new = (l_idx + 1).astype(jnp.float64)  # target l
-        snorm = jnp.sqrt(2.0 / (2.0 * l_new + 1.0))  # rescaled → actual
+        l_new = (l_idx + 1).astype(jnp.float64)
+        sn = jnp.sqrt(2.0 / (2.0 * l_new + 1.0))
 
-        # --- Compute d-functions at l_new = l_idx+1 ---
+        # ---- Compute d-functions at l_new = l_idx + 1 ----
 
-        # d00 (Legendre): P[l_new] from P[l_idx] and P[l_idx-1]
-        d00_new = ((2.0 * l_new - 1.0) * x_gl * d00_p
-                   - (l_new - 1.0) * d00_pm1) / l_new
+        # d00 (Legendre)
+        d00 = ((2.0 * l_new - 1.0) * x_gl * d00_p
+               - (l_new - 1.0) * d00_pm1) / l_new
 
-        # d20: rescaled[l_new] from rescaled[l_idx] and rescaled[l_idx-1]
-        # cf. lensing.c:1586: dlp1 = fac1*mu*dl - fac3*dlm1
-        d20_rnew = fac1_20_j[l_idx] * x_gl * d20_rc - fac3_20_j[l_idx] * d20_rp
-        d20_new = d20_rnew * snorm
+        # d11: (mu - fac2)
+        d11_rn = f1_11[l_idx] * (x_gl - f2_11[l_idx]) * d11_rc \
+            - f3_11[l_idx] * d11_rp
+        d11 = d11_rn * sn
 
-        # d22: rescaled[l_new], recurrence with (mu - fac2)
-        # cf. lensing.c:1528
-        d22_rnew = fac1_22_j[l_idx] * (x_gl - fac2_22_j[l_idx]) * d22_rc \
-            - fac3_22_j[l_idx] * d22_rp
-        d22_new = d22_rnew * snorm
+        # d1m1: (mu + fac2), same facs as d11
+        d1m1_rn = f1_11[l_idx] * (x_gl + f2_11[l_idx]) * d1m1_rc \
+            - f3_11[l_idx] * d1m1_rp
+        d1m1 = d1m1_rn * sn
 
-        # d2m2: rescaled[l_new], recurrence with (mu + fac2)
-        # cf. lensing.c:1468
-        d2m2_rnew = fac1_22_j[l_idx] * (x_gl + fac2_22_j[l_idx]) * d2m2_rc \
-            - fac3_22_j[l_idx] * d2m2_rp
-        d2m2_new = d2m2_rnew * snorm
+        # d20: mu only
+        d20_rn = f1_20[l_idx] * x_gl * d20_rc - f3_20[l_idx] * d20_rp
+        d20 = d20_rn * sn
 
-        # --- Lensing exponentials (addback: subtract 1) ---
-        fac = l_new * (l_new + 1.0) / 2.0
-        exp_tt = jnp.exp(-fac * sigma2) - 1.0        # X_000^2 - 1
-        exp_te = jnp.exp(-(fac - 1.0) * sigma2) - 1.0  # X_022*X_000 - 1
-        exp_ee = jnp.exp(-(fac - 2.0) * sigma2) - 1.0  # X_022^2 - 1
+        # d22: (mu - fac2)
+        d22_rn = f1_22[l_idx] * (x_gl - f2_22[l_idx]) * d22_rc \
+            - f3_22[l_idx] * d22_rp
+        d22 = d22_rn * sn
 
-        # --- Accumulate correlation functions ---
+        # d2m2: (mu + fac2), same facs as d22
+        d2m2_rn = f1_22[l_idx] * (x_gl + f2_22[l_idx]) * d2m2_rc \
+            - f3_22[l_idx] * d2m2_rp
+        d2m2 = d2m2_rn * sn
+
+        # d31: (mu - fac2), jnp.where at l_idx=2 for l=3 initial
+        d31_rec = f1_31[l_idx] * (x_gl - f2_31[l_idx]) * d31_rc \
+            - f3_31[l_idx] * d31_rp
+        d31_rn = jnp.where(l_idx == 2, d31_r_l3, d31_rec)
+        d31 = d31_rn * sn
+
+        # d3m1: (mu + fac2), same facs as d31
+        d3m1_rec = f1_31[l_idx] * (x_gl + f2_31[l_idx]) * d3m1_rc \
+            - f3_31[l_idx] * d3m1_rp
+        d3m1_rn = jnp.where(l_idx == 2, d3m1_r_l3, d3m1_rec)
+        d3m1 = d3m1_rn * sn
+
+        # d3m3: (mu + fac2)
+        d3m3_rec = f1_3m3[l_idx] * (x_gl + f2_3m3[l_idx]) * d3m3_rc \
+            - f3_3m3[l_idx] * d3m3_rp
+        d3m3_rn = jnp.where(l_idx == 2, d3m3_r_l3, d3m3_rec)
+        d3m3 = d3m3_rn * sn
+
+        # d40: mu only, jnp.where at l_idx=3 for l=4 initial
+        d40_rec = f1_40[l_idx] * x_gl * d40_rc - f3_40[l_idx] * d40_rp
+        d40_rn = jnp.where(l_idx == 3, d40_r_l4, d40_rec)
+        d40 = d40_rn * sn
+
+        # d4m2: (mu + fac2)
+        d4m2_rec = f1_4m2[l_idx] * (x_gl + f2_4m2[l_idx]) * d4m2_rc \
+            - f3_4m2[l_idx] * d4m2_rp
+        d4m2_rn = jnp.where(l_idx == 3, d4m2_r_l4, d4m2_rec)
+        d4m2 = d4m2_rn * sn
+
+        # d4m4: (mu + fac2)
+        d4m4_rec = f1_4m4[l_idx] * (x_gl + f2_4m4[l_idx]) * d4m4_rc \
+            - f3_4m4[l_idx] * d4m4_rp
+        d4m4_rn = jnp.where(l_idx == 3, d4m4_r_l4, d4m4_rec)
+        d4m4 = d4m4_rn * sn
+
+        # ---- X variables  cf. lensing.c:588-615 ----
+        fac_c = l_new * (l_new + 1.0) / 4.0
+        X_000 = jnp.exp(-fac_c * sigma2)
+        X_p000 = -fac_c * X_000
+
+        s1 = jnp.sqrt(jnp.maximum(0.0, (l_new+2)*(l_new+1)*l_new*(l_new-1)))
+        s2 = jnp.sqrt(jnp.maximum(0.0, (l_new+2)*(l_new-1)))
+        s3 = jnp.sqrt(jnp.maximum(0.0, (l_new+3)*(l_new-2)))
+        s4 = jnp.sqrt(jnp.maximum(0.0,
+                       (l_new+4)*(l_new+3)*(l_new-2)*(l_new-3)))
+        s5 = jnp.sqrt(l_new * (l_new + 1.0))
+
+        X_022 = X_000 * (1.0 + sigma2 * (1.0 + 0.5 * sigma2))
+        X_p022 = -(fac_c - 1.0) * X_022
+        X_220 = 0.25 * s1 * X_000
+        X_242 = 0.25 * s4 * X_000
+        X_121 = -0.5 * s2 * X_000 * (1.0 + 2.0/3.0 * sigma2)
+        X_132 = -0.5 * s3 * X_000 * (1.0 + 5.0/3.0 * sigma2)
+
+        # ---- Full lensing kernels  cf. lensing.c:619-682 ----
         pref = (2.0 * l_new + 1.0) / (4.0 * jnp.pi)
-        ksi = ksi + pref * cl_tt_unlensed[l_idx + 1] * exp_tt * d00_new
-        ksiX = ksiX + pref * cl_te_unlensed[l_idx + 1] * exp_te * d20_new
-        ksip = ksip + pref * cl_ee_plus_bb[l_idx + 1] * exp_ee * d22_new
-        ksim = ksim + pref * cl_ee_minus_bb[l_idx + 1] * exp_ee * d2m2_new
+        ll1 = l_new * (l_new + 1.0)
 
-        new_carry = (d00_p, d00_new,
-                     d20_rc, d20_rnew,
-                     d22_rc, d22_rnew,
-                     d2m2_rc, d2m2_rnew,
+        # TT (addback: X_000^2 - 1 for zeroth order)
+        kern_tt = ((X_000**2 - 1.0) * d00
+                   + X_p000**2 * d1m1 * Cgl2 * 8.0 / ll1
+                   + (X_p000**2 * d00 + X_220**2 * d2m2) * Cgl2**2)
+
+        # TE (addback: X_022*X_000 - 1 for zeroth order)
+        # s5 >= sqrt(12) since l_new >= 3 in scan
+        kern_te = ((X_022 * X_000 - 1.0) * d20
+                   + Cgl2 * 2.0 * X_p000 / s5
+                     * (X_121 * d11 + X_132 * d3m1)
+                   + 0.5 * Cgl2**2
+                     * ((2.0 * X_p022 * X_p000 + X_220**2) * d20
+                        + X_220 * X_242 * d4m2))
+
+        # lensp = EE+BB (addback: X_022^2 - 1)
+        kern_p = ((X_022**2 - 1.0) * d22
+                  + 2.0 * Cgl2 * X_132 * X_121 * d31
+                  + Cgl2**2
+                    * (X_p022**2 * d22 + X_242 * X_220 * d40))
+
+        # lensm = EE-BB (addback: X_022^2 - 1)
+        kern_m = ((X_022**2 - 1.0) * d2m2
+                  + Cgl2 * (X_121**2 * d1m1 + X_132**2 * d3m3)
+                  + 0.5 * Cgl2**2
+                    * (2.0 * X_p022**2 * d2m2
+                       + X_220**2 * d00 + X_242**2 * d4m4))
+
+        # Accumulate
+        ksi = ksi + pref * cl_tt_unlensed[l_idx + 1] * kern_tt
+        ksiX = ksiX + pref * cl_te_unlensed[l_idx + 1] * kern_te
+        ksip = ksip + pref * cl_ee_plus_bb[l_idx + 1] * kern_p
+        ksim = ksim + pref * cl_ee_minus_bb[l_idx + 1] * kern_m
+
+        new_carry = (d00_p, d00,
+                     d11_rc, d11_rn, d1m1_rc, d1m1_rn,
+                     d20_rc, d20_rn,
+                     d22_rc, d22_rn, d2m2_rc, d2m2_rn,
+                     d31_rc, d31_rn, d3m1_rc, d3m1_rn, d3m3_rc, d3m3_rn,
+                     d40_rc, d40_rn, d4m2_rc, d4m2_rn, d4m4_rc, d4m4_rn,
                      ksi, ksiX, ksip, ksim)
         return new_carry, None
 
-    # Initial carry: d-functions at l=1 and l=2
-    forward_init = (x_gl, d00_l2,          # P_1, P_2
-                    d20_r1, d20_r2,         # rescaled d20 at l=1, l=2
-                    d22_r1, d22_r2,         # rescaled d22 at l=1, l=2
-                    d2m2_r1, d2m2_r2,       # rescaled d2m2 at l=1, l=2
-                    ksi_init, ksiX_init, ksip_init, ksim_init)
-
-    # Scan l_idx=2,...,l_max-1 → computes d at l=3,...,l_max, accumulates
-    final_carry, _ = jax.lax.scan(
-        _forward_scan,
-        forward_init,
-        jnp.arange(2, l_max),
+    # Initial carry: all d-functions at l=1 and l=2
+    forward_init = (
+        x_gl, d00_l2,                          # d00: P_1, P_2
+        d11_r1, d11_r2, d1m1_r1, d1m1_r2,      # d11, d1m1
+        d20_r1, d20_r2,                         # d20
+        d22_r1, d22_r2, d2m2_r1, d2m2_r2,       # d22, d2m2
+        zeros_gl, zeros_gl, zeros_gl, zeros_gl, zeros_gl, zeros_gl,  # d31, d3m1, d3m3
+        zeros_gl, zeros_gl, zeros_gl, zeros_gl, zeros_gl, zeros_gl,  # d40, d4m2, d4m4
+        ksi_init, ksiX_init, ksip_init, ksim_init,
     )
-    _, _, _, _, _, _, _, _, ksi, ksiX, ksip, ksim = final_carry
+
+    final_carry, _ = jax.lax.scan(
+        _forward_scan, forward_init, jnp.arange(2, l_max),
+    )
+    ksi = final_carry[24]
+    ksiX = final_carry[25]
+    ksip = final_carry[26]
+    ksim = final_carry[27]
 
     # =====================================================================
     # PASS 3: Inverse transform — extract lensed C_l
-    #
-    # TT: C~_l = 2pi * sum_mu w * ksi * d00(l) + C_l^TT_unlensed
-    # TE: C~_l = 2pi * sum_mu w * ksiX * d20(l) + C_l^TE_unlensed
-    # EE: C~_l = pi * (sum w ksip d22 + sum w ksim d2m2) + C_l^EE_unlensed
-    # BB: C~_l = pi * (sum w ksip d22 - sum w ksim d2m2) + C_l^BB_unlensed
-    # cf. CLASS lensing.c:1049-1214, addback: 1090-1240
+    # Only uses d00, d20, d22, d2m2 (same as before)
+    # cf. CLASS lensing.c:1049-1214
     # =====================================================================
     w_ksi = w_gl * ksi
     w_ksiX = w_gl * ksiX
@@ -372,35 +565,30 @@ def lens_cls(
     w_ksim = w_gl * ksim
 
     def _inverse_scan(carry, l_idx):
-        """Inverse scan: compute d-functions at l_idx, extract C_l."""
+        """Inverse scan: extract C_l at l_idx via GL quadrature."""
         (d00_pm1, d00_p,
          d20_rp, d20_rc,
          d22_rp, d22_rc,
          d2m2_rp, d2m2_rc) = carry
 
         l_fl = l_idx.astype(jnp.float64)
-        snorm = jnp.sqrt(2.0 / (2.0 * l_fl + 1.0))
+        sn = jnp.sqrt(2.0 / (2.0 * l_fl + 1.0))
 
-        # d00 at l_idx
         d00_l = ((2.0 * l_fl - 1.0) * x_gl * d00_p
                  - (l_fl - 1.0) * d00_pm1) / l_fl
 
-        # Wigner d at l_idx: compute from rescaled carry
-        # rescaled carry holds d at (l_idx-2, l_idx-1)
-        # Use fac at l_idx-1 to compute rescaled at l_idx
         l_prev = l_idx - 1
-        d20_rnew = fac1_20_j[l_prev] * x_gl * d20_rc - fac3_20_j[l_prev] * d20_rp
-        d20_l = d20_rnew * snorm
+        d20_rn = f1_20[l_prev] * x_gl * d20_rc - f3_20[l_prev] * d20_rp
+        d20_l = d20_rn * sn
 
-        d22_rnew = fac1_22_j[l_prev] * (x_gl - fac2_22_j[l_prev]) * d22_rc \
-            - fac3_22_j[l_prev] * d22_rp
-        d22_l = d22_rnew * snorm
+        d22_rn = f1_22[l_prev] * (x_gl - f2_22[l_prev]) * d22_rc \
+            - f3_22[l_prev] * d22_rp
+        d22_l = d22_rn * sn
 
-        d2m2_rnew = fac1_22_j[l_prev] * (x_gl + fac2_22_j[l_prev]) * d2m2_rc \
-            - fac3_22_j[l_prev] * d2m2_rp
-        d2m2_l = d2m2_rnew * snorm
+        d2m2_rn = f1_22[l_prev] * (x_gl + f2_22[l_prev]) * d2m2_rc \
+            - f3_22[l_prev] * d2m2_rp
+        d2m2_l = d2m2_rn * sn
 
-        # GL quadrature + addback
         cl_tt_l = 2.0 * jnp.pi * jnp.sum(w_ksi * d00_l) + cl_tt_unlensed[l_idx]
         cl_te_l = 2.0 * jnp.pi * jnp.sum(w_ksiX * d20_l) + cl_te_unlensed[l_idx]
         cl_p = jnp.sum(w_ksip * d22_l)
@@ -409,42 +597,25 @@ def lens_cls(
         cl_bb_l = jnp.pi * (cl_p - cl_m) + cl_bb_unlensed[l_idx]
 
         new_carry = (d00_p, d00_l,
-                     d20_rc, d20_rnew,
-                     d22_rc, d22_rnew,
-                     d2m2_rc, d2m2_rnew)
+                     d20_rc, d20_rn, d22_rc, d22_rn, d2m2_rc, d2m2_rn)
         return new_carry, (cl_tt_l, cl_ee_l, cl_te_l, cl_bb_l)
 
-    # Initial carry for inverse: d-functions at l=1 and l=2
-    # For d00: (P_0, P_1). At l_idx=2: P_2 = (3x^2-1)/2 from (P_0, P_1)
-    # For Wigner: (rescaled[0], rescaled[1]). At l_idx=2, we need rescaled
-    # at l=0 and l=1 in the carry, so the scan computes rescaled at l=2.
-    # BUT: the scan uses fac at l_idx-1 = 1. Our fac arrays start at l=2.
-    # Solution: handle l=2 separately and scan from l=3.
-
-    # l=2 values (already computed above)
+    # l=2 values
     cl_tt_l2 = 2.0 * jnp.pi * jnp.sum(w_ksi * d00_l2) + cl_tt_unlensed[2]
-    cl_te_l2 = 2.0 * jnp.pi * jnp.sum(w_ksiX * d20_l2_actual) + cl_te_unlensed[2]
-    cl_p_l2 = jnp.sum(w_ksip * d22_l2_actual)
-    cl_m_l2 = jnp.sum(w_ksim * d2m2_l2_actual)
+    cl_te_l2 = 2.0 * jnp.pi * jnp.sum(w_ksiX * d20_l2) + cl_te_unlensed[2]
+    cl_p_l2 = jnp.sum(w_ksip * d22_l2)
+    cl_m_l2 = jnp.sum(w_ksim * d2m2_l2)
     cl_ee_l2 = jnp.pi * (cl_p_l2 + cl_m_l2) + cl_ee_unlensed[2]
     cl_bb_l2 = jnp.pi * (cl_p_l2 - cl_m_l2) + cl_bb_unlensed[2]
 
-    # Scan from l_idx=3 to l_max
-    # Carry: d at (l_idx-2, l_idx-1). For l_idx=3: d at (1, 2).
-    # For d00: (P_1, P_2)
-    # For Wigner: (rescaled[1], rescaled[2])
-    inverse_init = (x_gl, d00_l2,          # P_1, P_2
-                    d20_r1, d20_r2,         # rescaled d20 at l=1, l=2
-                    d22_r1, d22_r2,         # rescaled d22 at l=1, l=2
-                    d2m2_r1, d2m2_r2)       # rescaled d2m2 at l=1, l=2
+    # Scan l=3 to l_max
+    inverse_init = (x_gl, d00_l2,
+                    d20_r1, d20_r2, d22_r1, d22_r2, d2m2_r1, d2m2_r2)
 
     _, (cl_tt_3up, cl_ee_3up, cl_te_3up, cl_bb_3up) = jax.lax.scan(
-        _inverse_scan,
-        inverse_init,
-        jnp.arange(3, l_max + 1),
+        _inverse_scan, inverse_init, jnp.arange(3, l_max + 1),
     )
 
-    # Assemble: l=0,1 zero, l=2 from direct, l=3..l_max from scan
     cl_tt_lensed = jnp.concatenate([
         jnp.zeros(2), jnp.array([cl_tt_l2]), cl_tt_3up])
     cl_ee_lensed = jnp.concatenate([
@@ -463,10 +634,7 @@ def lens_cl_tt(
     l_max: int = 2500,
     n_gauss: int = 4096,
 ) -> Float[Array, "Nl"]:
-    """Apply lensing to C_l^TT only (backward-compatible wrapper).
-
-    Uses lens_cls internally with zero EE/TE/BB.
-    """
+    """Apply lensing to C_l^TT only (backward-compatible wrapper)."""
     n = len(cl_tt_unlensed)
     zeros = jnp.zeros(n)
     cl_tt, _, _, _ = lens_cls(
