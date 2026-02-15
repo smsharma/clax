@@ -27,6 +27,7 @@ References:
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -1211,14 +1212,15 @@ def _make_tau_grid(tau_min, tau_max, tau_star, n_points):
 
 def _k_grid(prec: PrecisionParams) -> Float[Array, "Nk"]:
     """Generate logarithmic k-grid for perturbation integration."""
-    n_k = int(jnp.log10(prec.pt_k_max_cl / prec.pt_k_min) * prec.pt_k_per_decade)
-    return jnp.logspace(jnp.log10(prec.pt_k_min), jnp.log10(prec.pt_k_max_cl), n_k)
+    n_k = int(math.log10(prec.pt_k_max_cl / prec.pt_k_min) * prec.pt_k_per_decade)
+    return jnp.logspace(math.log10(prec.pt_k_min), math.log10(prec.pt_k_max_cl), n_k)
 
 
 # ---------------------------------------------------------------------------
 # Main solver
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnums=(1,))
 def perturbations_solve(
     params: CosmoParams,
     prec: PrecisionParams,
@@ -1270,8 +1272,8 @@ def perturbations_solve(
     tau_ini = 0.1 / prec.pt_k_max_cl
 
     # τ-grid for saving source functions (must start >= tau_ini)
-    tau_min = max(float(bg.tau_table[0]) * 1.1, tau_ini * 1.01)
-    tau_max = float(bg.conformal_age) * 0.999
+    tau_min = jnp.maximum(bg.tau_table[0] * 1.1, tau_ini * 1.01)
+    tau_max = bg.conformal_age * 0.999
     tau_star = th.tau_star  # recombination conformal time (~282 Mpc)
     tau_grid = _make_tau_grid(tau_min, tau_max, tau_star, prec.pt_tau_n_points)
 
@@ -1290,7 +1292,7 @@ def perturbations_solve(
             diffrax.ODETerm(_perturbation_rhs),
             solver=diffrax.Kvaerno5(),
             t0=tau_ini,
-            t1=float(bg.conformal_age) * 0.999,
+            t1=bg.conformal_age * 0.999,
             dt0=tau_ini * 0.1,
             y0=y0,
             saveat=diffrax.SaveAt(ts=tau_grid),
@@ -1722,6 +1724,7 @@ def _extract_tensor_sources(y, k, tau, bg, th, idx, l_max_g, l_max_pol):
     return source_t, source_p
 
 
+@functools.partial(jax.jit, static_argnums=(1,))
 def tensor_perturbations_solve(
     params: CosmoParams,
     prec: PrecisionParams,
@@ -1758,8 +1761,8 @@ def tensor_perturbations_solve(
 
     # tau grid (same approach as scalar)
     tau_ini = 0.1 / prec.pt_k_max_cl
-    tau_min = max(float(bg.tau_table[0]) * 1.1, tau_ini * 1.01)
-    tau_max = float(bg.conformal_age) * 0.999
+    tau_min = jnp.maximum(bg.tau_table[0] * 1.1, tau_ini * 1.01)
+    tau_max = bg.conformal_age * 0.999
     tau_star = th.tau_star
     tau_grid = _make_tau_grid(tau_min, tau_max, tau_star, prec.pt_tau_n_points)
 
@@ -1771,7 +1774,7 @@ def tensor_perturbations_solve(
             diffrax.ODETerm(_tensor_rhs),
             solver=diffrax.Kvaerno5(),
             t0=tau_ini,
-            t1=float(bg.conformal_age) * 0.999,
+            t1=bg.conformal_age * 0.999,
             dt0=tau_ini * 0.1,
             y0=y0,
             saveat=diffrax.SaveAt(ts=tau_grid),

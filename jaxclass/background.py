@@ -24,6 +24,7 @@ Design choices:
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -516,6 +517,7 @@ def _background_rhs(loga, y, args):
 # Main solver
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnums=(1,))
 def background_solve(
     params: CosmoParams,
     prec: PrecisionParams = PrecisionParams(),

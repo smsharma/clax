@@ -27,6 +27,8 @@ References:
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -44,6 +46,7 @@ from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult
 # k-integration helpers
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnums=(3,))
 def _cl_k_integral(T_l, k_grid, params, k_interp_factor=1):
     """Integrate C_l = 4pi int dlnk P_R(k) |T_l(k)|^2.
 
@@ -70,6 +73,7 @@ def _cl_k_integral(T_l, k_grid, params, k_interp_factor=1):
     return 4.0 * jnp.pi * jnp.sum(0.5 * (integrand_fine[:-1] + integrand_fine[1:]) * dlnk_fine)
 
 
+@functools.partial(jax.jit, static_argnums=(4,))
 def _cl_k_integral_cross(T_l, E_l, k_grid, params, k_interp_factor=1):
     """Like _cl_k_integral but for cross-spectrum C_l = 4pi int dlnk P_R T_l E_l."""
     log_k = jnp.log(k_grid)
@@ -162,8 +166,10 @@ def _chunked_vmap(fn, n, chunk_size=2000):
     return jnp.concatenate(results)
 
 
+@functools.partial(jax.jit, static_argnums=(5, 8))
 def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
-                       source_T1=None, source_T2=None, mode=None, **kwargs):
+                       source_T1=None, source_T2=None, mode=None,
+                       source_T0_noDopp=None, source_Doppler_nonIBP=None):
     """Exact Bessel transfer function T_l(k) for temperature.
 
     CLASS sums three transfer types for scalar TT (harmonic.c:962):
@@ -191,8 +197,8 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
 
     # Non-IBP mode: source_T0_noDopp*j_l + source_Doppler_nonIBP*j_l'
     if mode == "nonIBP":
-        source_noDopp = kwargs.get('source_T0_noDopp', source_T0)  # fallback to IBP
-        source_dop_nonIBP = kwargs.get('source_Doppler_nonIBP', None)
+        source_noDopp = source_T0_noDopp if source_T0_noDopp is not None else source_T0
+        source_dop_nonIBP = source_Doppler_nonIBP
 
         def transfer_single_k_nonibp(ik):
             k = k_grid[ik]
@@ -247,6 +253,7 @@ def _exact_transfer_tt(source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
     return _chunked_vmap(transfer_single_k, len(k_grid))
 
 
+@functools.partial(jax.jit, static_argnums=(5,))
 def _exact_transfer_ee(source_E, tau_grid, k_grid, chi_grid, dtau_mid, l):
     """Exact Bessel transfer function E_l(k) for E-mode polarization."""
     l_int = int(l)
@@ -290,18 +297,15 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     """
     tau_grid = pt.tau_grid
     k_grid = pt.k_grid
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - tau_grid
     dtau = jnp.diff(tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
 
     l_fl = float(l)
     # Extra kwargs for non-IBP mode
-    extra = {}
-    if hasattr(pt, 'source_T0_noDopp'):
-        extra['source_T0_noDopp'] = pt.source_T0_noDopp
-    if hasattr(pt, 'source_Doppler_nonIBP'):
-        extra['source_Doppler_nonIBP'] = pt.source_Doppler_nonIBP
+    src_noDopp = getattr(pt, 'source_T0_noDopp', None)
+    src_dop_nonIBP = getattr(pt, 'source_Doppler_nonIBP', None)
 
     if l_fl > l_switch + 2 * delta_l:
         # Limber always uses IBP source_T0 (j_l radial)
@@ -309,11 +313,15 @@ def _get_transfer_tt(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     elif l_fl < l_switch - 2 * delta_l:
         return _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                                   source_T1=pt.source_T1, source_T2=pt.source_T2,
-                                  mode=tt_mode, **extra)
+                                  mode=tt_mode,
+                                  source_T0_noDopp=src_noDopp,
+                                  source_Doppler_nonIBP=src_dop_nonIBP)
     else:
         T_exact = _exact_transfer_tt(pt.source_T0, tau_grid, k_grid, chi_grid, dtau_mid, l,
                                      source_T1=pt.source_T1, source_T2=pt.source_T2,
-                                     mode=tt_mode, **extra)
+                                     mode=tt_mode,
+                                     source_T0_noDopp=src_noDopp,
+                                     source_Doppler_nonIBP=src_dop_nonIBP)
         # Limber uses IBP source_T0 for consistency
         T_limber = _limber_transfer_tt(pt.source_T0, tau_grid, k_grid, tau_0, l)
         w = 1.0 / (1.0 + jnp.exp(-(l_fl - l_switch) / delta_l))
@@ -324,7 +332,7 @@ def _get_transfer_ee(pt, bg, l, l_switch=_DEFAULT_L_SWITCH, delta_l=_DEFAULT_DEL
     """Compute E_l(k) choosing exact vs Limber based on l."""
     tau_grid = pt.tau_grid
     k_grid = pt.k_grid
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - tau_grid
     dtau = jnp.diff(tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
@@ -394,6 +402,22 @@ def compute_cl_te(
 # Source-interpolated C_l (robust against oscillatory T_l(k))
 # ---------------------------------------------------------------------------
 
+@jax.jit
+def _interp_single_source(src, log_k_coarse, log_k_fine):
+    """Interpolate a single source array from coarse to fine k-grid (JIT-cached).
+
+    Args:
+        src: shape [n_k_coarse, n_tau]
+        log_k_coarse: shape [n_k_coarse]
+        log_k_fine: shape [n_k_fine]
+    Returns:
+        shape [n_k_fine, n_tau]
+    """
+    def interp_one_tau(itau):
+        return CubicSpline(log_k_coarse, src[:, itau]).evaluate(log_k_fine)
+    return jax.vmap(interp_one_tau)(jnp.arange(src.shape[1])).T
+
+
 def _interp_sources_to_fine_k(sources_list, log_k_coarse, log_k_fine):
     """Interpolate source functions S(k,τ) from coarse to fine k-grid.
 
@@ -408,15 +432,7 @@ def _interp_sources_to_fine_k(sources_list, log_k_coarse, log_k_fine):
     Returns:
         list of [n_k_fine, n_tau] interpolated source arrays
     """
-    result = []
-    for src in sources_list:
-        # Interpolate each tau column independently
-        # Build splines along k-axis for each tau point
-        def interp_one_tau(itau):
-            return CubicSpline(log_k_coarse, src[:, itau]).evaluate(log_k_fine)
-        src_fine = jax.vmap(interp_one_tau)(jnp.arange(src.shape[1]))  # [n_tau, n_k_fine]
-        result.append(src_fine.T)  # [n_k_fine, n_tau]
-    return result
+    return [_interp_single_source(src, log_k_coarse, log_k_fine) for src in sources_list]
 
 
 def compute_cl_tt_interp(
@@ -437,6 +453,7 @@ def compute_cl_tt_interp(
     k-grid density.
 
     Args:
+        l_values: tuple of multipole values (must be tuple, not list, for JIT caching)
         n_k_fine: number of fine k-points (default 10000, converged for l≤1200)
     """
     if tt_mode is None:
@@ -462,7 +479,7 @@ def compute_cl_tt_interp(
     source_T2_fine = fine_sources[1 + int(include_T1)] if include_T2 else None
 
     # Setup tau-grid quantities
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - pt.tau_grid
     dtau = jnp.diff(pt.tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
@@ -492,7 +509,7 @@ def compute_cl_ee_interp(
     fine_sources = _interp_sources_to_fine_k([pt.source_E], log_k_coarse, log_k_fine)
     source_E_fine = fine_sources[0]
 
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - pt.tau_grid
     dtau = jnp.diff(pt.tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
@@ -534,7 +551,7 @@ def compute_cl_te_interp(
     source_T1_fine = fine_sources[2] if include_T1 else None
     source_T2_fine = fine_sources[2 + int(include_T1)] if include_T2 else None
 
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - pt.tau_grid
     dtau = jnp.diff(pt.tau_grid)
     dtau_mid = jnp.concatenate([dtau[:1] / 2, (dtau[:-1] + dtau[1:]) / 2, dtau[-1:] / 2])
@@ -583,12 +600,12 @@ def compute_cls_all(
     """
     l_sparse = sparse_l_grid(l_max)
 
-    cl_tt_sparse = compute_cl_tt(pt, params, bg, l_sparse.tolist(),
+    cl_tt_sparse = compute_cl_tt(pt, params, bg, tuple(l_sparse.tolist()),
                                  k_interp_factor, l_switch, delta_l,
                                  tt_mode=tt_mode)
-    cl_ee_sparse = compute_cl_ee(pt, params, bg, l_sparse.tolist(),
+    cl_ee_sparse = compute_cl_ee(pt, params, bg, tuple(l_sparse.tolist()),
                                  k_interp_factor, l_switch, delta_l)
-    cl_te_sparse = compute_cl_te(pt, params, bg, l_sparse.tolist(),
+    cl_te_sparse = compute_cl_te(pt, params, bg, tuple(l_sparse.tolist()),
                                  k_interp_factor, l_switch, delta_l,
                                  tt_mode=tt_mode)
 
@@ -622,11 +639,11 @@ def compute_cls_all_interp(
     """
     l_sparse = sparse_l_grid(l_max)
 
-    cl_tt_sparse = compute_cl_tt_interp(pt, params, bg, l_sparse.tolist(),
+    cl_tt_sparse = compute_cl_tt_interp(pt, params, bg, tuple(l_sparse.tolist()),
                                          n_k_fine=n_k_fine, tt_mode=tt_mode)
-    cl_ee_sparse = compute_cl_ee_interp(pt, params, bg, l_sparse.tolist(),
+    cl_ee_sparse = compute_cl_ee_interp(pt, params, bg, tuple(l_sparse.tolist()),
                                          n_k_fine=n_k_fine)
-    cl_te_sparse = compute_cl_te_interp(pt, params, bg, l_sparse.tolist(),
+    cl_te_sparse = compute_cl_te_interp(pt, params, bg, tuple(l_sparse.tolist()),
                                          n_k_fine=n_k_fine, tt_mode=tt_mode)
 
     l_dense = jnp.arange(2, l_max + 1, dtype=jnp.float64)
@@ -652,7 +669,7 @@ def compute_cl_bb(tpt, params, bg, l_values):
     """Compute unlensed C_l^BB from tensor perturbation source functions."""
     tau_grid = tpt.tau_grid
     k_grid = tpt.k_grid
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - tau_grid
 
     dtau = jnp.diff(tau_grid)

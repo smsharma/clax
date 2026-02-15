@@ -25,6 +25,7 @@ from jaxclass.perturbations import PerturbationResult, TensorPerturbationResult,
 from jaxclass.primordial import primordial_scalar_pk, primordial_tensor_pk  # noqa: F401
 from jaxclass.harmonic import compute_cl_bb, compute_cl_tt, compute_cl_ee, compute_cl_te, compute_cls_all  # noqa: F401
 
+import functools
 from dataclasses import dataclass
 import jax.numpy as jnp
 
@@ -45,6 +46,7 @@ class ComputeResult:
         return cls(*fields)
 
 
+@functools.partial(jax.jit, static_argnums=(1,))
 def compute(
     params: CosmoParams = CosmoParams(),
     prec: PrecisionParams = PrecisionParams(),

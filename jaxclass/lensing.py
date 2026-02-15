@@ -49,7 +49,7 @@ def compute_cl_pp(
     """
     tau_grid = pt.tau_grid
     k_grid = pt.k_grid
-    tau_0 = float(bg.conformal_age)
+    tau_0 = bg.conformal_age
     chi_grid = tau_0 - tau_grid
 
     dtau = jnp.diff(tau_grid)

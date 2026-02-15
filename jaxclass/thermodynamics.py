@@ -18,6 +18,7 @@ References:
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -428,6 +429,7 @@ def _reionization_xe(z, z_reio, Y_He, xe_before=0.0):
 # Main solver
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnums=(1,))
 def thermodynamics_solve(
     params: CosmoParams,
     prec: PrecisionParams,
