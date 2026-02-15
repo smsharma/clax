@@ -32,16 +32,20 @@ Lensed accuracy is SCIENCE-GRADE (Feb 15):
 1. ~~**Lensed EE and TE**~~ — **DONE** (Feb 15). Full spin-2 lensing.
 2. ~~**Lensing accuracy 5% → <1%**~~ — **DONE** (Feb 15). Now sub-0.2%.
 
-3. **Multi-cosmology validation** — Everything tested at ONE fiducial LCDM
-   point only. Validate at: omega_b ±20%, omega_cdm ±20%, h ±10%, n_s ±5%,
-   tau_reio ±30%. No code changes needed, just GPU diagnostic runs. Catch
-   bugs that cancel at fiducial before they bias HMC chains.
+3. ~~**Multi-cosmology validation**~~ — **DONE** (Feb 15). 4 LCDM variations,
+   all sub-0.3% TT/EE. No fiducial-specific bugs found.
 
-4. **P(k,z) at arbitrary z** — Currently only z=0. Interpolate delta_m from
-   perturbation output at arbitrary z values.
+4. ~~**P(k,z) at arbitrary z**~~ — **DONE** (Feb 15). transfer.py interpolates
+   delta_m along tau axis.
 
 5. **BB tensor accuracy** — Lensing BB now accurate. Primordial BB still ~2x
-   off CLASS.
+   off CLASS. Lower priority for v1 (HMC chains use scalar TT+TE+EE).
+
+6. **Performance**: C_l computation takes ~40 min per cosmology (medium_cl).
+   Need XLA persistent cache or AOT compilation for practical HMC use.
+
+7. **Remaining cosmology variations**: tau_reio ±30%, n_s ±5% not yet tested
+   (lower priority — same code paths as tested variations).
 
 ## Approach
 
