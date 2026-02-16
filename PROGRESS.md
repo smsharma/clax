@@ -44,6 +44,35 @@ Per-l JIT on inner functions avoids this: each l compiles independently, O(1) me
 - **For HMC target (30-60s)**: need fewer k-modes (30-50), lower tau_n_points,
   or fixed-step solver.
 
+**Roadmap to ~30s (ordered by impact):**
+
+1. **Create `fit_cl` preset** (biggest practical win). Reduce:
+   - `th_n_points`: 20000 → 3000-5000
+   - `pt_k_per_decade`: 60 → 20-30 (keep source interpolation)
+   - `pt_tau_n_points`: 5000 → 1500-2500
+   - `pt_l_max_*`: 50 → 35-40
+   - Expected: **2.5-4x speedup immediately**
+
+2. **Fused source extraction in ODE solve.** Currently solves full state then
+   separate `vmap(extract_at_tau)`. Use `SaveAt(fn=...)` to emit only needed
+   sources at save times. Add "minimal source" mode (TT/EE/TE only), skip
+   diagnostic fields (source_SW, etc.). Expected: **1.5-2x on perturbations.**
+
+3. **Mixed precision fit mode.** Run perturbations/harmonic in float32, keep
+   background/thermo in float64. Often the difference between ~60s and ~30s
+   on H100. Expected: **1.5-2x.**
+
+4. **Two-phase solver.** Use stiff solver only pre-recombination, then explicit
+   solver post-recombination. Current single Kvaerno5 all the way is costly.
+   Expected: **additional 1.3-2x.**
+
+5. **Reduce n_k_fine intelligently.** Hybrid fine grid (linear in high-k, log in
+   low-k) so n_k_fine can be cut without aliasing. Expected: **harmonic 33s → 10-20s.**
+
+Reality check: with current science/planck settings, 30s is unlikely. With changes
+1+2+3 (fit preset + fused sources + float32), 30s is realistic for a robust fit
+mode still good enough for diagnostic inference loops.
+
 ### Feb 15, 2026: Multi-cosmology validation + chunked vmap
 
 **Multi-cosmology validation passed** (ALL 10 parameter points, medium_cl preset):
