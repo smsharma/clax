@@ -1,14 +1,20 @@
 # clax
 
-**A complete, differentiable reimplementation of the CLASS Boltzmann solver in JAX.**
+**A differentiable cosmological Boltzmann solver in JAX.**
+
+## Development
+
+This codebase was written entirely by [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (Opus 4.6). The development process -- including architecture decisions, bug hunting through the CLASS C source code, and numerical validation -- is documented in [CHANGELOG.md](CHANGELOG.md) and [CLAUDE.md](CLAUDE.md).
+
+## Overview
 
 clax solves the coupled Einstein-Boltzmann equations for cosmological perturbations from first principles: background cosmology, hydrogen recombination, the full photon-baryon-neutrino Boltzmann hierarchy in synchronous gauge, line-of-sight integration for CMB angular power spectra, HaloFit for nonlinear matter power, gravitational lensing, and a shooting method for theta_s parametrization. The entire pipeline -- from cosmological parameters to P(k), C_l^TT/EE/TE/BB, and lensed C_l -- is end-to-end differentiable via JAX automatic differentiation.
 
-The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_public) that enables gradient-based cosmological inference (HMC, variational methods) on CMB and large-scale structure data.
+The goal is a differentiable alternative to [CLASS](https://github.com/lesgourg/class_public) that enables gradient-based cosmological inference (HMC, variational methods) on CMB and large-scale structure data.
 
 ## Status
 
-**v1.0** -- Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. JIT-compiled: 487s cached on H100-80GB. 95+ tests passing. See [CHANGELOG.md](CHANGELOG.md) for full details.
+Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. JIT-compiled: 487s cached on H100-80GB. 95+ tests passing. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Accuracy comparison against CLASS v3.3.4
 
@@ -16,7 +22,7 @@ All comparisons at Planck 2018 best-fit LCDM. GPU: H100-80GB.
 
 ### Unlensed C_l angular power spectra
 
-`planck_cl` preset: k_max=1.0, 60 k/decade (300 modes), l_max=50, full ncdm Psi_l(q) hierarchy, source-interpolated to 10000 fine k-points. H100 GPU.
+`planck_cl` preset: k_max=1.0, 60 k/decade (300 modes), l_max=50, full ncdm Psi_l(q) hierarchy (5 q-bins x 18 multipoles), source-interpolated to 10000 fine k-points.
 
 | Multipole l | C_l^TT error | C_l^EE error | C_l^TE error |
 |-------------|-------------|-------------|-------------|
@@ -92,7 +98,7 @@ from clax import CosmoParams, PrecisionParams
 
 # Background + thermodynamics
 result = clax.compute(CosmoParams(h=0.6736, omega_b=0.02237))
-print(result.bg.H0)            # Hubble constant in Mpc^-1
+print(result.bg.H0)            # Hubble constant [Mpc^-1] (CLASS internal units)
 print(result.bg.conformal_age) # conformal age in Mpc
 
 # Matter power spectrum at a single k
@@ -105,7 +111,7 @@ print(grad.omega_cdm)  # dP(k)/d(omega_cdm)
 # Angular power spectra (C_l) -- science quality
 from clax.perturbations import perturbations_solve
 from clax.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
-prec = PrecisionParams.science_cl()
+prec = PrecisionParams.planck_cl()
 params = CosmoParams()
 bg = clax.background_solve(params, prec)
 th = clax.thermodynamics_solve(params, prec, bg)
@@ -132,12 +138,6 @@ pytest tests/ -v
 pytest tests/ -v -m "not slow"  # skip slow integration tests
 ```
 
-For reference data generation (optional, requires CLASS Python wrapper):
-```bash
-cd ../class_public-3.3.4 && pip install .
-python scripts/generate_class_reference.py
-```
-
 ## Architecture
 
 A sequential pipeline of pure functions, each returning a frozen PyTree:
@@ -151,7 +151,7 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 **Key design choices:**
 
 - `CosmoParams` fields are JAX-traced for automatic differentiation. `PrecisionParams` fields are static (control array shapes, not traced).
-- Full Boltzmann hierarchy with smooth RSA damping post-recombination. Full ncdm Psi_l(q) phase-space hierarchy (15 q-bins x 18 multipoles). TCA (tight-coupling approximation) with CLASS-matching dual criteria for numerical stability.
+- Full Boltzmann hierarchy with smooth RSA damping post-recombination. Full ncdm Psi_l(q) phase-space hierarchy (5 q-bins x 18 multipoles). TCA (tight-coupling approximation) with CLASS-matching dual criteria for numerical stability.
 - Perturbation ODE solved with Kvaerno5 (implicit, stiff-capable) via Diffrax.
 - `vmap` over k-modes for GPU parallelism.
 - `RecursiveCheckpointAdjoint` for memory-efficient reverse-mode AD through the ODE solve.
@@ -180,7 +180,7 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 
 ## Precision presets
 
-`PrecisionParams` provides three presets controlling the accuracy/speed tradeoff:
+`PrecisionParams` provides four presets controlling the accuracy/speed tradeoff:
 
 | Preset        | k/decade | l_max | k_max  | Use case                 |
 |---------------|----------|-------|--------|--------------------------|
@@ -195,16 +195,16 @@ For science-grade results, use `compute_cl_tt_interp` / `compute_cl_ee_interp` w
 
 Default parameters correspond to Planck 2018 best-fit LCDM:
 
-| Parameter    | Default  | Description                      |
-|--------------|----------|----------------------------------|
-| `h`          | 0.6736   | H0 / (100 km/s/Mpc)             |
-| `omega_b`    | 0.02237  | Physical baryon density          |
-| `omega_cdm`  | 0.1200   | Physical CDM density             |
-| `ln10A_s`    | 3.044    | Log primordial amplitude         |
-| `n_s`        | 0.9649   | Scalar spectral index            |
-| `tau_reio`   | 0.0544   | Reionization optical depth       |
-| `m_ncdm`     | 0.06 eV  | Neutrino mass (single species)   |
-| `w0`, `wa`   | -1.0, 0  | CPL dark energy equation of state|
+| Parameter    | Default        | Description                      |
+|--------------|----------------|----------------------------------|
+| `h`          | 0.6736         | H0 / (100 km/s/Mpc)             |
+| `omega_b`    | 0.02237        | Physical baryon density          |
+| `omega_cdm`  | 0.1200         | Physical CDM density             |
+| `ln10A_s`    | 3.0445         | Log primordial amplitude (A_s = 2.1e-9) |
+| `n_s`        | 0.9649         | Scalar spectral index            |
+| `tau_reio`   | 0.0544         | Reionization optical depth       |
+| `m_ncdm`     | 0.06 eV        | Neutrino mass (single species)   |
+| `w0`, `wa`   | -1.0, 0        | CPL dark energy equation of state|
 
 ## Known limitations
 
@@ -222,10 +222,6 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 - **SymBoltz.jl**: Li & Millea (2024). Symbolic Boltzmann solver in Julia. [arXiv:2411.18620](https://arxiv.org/abs/2411.18620)
 - Seljak & Zaldarriaga (1996). Line-of-sight integration approach. [arXiv:astro-ph/9603033](https://arxiv.org/abs/astro-ph/9603033)
 - Ma & Bertschinger (1995). Cosmological perturbation theory. [arXiv:astro-ph/9506072](https://arxiv.org/abs/astro-ph/9506072)
-
-## Development
-
-This codebase is being written entirely by Claude Code (Opus 4.6). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [CHANGELOG.md](CHANGELOG.md) and [CLAUDE.md](CLAUDE.md).
 
 ## License
 
