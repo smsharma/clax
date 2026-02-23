@@ -11,8 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass.params import CosmoParams, PrecisionParams
-from jaxclass.shooting import _compute_theta_s, make_shoot_h_from_theta_s
+from clax.params import CosmoParams, PrecisionParams
+from clax.shooting import _compute_theta_s, make_shoot_h_from_theta_s
 
 
 PREC = PrecisionParams()

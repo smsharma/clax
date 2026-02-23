@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate CLASS reference data for jaxCLASS validation.
+"""Generate CLASS reference data for clax validation.
 
 Requires: pip install classy (CLASS Python wrapper)
 
 Generates .npz files in reference_data/ for each cosmological model.
-These are compared against jaxCLASS output in the test suite.
+These are compared against clax output in the test suite.
 
 Usage:
     python scripts/generate_class_reference.py
@@ -193,7 +193,7 @@ def generate_perturbations(cosmo, outdir, params):
     """Extract perturbation variables at specific k values for source comparison.
 
     Uses CLASS k_output_values to get time-series of perturbation variables.
-    This enables direct comparison of source function components against jaxCLASS.
+    This enables direct comparison of source function components against clax.
     """
     # Need a separate CLASS run with k_output_values
     from classy import Class

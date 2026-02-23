@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass.interpolation import CubicSpline
+from clax.interpolation import CubicSpline
 
 
 def test_spline_sin():

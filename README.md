@@ -1,14 +1,14 @@
-# jaxCLASS
+# clax
 
 **A complete, differentiable reimplementation of the CLASS Boltzmann solver in JAX.**
 
-jaxCLASS solves the coupled Einstein-Boltzmann equations for cosmological perturbations from first principles: background cosmology, hydrogen recombination, the full photon-baryon-neutrino Boltzmann hierarchy in synchronous gauge, line-of-sight integration for CMB angular power spectra, HaloFit for nonlinear matter power, gravitational lensing, and a shooting method for theta_s parametrization. The entire pipeline -- from cosmological parameters to P(k), C_l^TT/EE/TE/BB, and lensed C_l -- is end-to-end differentiable via JAX automatic differentiation.
+clax solves the coupled Einstein-Boltzmann equations for cosmological perturbations from first principles: background cosmology, hydrogen recombination, the full photon-baryon-neutrino Boltzmann hierarchy in synchronous gauge, line-of-sight integration for CMB angular power spectra, HaloFit for nonlinear matter power, gravitational lensing, and a shooting method for theta_s parametrization. The entire pipeline -- from cosmological parameters to P(k), C_l^TT/EE/TE/BB, and lensed C_l -- is end-to-end differentiable via JAX automatic differentiation.
 
 The goal is a drop-in replacement for [CLASS](https://github.com/lesgourg/class_public) that enables gradient-based cosmological inference (HMC, variational methods) on CMB and large-scale structure data.
 
 ## Status
 
-**v1.0** -- Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. JIT-compiled: 487s cached on H100-80GB. 95+ tests passing. See [PROGRESS.md](PROGRESS.md) for full details.
+**v1.0** -- Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. JIT-compiled: 487s cached on H100-80GB. 95+ tests passing. See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ## Accuracy comparison against CLASS v3.3.4
 
@@ -55,7 +55,7 @@ Validated at 10 LCDM parameter variations (omega_b, omega_cdm, h, n_s, tau_reio 
 
 ### Matter power spectrum P(k)
 
-| k [Mpc^-1] | jaxCLASS / CLASS | Error |
+| k [Mpc^-1] | clax / CLASS | Error |
 |-------------|------------------|-------|
 | 0.001       | 0.970            | 3.0%  |
 | 0.010       | 0.986            | 1.4%  |
@@ -87,28 +87,28 @@ Validated at 10 LCDM parameter variations (omega_b, omega_cdm, h, n_s, tau_reio 
 
 ```python
 import jax
-import jaxclass
-from jaxclass import CosmoParams, PrecisionParams
+import clax
+from clax import CosmoParams, PrecisionParams
 
 # Background + thermodynamics
-result = jaxclass.compute(CosmoParams(h=0.6736, omega_b=0.02237))
+result = clax.compute(CosmoParams(h=0.6736, omega_b=0.02237))
 print(result.bg.H0)            # Hubble constant in Mpc^-1
 print(result.bg.conformal_age) # conformal age in Mpc
 
 # Matter power spectrum at a single k
-pk = jaxclass.compute_pk(CosmoParams(), k=0.05)
+pk = clax.compute_pk(CosmoParams(), k=0.05)
 
 # Gradient of P(k) w.r.t. a cosmological parameter
-grad = jax.grad(lambda p: jaxclass.compute_pk(p, k=0.05))(CosmoParams())
+grad = jax.grad(lambda p: clax.compute_pk(p, k=0.05))(CosmoParams())
 print(grad.omega_cdm)  # dP(k)/d(omega_cdm)
 
 # Angular power spectra (C_l) -- science quality
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
 prec = PrecisionParams.science_cl()
 params = CosmoParams()
-bg = jaxclass.background_solve(params, prec)
-th = jaxclass.thermodynamics_solve(params, prec, bg)
+bg = clax.background_solve(params, prec)
+th = clax.thermodynamics_solve(params, prec, bg)
 pt = perturbations_solve(params, prec, bg, th)
 cl_tt = compute_cl_tt_interp(pt, params, bg, [30, 100, 200])
 cl_ee = compute_cl_ee_interp(pt, params, bg, [30, 100, 200])
@@ -122,8 +122,8 @@ Requires Python >= 3.10.
 pip install jax jaxlib diffrax equinox jaxtyping
 
 # Clone and install
-git clone https://github.com/smsharma/jaxclass.git
-cd jaxclass
+git clone https://github.com/smsharma/clax.git
+cd clax
 pip install -e .
 
 # Run tests
@@ -225,7 +225,7 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 
 ## Development
 
-This codebase is being written entirely by Claude Code (Opus 4.6). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [PROGRESS.md](PROGRESS.md) and [CLAUDE.md](CLAUDE.md).
+This codebase is being written entirely by Claude Code (Opus 4.6). The development process -- including architecture decisions, bug hunting through CLASS source code, and numerical validation -- is documented in [CHANGELOG.md](CHANGELOG.md) and [CLAUDE.md](CLAUDE.md).
 
 ## License
 

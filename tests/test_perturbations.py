@@ -8,12 +8,12 @@ import numpy as np
 import diffrax
 import pytest
 
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import (
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import (
     _build_indices, _adiabatic_ic, _perturbation_rhs,
 )
-from jaxclass.params import CosmoParams, PrecisionParams
+from clax.params import CosmoParams, PrecisionParams
 
 
 PREC = PrecisionParams(

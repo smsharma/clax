@@ -9,11 +9,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.lensing import compute_cl_pp, lens_cl_tt, lens_cls
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.lensing import compute_cl_pp, lens_cl_tt, lens_cls
 
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
@@ -72,7 +72,7 @@ class TestCLpp:
             cl_us = float(cl_pp[i])
             cl_class = float(pp_ref[l])
             ratio = cl_us / cl_class
-            print(f"C_l^pp(l={l}): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+            print(f"C_l^pp(l={l}): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
             # Lensing potential: use very loose tolerance as normalization may need tuning
             # This test primarily documents the current accuracy for diagnostics
             assert abs(ratio - 1) < 1e5, (
@@ -117,7 +117,7 @@ class TestLensedTT:
                 print(f"C_l^TT_lensed(l={l}): CLASS={cl_class:.4e}, skipping (too small)")
                 continue
             ratio = cl_us / cl_class
-            print(f"C_l^TT_lensed(l={l}): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+            print(f"C_l^TT_lensed(l={l}): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
             # Correlation function method should be accurate when given exact inputs
             assert abs(ratio - 1) < 0.005, (
                 f"C_l^TT_lensed(l={l}): ratio={ratio:.4f}, expected within 0.5%"

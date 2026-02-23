@@ -1,6 +1,6 @@
 """Test that physical constants match CLASS values exactly."""
 
-from jaxclass import constants as const
+from clax import constants as const
 
 
 def test_mpc_over_m():

@@ -10,10 +10,10 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from jaxclass.params import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve, _extract_sources
+from clax.params import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve, _extract_sources
 
 params = CosmoParams()
 prec = PrecisionParams.planck_cl()
@@ -95,7 +95,7 @@ print(f"  Our source_SW = {source_SW[idx_ours_star]:.8e} (includes g*alpha')")
 # But we can't reconstruct this without the raw ODE state.
 
 # Instead, let's compare the integrated transfer function at l=500
-from jaxclass.bessel import spherical_jl_backward
+from clax.bessel import spherical_jl_backward
 chi_grid = float(bg.conformal_age) - tau_ours
 dtau = np.diff(tau_ours)
 dtau_mid = np.concatenate([dtau[:1]/2, (dtau[:-1]+dtau[1:])/2, dtau[-1:]/2])

@@ -14,11 +14,11 @@ print("TEST 1: Baseline (float64, planck_cl defaults)")
 print("=" * 60)
 jax.config.update("jax_enable_x64", True)
 
-from jaxclass.params import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt_interp
+from clax.params import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt_interp
 
 params = CosmoParams(m_ncdm=0.0)
 prec = PrecisionParams.planck_cl()

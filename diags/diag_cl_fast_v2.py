@@ -9,11 +9,11 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from jaxclass.params import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt_interp, compute_cl_ee_interp, compute_cl_te_interp
+from clax.params import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt_interp, compute_cl_ee_interp, compute_cl_te_interp
 
 N_K_FINE = 10000
 

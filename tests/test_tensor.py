@@ -14,11 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import tensor_perturbations_solve
-from jaxclass.harmonic import compute_cl_bb
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import tensor_perturbations_solve
+from clax.harmonic import compute_cl_bb
 
 # Reference data
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')

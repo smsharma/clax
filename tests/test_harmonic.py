@@ -14,11 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt, compute_cl_ee, compute_cl_te
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt, compute_cl_ee, compute_cl_te
 
 
 PREC = PrecisionParams.fast_cl()
@@ -44,7 +44,7 @@ class TestClTT:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['tt'][100])
         ratio = cl_us / cl_class
-        print(f"C_l^TT(l=100): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^TT(l=100): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.30, f"C_l^TT(l=100): ratio={ratio:.4f}, expected within 30%"
 
     def test_cl_tt_l50(self, pipeline, lcdm_cls_ref):
@@ -54,7 +54,7 @@ class TestClTT:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['tt'][50])
         ratio = cl_us / cl_class
-        print(f"C_l^TT(l=50): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^TT(l=50): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.50, f"C_l^TT(l=50): ratio={ratio:.4f}, expected within 50%"
 
     def test_cl_tt_l10(self, pipeline, lcdm_cls_ref):
@@ -64,7 +64,7 @@ class TestClTT:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['tt'][10])
         ratio = cl_us / cl_class
-        print(f"C_l^TT(l=10): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^TT(l=10): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.50, f"C_l^TT(l=10): ratio={ratio:.4f}, expected within 50%"
 
     def test_cl_tt_positive(self, pipeline):
@@ -104,7 +104,7 @@ class TestClEE:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['ee'][100])
         ratio = cl_us / cl_class
-        print(f"C_l^EE(l=100): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^EE(l=100): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.60, f"C_l^EE(l=100): ratio={ratio:.4f}"
 
     def test_cl_ee_l200_accuracy(self, pipeline, lcdm_cls_ref):
@@ -114,7 +114,7 @@ class TestClEE:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['ee'][200])
         ratio = cl_us / cl_class
-        print(f"C_l^EE(l=200): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^EE(l=200): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.60, f"C_l^EE(l=200): ratio={ratio:.4f}"
 
     def test_cl_ee_diagnostic(self, pipeline, lcdm_cls_ref):
@@ -127,7 +127,7 @@ class TestClEE:
             cl_us = float(cl[i])
             cl_class = float(lcdm_cls_ref['ee'][l])
             ratio = cl_us / cl_class
-            print(f"  l={l:4d}: ratio={ratio:.4f}  (jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e})")
+            print(f"  l={l:4d}: ratio={ratio:.4f}  (clax={cl_us:.4e}, CLASS={cl_class:.4e})")
         print("---------------------------------")
 
 
@@ -146,7 +146,7 @@ class TestClTE:
             cl_us = float(cl[i])
             cl_class = float(lcdm_cls_ref['te'][l])
             sign_match = (cl_us * cl_class) > 0
-            print(f"C_l^TE(l={l}): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, sign_match={sign_match}")
+            print(f"C_l^TE(l={l}): clax={cl_us:.4e}, CLASS={cl_class:.4e}, sign_match={sign_match}")
             assert sign_match, f"C_l^TE(l={l}): sign mismatch"
 
     def test_cl_te_finite(self, pipeline):
@@ -163,7 +163,7 @@ class TestClTE:
         cl_us = float(cl[0])
         cl_class = float(lcdm_cls_ref['te'][100])
         ratio = cl_us / cl_class
-        print(f"C_l^TE(l=100): jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
+        print(f"C_l^TE(l=100): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.60, f"C_l^TE(l=100): ratio={ratio:.4f}"
 
     def test_cl_te_diagnostic(self, pipeline, lcdm_cls_ref):
@@ -176,5 +176,5 @@ class TestClTE:
             cl_us = float(cl[i])
             cl_class = float(lcdm_cls_ref['te'][l])
             ratio = cl_us / cl_class
-            print(f"  l={l:4d}: ratio={ratio:.4f}  (jaxCLASS={cl_us:.4e}, CLASS={cl_class:.4e})")
+            print(f"  l={l:4d}: ratio={ratio:.4f}  (clax={cl_us:.4e}, CLASS={cl_class:.4e})")
         print("---------------------------------")

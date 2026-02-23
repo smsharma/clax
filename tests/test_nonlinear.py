@@ -8,7 +8,7 @@ import numpy as np
 import os
 import pytest
 
-from jaxclass.nonlinear import (
+from clax.nonlinear import (
     sigma_R,
     halofit_parameters,
     halofit_nl_pk,

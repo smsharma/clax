@@ -11,3 +11,28 @@ test_logs/
 .DS_Store
 pfarrei.f4PTRk/
 test_cl_script.py
+
+# Private / agent infrastructure
+loop_logs/
+.claude/
+AGENT_PROMPT.md
+scripts/gpu_claude_loop.sh
+scripts/gpu_claude_tmux.sh
+scripts/start_claude_gpu.sh
+scripts/gpu-run.sh
+
+# Development diagnostic scripts and figures (kept locally)
+figures/
+scripts/diag_*.py
+scripts/diagnose_*.py
+scripts/gpu_*.py
+scripts/gpu_*.sh
+scripts/gen_*.py
+scripts/compare_*.py
+scripts/check_*.py
+scripts/plot_*.py
+scripts/make_*.py
+scripts/save_*.py
+scripts/test_*.py
+scripts/*.pdf
+scripts/*.png

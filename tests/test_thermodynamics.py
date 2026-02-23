@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve, xe_of_z
-from jaxclass.params import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve, xe_of_z
+from clax.params import CosmoParams, PrecisionParams
 
 
 PREC = PrecisionParams(

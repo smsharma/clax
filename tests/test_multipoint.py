@@ -1,4 +1,4 @@
-"""Test jaxCLASS at non-fiducial parameter points.
+"""Test clax at non-fiducial parameter points.
 
 Validates background quantities and P(k) for:
 - massive_nu_015: m_ncdm=0.15 eV (heavier neutrinos)
@@ -14,9 +14,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import jaxclass
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
+import clax
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
 
 # Reference data paths
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
@@ -81,7 +81,7 @@ class TestMassiveNu:
     def test_pk_at_k005(self, ref):
         """P(k=0.05) should match CLASS to < 10%."""
         params = CosmoParams(m_ncdm=0.15)
-        pk_computed = float(jaxclass.compute_pk(params, PREC, k=0.05))
+        pk_computed = float(clax.compute_pk(params, PREC, k=0.05))
 
         pk_ref_data = _load_pk('massive_nu_015')
         k_ref = pk_ref_data['k']

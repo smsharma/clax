@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jaxclass"
+name = "clax"
 version = "0.1.0"
 description = "Fully differentiable CLASS Boltzmann solver in JAX"
 requires-python = ">=3.10"
@@ -33,4 +33,4 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["jaxclass*"]
+include = ["clax*"]

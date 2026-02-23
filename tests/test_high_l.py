@@ -15,11 +15,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt, compute_cl_ee, compute_cl_te, sparse_l_grid
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt, compute_cl_ee, compute_cl_te, sparse_l_grid
 
 
 PREC = PrecisionParams.fast_cl()
@@ -112,7 +112,7 @@ class TestHighL:
         cl = compute_cl_tt(pt, params, bg, [500], l_switch=100000, delta_l=50)
         cl_us = float(cl[0])
 
-        print(f"C_l^TT(l=500, exact Bessel): jaxCLASS={cl_us:.4e}")
+        print(f"C_l^TT(l=500, exact Bessel): clax={cl_us:.4e}")
 
         assert cl_us > 0, f"C_l^TT(l=500) = {cl_us:.4e} is not positive"
         assert np.isfinite(cl_us), f"C_l^TT(l=500) is not finite"
@@ -165,7 +165,7 @@ class TestComputeClsAll:
 
     def test_cls_all_shape(self, pipeline):
         """compute_cls_all returns dict with arrays of length l_max+1."""
-        from jaxclass.harmonic import compute_cls_all
+        from clax.harmonic import compute_cls_all
 
         params, bg, _, pt = pipeline
         l_max = 500
@@ -188,7 +188,7 @@ class TestComputeClsAll:
         same transfer function method. l=100 is in the sparse l-grid, so
         spline interpolation should introduce negligible error.
         """
-        from jaxclass.harmonic import compute_cls_all
+        from clax.harmonic import compute_cls_all
 
         params, bg, _, pt = pipeline
 

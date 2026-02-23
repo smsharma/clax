@@ -1,3 +1,0 @@
-GPU node: v007.ib.bridges2.psc.edu
-To attach: srun --jobid=37478402 --overlap --pty tmux attach -t claude
-Claude session ended

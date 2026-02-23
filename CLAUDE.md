@@ -1,4 +1,4 @@
-# jaxCLASS Development Guide
+# clax Development Guide
 
 ## CRITICAL: HPC environment rules
 
@@ -34,11 +34,11 @@ development instructions and conventions.
 
 - **Reference CLASS**: `../class_public-3.3.4/`
 - **Design document**: `DESIGN.md` (read this first)
-- **Progress log**: `PROGRESS.md`
+- **Progress log**: `CHANGELOG.md`
 
 ## Repository
 
-- **GitHub**: https://github.com/smsharma/jaxclass (private)
+- **GitHub**: https://github.com/smsharma/clax (private)
 - Commit at meaningful checkpoints (passing tests, bug fixes, new features)
 - Keep commits focused: one logical change per commit
 - Always run `pytest tests/ --fast -x -q` before committing
@@ -83,7 +83,7 @@ Full instructions in `../BRIDGES2_ACCESS.md` (gitignored). Summary:
 ```bash
 ssh paperspace@184.105.5.21
 # Quadro P6000 (24GB VRAM), 8 CPU, 32GB RAM, CUDA 12.2
-# Python/JAX at ~/jaxclass/.venv/
+# Python/JAX at ~/clax/.venv/
 ```
 
 **Known GPU issue**: XLA autotuner fails with l_max=50 on P6000 ("couldn't
@@ -127,10 +127,10 @@ Teams are especially valuable for this project because:
 ## Orientation (read this first when starting a session)
 
 When you start a new session, orient yourself:
-1. Read `PROGRESS.md` to see what's done and what's next.
+1. Read `CHANGELOG.md` to see what's done and what's next.
 2. Run `pytest tests/ -v --fast 2>&1 | tail -20` to see current test status.
-3. Pick the next failing test or unchecked item from PROGRESS.md.
-4. When you finish a unit of work, update PROGRESS.md before stopping.
+3. Pick the next failing test or unchecked item from CHANGELOG.md.
+4. When you finish a unit of work, update CHANGELOG.md before stopping.
 
 ---
 
@@ -222,21 +222,21 @@ def test_background_quantities(fast_mode, class_reference):
     ...
 ```
 
-### 4. Keep PROGRESS.md current (agent orientation)
+### 4. Keep CHANGELOG.md current (agent orientation)
 
 The C compiler project found that each agent drops into a fresh context with
-no memory of what happened before. PROGRESS.md is the shared memory. Without
+no memory of what happened before. CHANGELOG.md is the shared memory. Without
 it, agents waste time re-discovering what's done and what's broken.
 
 **Rules:**
-- Update PROGRESS.md after every meaningful unit of work.
+- Update CHANGELOG.md after every meaningful unit of work.
 - Check off completed items with dates.
 - Note what worked, what didn't, what's blocked.
 - **Record failed approaches** so they aren't re-attempted. E.g.:
   "Tried using Tsit5 for perturbation ODE -- doesn't work, system is too
   stiff. Switched to Kvaerno5."
 - Add new tasks discovered during implementation.
-- When stuck, maintain a running doc of attempts in PROGRESS.md.
+- When stuck, maintain a running doc of attempts in CHANGELOG.md.
 
 ### 5. Prevent regressions (CI discipline)
 
@@ -249,7 +249,7 @@ enforcement. We need the same discipline.
 - If anything regresses, fix it before committing. Never "fix it later."
 - If a new feature requires changing behavior in an existing test, update the
   test explicitly (don't just delete or skip it).
-- Track test pass rates over time in PROGRESS.md (e.g., "background: 25/25,
+- Track test pass rates over time in CHANGELOG.md (e.g., "background: 25/25,
   thermo: 18/20, perturbations: 142/150 k-modes passing").
 
 ### 6. Structure work for parallelism
@@ -259,7 +259,7 @@ independent failing tests (each agent picks a different one), but hard when
 there's one giant failing task (all agents hit the same bug and overwrite
 each other).
 
-**How this applies to jaxCLASS:**
+**How this applies to clax:**
 
 Easy to parallelize (many independent tasks):
 - `background.py` and `bessel.py` are fully independent.
@@ -280,8 +280,8 @@ For perturbations, test individual equation components separately:
 - Test initial conditions in isolation.
 - Then combine. This way, multiple agents can work on different subsystems.
 
-**Task claiming:** When working in parallel, note your task in PROGRESS.md
-(e.g., "IN PROGRESS: background.py (@agent-1)"). Check PROGRESS.md before
+**Task claiming:** When working in parallel, note your task in CHANGELOG.md
+(e.g., "IN PROGRESS: background.py (@agent-1)"). Check CHANGELOG.md before
 starting to avoid duplicate work.
 
 ### 7. Small, testable commits
@@ -314,7 +314,7 @@ The C compiler project used specialized agents beyond just "write code":
 one for deduplication, one for performance, one for code quality review,
 one for documentation.
 
-**For jaxCLASS, useful specializations:**
+**For clax, useful specializations:**
 - **Implementer agents**: Write the module code to pass tests.
 - **Test quality agent**: Reviews and improves the test harness. Adds edge
   cases, improves error messages, catches gaps in coverage.
@@ -324,7 +324,7 @@ one for documentation.
   JIT compilation time, reduces memory usage.
 - **Code quality agent**: Looks for duplicated code, inconsistent patterns,
   missing type hints, unclear variable names. Refactors.
-- **Documentation agent**: Keeps PROGRESS.md, docstrings, and DESIGN.md
+- **Documentation agent**: Keeps CHANGELOG.md, docstrings, and DESIGN.md
   in sync with actual code.
 
 ---

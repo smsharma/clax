@@ -11,12 +11,12 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import classy
-from jaxclass import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
-from jaxclass.interpolation import CubicSpline
+from clax import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cl_tt_interp, compute_cl_ee_interp
+from clax.interpolation import CubicSpline
 
 print(f"Devices: {jax.devices()}", flush=True)
 
@@ -52,7 +52,7 @@ xe_spline_class = CubicSpline(loga_sorted, xe_sorted)
 # Monkey-patch: replace our x_e spline with CLASS's
 # Also need to recompute kappa_dot from CLASS x_e
 # kappa_dot = n_e * sigma_T * c = x_e * n_H * (1+z)^2 * sigma_T * Mpc
-from jaxclass import constants as const
+from clax import constants as const
 import math
 Omega_b = params.omega_b / params.h**2
 _bigH = 3.2407792902755102e-18

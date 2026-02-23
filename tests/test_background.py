@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxclass.background import (
+from clax.background import (
     background_solve,
     H_of_z,
     tau_of_z,
@@ -18,7 +18,7 @@ from jaxclass.background import (
     luminosity_distance,
     comoving_distance,
 )
-from jaxclass.params import CosmoParams, PrecisionParams
+from clax.params import CosmoParams, PrecisionParams
 from tests.conftest import assert_close
 
 

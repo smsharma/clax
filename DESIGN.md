@@ -1,4 +1,4 @@
-# jaxCLASS: Full Design Specification
+# clax: Full Design Specification
 
 A fully differentiable reimplementation of the CLASS Boltzmann solver in JAX,
 targeting complete feature parity with CLASS v3.3.4.
@@ -160,7 +160,7 @@ we bypass all of them with approximation-free integration):
 | Bolt.jl | Julia | Yes | No | Partial | No | Forward-mode only; limited physics |
 | jax-cosmo | JAX | Limber | No | Yes | Yes | Eisenstein-Hu, not a Boltzmann solver |
 
-**jaxCLASS fills the gap**: the first JAX code going from cosmological parameters to
+**clax fills the gap**: the first JAX code going from cosmological parameters to
 lensed C_l's with full reverse-mode AD and GPU acceleration.
 
 ---
@@ -217,27 +217,27 @@ CosmoParams
 ### Top-level API
 
 ```python
-import jaxclass
+import clax
 
 # Define parameters
-params = jaxclass.CosmoParams(
+params = clax.CosmoParams(
     h=0.6736, omega_b=0.02237, omega_cdm=0.1200,
     tau_reio=0.0544, ln10A_s=3.044, n_s=0.9649,
 )
 
 # Compute everything
-result = jaxclass.compute(params)
+result = clax.compute(params)
 # result.cls["tt"]  -> jnp.array, shape (l_max-1,)
 # result.cls["ee"]  -> ...
 # result.pk         -> callable P(k, z)
 # result.bg         -> BackgroundResult with H(z), D_A(z), etc.
 
 # Differentiate
-dcls_dparams = jax.jacrev(lambda p: jaxclass.compute(p).cls["tt"])(params)
+dcls_dparams = jax.jacrev(lambda p: clax.compute(p).cls["tt"])(params)
 
 # Or compute a scalar loss and get gradient
 def neg_log_like(params):
-    cls = jaxclass.compute(params).cls
+    cls = clax.compute(params).cls
     return 0.5 * chi_squared(cls, data_cls, noise_cls)
 
 grad = jax.grad(neg_log_like)(params)
@@ -1408,7 +1408,7 @@ Generates:
 
 ### Cost model
 
-| Module | CLASS (1 CPU core) | jaxCLASS (GPU) | Parallelism |
+| Module | CLASS (1 CPU core) | clax (GPU) | Parallelism |
 |--------|-------------------|----------------|-------------|
 | Background | 0.05s | 0.01s | None needed |
 | Thermodynamics | 0.3s | 0.05s | None needed |
@@ -1535,12 +1535,12 @@ This gives another dimension of parallelism.
 ## 9. Repository Layout
 
 ```
-jaxclass/
+clax/
 ├── CLAUDE.md                         # Development instructions for AI assistants
 ├── DESIGN.md                         # This document
-├── PROGRESS.md                       # Development progress log
+├── CHANGELOG.md                       # Development progress log
 ├── pyproject.toml                    # Package configuration
-├── jaxclass/
+├── clax/
 │   ├── __init__.py                   # Public API: compute(), CosmoParams, etc.
 │   ├── constants.py                  # Physical constants
 │   ├── params.py                     # CosmoParams, PrecisionParams

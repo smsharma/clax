@@ -1,4 +1,4 @@
-"""Test fixtures for jaxCLASS test suite.
+"""Test fixtures for clax test suite.
 
 Provides:
 - Reference data loading from CLASS-generated .npz files
