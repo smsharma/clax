@@ -225,4 +225,4 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 
 ## License
 
-Research code. Not yet released under a formal license.
+MIT
