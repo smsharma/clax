@@ -1,6 +1,6 @@
 # clax Development Progress
 
-## Status: Full lensing (TT/EE/TE/BB) at sub-0.2% accuracy, JIT-cached (487s on H100)
+## Status: Speed-optimized fit_cl preset (55s V100) + full accuracy pipeline
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.**
@@ -44,34 +44,50 @@ Per-l JIT on inner functions avoids this: each l compiles independently, O(1) me
 - **For HMC target (30-60s)**: need fewer k-modes (30-50), lower tau_n_points,
   or fixed-step solver.
 
-**Roadmap to ~30s (ordered by impact):**
+### Mar 14, 2026: Speed optimization — table-based Bessel + fit_cl preset
 
-1. **Create `fit_cl` preset** (biggest practical win). Reduce:
-   - `th_n_points`: 20000 → 3000-5000
-   - `pt_k_per_decade`: 60 → 20-30 (keep source interpolation)
-   - `pt_tau_n_points`: 5000 → 1500-2500
-   - `pt_l_max_*`: 50 → 35-40
-   - Expected: **2.5-4x speedup immediately**
+**Harmonic bottleneck eliminated: 800s → 2.5s** via precomputed j_l(x) and j_l'(x)
+tables with full T0+T1+T2 transfer function contributions.
 
-2. **Fused source extraction in ODE solve.** Currently solves full state then
-   separate `vmap(extract_at_tau)`. Use `SaveAt(fn=...)` to emit only needed
-   sources at save times. Add "minimal source" mode (TT/EE/TE only), skip
-   diagnostic fields (source_SW, etc.). Expected: **1.5-2x on perturbations.**
+**Key discovery**: T1 (ISW dipole, using j_l' radial) is the DOMINANT correction
+at low l (~20pp at l=20), not T2 (<0.1pp). Despite source_T1 being only 0.23% of
+source_T0 in peak magnitude, the j_l' radial function integrates over the full
+free-streaming range, accumulating a large effect.
 
-3. **Mixed precision fit mode.** Run perturbations/harmonic in float32, keep
-   background/thermo in float64. Often the difference between ~60s and ~30s
-   on H100. Expected: **1.5-2x.**
+**Implementation** (`compute_cls_all_fast` in harmonic.py):
+1. Precomputed j_l(x) and j_l'(x) tables via backward+upward recurrence blend at x=l
+2. Full T0+T1+T2 transfer: T_l(k) = ∫dτ [S_T0·j_l + S_T1·j_l' + (S_T2/8)·radT2]
+3. radT2 computed on-the-fly from j_l and j_l': 0.5*[(3l(l+1)/x²-2)j_l - 6/x·j_l']
+4. Source interpolation from coarse (100 k-modes) to fine (5000) k-grid via CubicSpline
+5. lax.scan over 83 sparse l-values for memory efficiency
 
-4. **Two-phase solver.** Use stiff solver only pre-recombination, then explicit
-   solver post-recombination. Current single Kvaerno5 all the way is costly.
-   Expected: **additional 1.3-2x.**
+**fit_cl preset** (params.py): Targeting <2% C_l for HMC/fitting:
+- 20 k/decade, l_max_g=25, 2000 tau points, 5000 thermo points
+- rtol=1e-3 (33% perturbation speedup, <0.1% C_l impact)
+- ode_max_steps=32768, hr_n_k_fine=5000, hr_l_max=1500
 
-5. **Reduce n_k_fine intelligently.** Hybrid fine grid (linear in high-k, log in
-   low-k) so n_k_fine can be cut without aliasing. Expected: **harmonic 33s → 10-20s.**
+**V100 timing** (cached, fit_cl preset):
+| Stage | Time |
+|-------|------|
+| Background | 0.5s |
+| Thermodynamics | 2.4s |
+| Perturbations | ~50s |
+| Harmonic | 2.5s |
+| **Total** | **~55s** |
 
-Reality check: with current science/planck settings, 30s is unlikely. With changes
-1+2+3 (fit preset + fused sources + float32), 30s is realistic for a robust fit
-mode still good enough for diagnostic inference loops.
+(Was ~487s on H100 with planck_cl preset before optimization.)
+
+**Accuracy** (fit_cl, vs CLASS RECFAST, fiducial LCDM):
+
+| l | TT err% | EE err% | TE err% |
+|---|---------|---------|---------|
+| 20 | -1.1 | -1.6 | -1.2 |
+| 100 | -0.7 | -0.4 | +0.2 |
+| 500 | -1.0 | -0.7 | +0.5 |
+| 1000 | -7.1 | -1.8 | +12 |
+
+TT/EE <1.5% at l<=500 (within fit_cl target). l=1000 error is perturbation-limited
+(20 k/decade, l_max_g=25). l=1000 TE error from zero-crossing near there.
 
 ### Feb 15, 2026: Multi-cosmology validation + chunked vmap
 
@@ -293,7 +309,7 @@ high-l errors are entirely from k-integration (Bessel oscillation under-resoluti
 8. **HyRec upgrade** (low-medium, substantial) — Fix EE -0.15% systematic.
    Only needed for sub-0.1% EE.
 
-### v1 feature completeness (prioritized for usable HMC, updated Feb 15 2026)
+### v1 feature completeness (prioritized for usable HMC, updated Mar 14 2026)
 
 Must-have for running a Planck-like likelihood with HMC:
 
@@ -307,6 +323,8 @@ Must-have for running a Planck-like likelihood with HMC:
 5. ~~**Chunked vmap**~~ — **DONE** (Feb 15). pt_k_chunk_size param, V100 memory fix.
 6. ~~**JIT compilation**~~ — **DONE** (Feb 14). 2x speedup (952s → 487s on H100).
    All solve functions + per-l harmonic inner functions cached.
+7. ~~**Speed optimization**~~ — **DONE** (Mar 14). fit_cl preset: 55s on V100
+   (was 487s on H100 with planck_cl). Table-based j_l/j_l' harmonic: 2.5s.
 
 Remaining:
 

@@ -23,7 +23,7 @@ from clax.background import background_solve, BackgroundResult, H_of_z, angular_
 from clax.thermodynamics import thermodynamics_solve, ThermoResult  # noqa: F401
 from clax.perturbations import PerturbationResult, TensorPerturbationResult, tensor_perturbations_solve  # noqa: F401
 from clax.primordial import primordial_scalar_pk, primordial_tensor_pk  # noqa: F401
-from clax.harmonic import compute_cl_bb, compute_cl_tt, compute_cl_ee, compute_cl_te, compute_cls_all  # noqa: F401
+from clax.harmonic import compute_cl_bb, compute_cl_tt, compute_cl_ee, compute_cl_te, compute_cls_all, compute_cls_all_fast  # noqa: F401
 
 import functools
 from dataclasses import dataclass

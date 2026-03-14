@@ -158,6 +158,9 @@ class PrecisionParams:
 
     # Harmonic
     hr_k_per_decade: int = 40
+    hr_n_k_fine: int = 5000          # fine k-grid for source interpolation
+    hr_l_max: int = 2500             # max multipole for C_l computation
+    hr_l_limber: int = 0             # use Limber approx for l >= this (0=disabled)
 
     # Lensing
     le_l_max: int = 2500
@@ -248,4 +251,37 @@ class PrecisionParams:
             pt_ode_rtol=1e-6,
             pt_ode_atol=1e-11,
             ode_max_steps=131072,
+        )
+
+    @staticmethod
+    def fit_cl():
+        """Fast preset for fitting / HMC, targeting <2% C_l accuracy at l<600.
+
+        Aggressively reduces resolution everywhere for speed:
+        - 20 k/decade (vs 60 planck_cl) → ~100 k-modes (vs 300)
+        - l_max=25 hierarchy (vs 50) → smaller state vector
+        - 2000 tau points (vs 5000)
+        - 5000 thermo points (vs 100000)
+        - ode_max_steps=32768 (vs 131072) → less padding in vmap
+        - rtol=1e-3: 33% faster perturbation ODE with <0.1% C_l impact
+        - Fast all-l table Bessel (hr_n_k_fine=5000): precomputed j_l(x)
+          and j_l'(x) tables with T0+T1+T2 transfer contributions. Avoids
+          83 separate JIT compilations. ~2.5s harmonic on V100.
+
+        V100 timing (cached): BG 0.5s, TH 2.4s, PT ~40s, HR 2.5s ≈ 45s total.
+        Accuracy: <1.5% TT/EE at l≤500, ~7% at l=1000 (perturbation-limited).
+        """
+        return PrecisionParams(
+            pt_k_max_cl=1.0,         # keep full k range for l coverage
+            pt_k_per_decade=20,      # sparse perturbation k-grid (interp compensates)
+            pt_tau_n_points=2000,    # sufficient for source resolution
+            th_n_points=5000,        # RECFAST with fewer steps
+            pt_l_max_g=25,           # smaller hierarchy (86 vs 161 state vars)
+            pt_l_max_pol_g=25,
+            pt_l_max_ur=25,
+            pt_ode_rtol=1e-3,        # aggressive tolerance (33% speedup, <0.1% C_l impact)
+            pt_ode_atol=1e-8,
+            ode_max_steps=32768,     # less vmap padding
+            hr_n_k_fine=5000,        # fine k-grid for accurate Bessel integrals
+            hr_l_max=1500,           # reduced max multipole
         )
