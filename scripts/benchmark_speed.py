@@ -1,4 +1,4 @@
-"""Benchmark jaxCLASS pipeline speed by stage.
+"""Benchmark clax pipeline speed by stage.
 
 Times each stage (background, thermodynamics, perturbations, harmonic)
 separately. Runs twice: first call includes JIT compilation, second call
@@ -23,11 +23,11 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from jaxclass.params import CosmoParams, PrecisionParams
-from jaxclass.background import background_solve
-from jaxclass.thermodynamics import thermodynamics_solve
-from jaxclass.perturbations import perturbations_solve
-from jaxclass.harmonic import compute_cls_all_interp, compute_cls_all, compute_cls_all_fast
+from clax.params import CosmoParams, PrecisionParams
+from clax.background import background_solve
+from clax.thermodynamics import thermodynamics_solve
+from clax.perturbations import perturbations_solve
+from clax.harmonic import compute_cls_all_interp, compute_cls_all, compute_cls_all_fast
 
 # Reference ells for accuracy check
 CHECK_ELLS = [20, 100, 500, 1000]
