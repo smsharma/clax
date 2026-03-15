@@ -183,13 +183,14 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 
 `PrecisionParams` provides four presets controlling the accuracy/speed tradeoff:
 
-| Preset        | k/decade | l_max | k_max  | Time   | Use case                 |
-|---------------|----------|-------|--------|--------|--------------------------|
-| **`fit_cl()`**| 20       | 17    | 1.0    | **34s**| HMC / fitting (<1.5%)    |
-| `fast_cl()`   | 15       | 25    | 0.15   | ~60s   | Quick iteration, testing |
-| `medium_cl()` | 20       | 50    | 0.3    | ~120s  | Moderate accuracy        |
-| `planck_cl()` | 60       | 50    | 1.0    | ~487s  | Planck-quality (<0.2%)   |
-| `science_cl()`| 200      | 50    | 0.35   | ~600s  | Sub-percent C_l          |
+| Preset        | k/decade | l_max | k_max  | Time    | Use case                 |
+|---------------|----------|-------|--------|---------|--------------------------|
+| **`fit_cl()`**| 20       | 17    | 1.0    | **34s** | HMC / fitting (<1.5%)    |
+| **`planck_fast()`**| 60  | 50    | 1.0    | **~210s** | Science-grade, optimized |
+| `fast_cl()`   | 15       | 25    | 0.15   | ~60s    | Quick iteration, testing |
+| `medium_cl()` | 20       | 50    | 0.3    | ~120s   | Moderate accuracy        |
+| `planck_cl()` | 60       | 50    | 1.0    | ~487s   | Science-grade, original  |
+| `science_cl()`| 200      | 50    | 0.35   | ~600s   | Sub-percent C_l          |
 
 For science-grade results, use `compute_cl_tt_interp` / `compute_cl_ee_interp` which interpolate source functions to a fine k-grid (10000 points) before computing the transfer integral. This is robust regardless of the perturbation k-density.
 

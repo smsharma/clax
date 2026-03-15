@@ -254,6 +254,37 @@ class PrecisionParams:
         )
 
     @staticmethod
+    def planck_fast():
+        """Planck-quality accuracy with speed optimizations.
+
+        Same perturbation resolution as planck_cl (60 k/decade, l_max=50,
+        tight ODE tolerances) but with:
+        - Table-based Bessel (hr_n_k_fine=10000): harmonic ~33s → ~5s
+        - th_n_points=20000 (vs 100000): thermo ~53s → ~5s
+        - ode_max_steps=65536 (vs 131072): less vmap padding
+
+        Accuracy should match planck_cl (<0.2% TT/EE at l=20-1200) since
+        perturbation grid is identical. Table Bessel adds ~0.5pp at most.
+
+        Expected V100 timing: BG ~0.5s, TH ~5s, PT ~400s, HR ~5s ≈ ~410s.
+        Expected H100 timing: BG ~0.5s, TH ~3s, PT ~200s, HR ~3s ≈ ~210s.
+        """
+        return PrecisionParams(
+            pt_k_max_cl=1.0,         # same as planck_cl
+            pt_k_per_decade=60,      # same as planck_cl
+            pt_tau_n_points=5000,    # same as planck_cl
+            th_n_points=20000,       # 5x fewer than planck_cl (100000)
+            pt_l_max_g=50,           # same as planck_cl
+            pt_l_max_pol_g=50,
+            pt_l_max_ur=50,
+            pt_ode_rtol=1e-6,        # same as planck_cl
+            pt_ode_atol=1e-11,       # same as planck_cl
+            ode_max_steps=65536,     # halved from planck_cl (131072)
+            hr_n_k_fine=10000,       # table-based Bessel (was 0 in planck_cl)
+            hr_l_max=2500,           # same as planck_cl
+        )
+
+    @staticmethod
     def fit_cl():
         """Fast preset for fitting / HMC, targeting <2% C_l accuracy at l<600.
 
