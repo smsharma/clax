@@ -36,6 +36,18 @@ development instructions and conventions.
 - **Design document**: `DESIGN.md` (read this first)
 - **Progress log**: `CHANGELOG.md`
 
+## Current performance (Mar 14, 2026)
+
+Two presets for different use cases:
+
+| Preset | Total (cached) | GPU | Accuracy | Use case |
+|--------|---------------|-----|----------|----------|
+| **fit_cl** | **34s** | V100 | TT/EE < 1.5% at l≤500 | HMC / fitting |
+| planck_cl | ~487s | H100 | TT/EE < 0.2% at l≤2000 | Science-grade |
+
+fit_cl uses 20 k/decade, l_max=17, table-based Bessel (harmonic in 2.4s),
+ncdm_q_size=0, rtol=1e-3, max_steps=1024. Perturbation ODE at ~30s is the floor.
+
 ## Repository
 
 - **GitHub**: https://github.com/smsharma/clax (private)
@@ -68,27 +80,15 @@ strongly recommended. The perturbation vmap over k-modes parallelizes well.
 
 ### Bridges-2 (PSC) — primary
 
-Full instructions in `../BRIDGES2_ACCESS.md` (gitignored). Summary:
+Full instructions: `~/.claude/commands/bridges2.md` (invoke `/bridges2` from any project).
+Also see `../BRIDGES2_ACCESS.md` for project-specific details.
 
-- **V100-32GB, H100-80GB, L40S-48GB** available via SLURM
-- SSH configured as `bridges2` (ControlMaster, no password after initial auth)
-- Interactive GPU via tmux: `ssh bridges2 'tmux send-keys -t gpu "command" Enter'`
-- Read output: `ssh bridges2 'tmux capture-pane -t gpu -p -S -50'`
-- File transfer: `scp file bridges2:/ocean/projects/phy230064p/smishrasharma/`
-- `$PROJECT` = `/ocean/projects/phy230064p/smishrasharma` (1TB, use for everything)
-- ~2,000 SU remaining (1 SU/gpu-hr for V100/L40S, 2 for H100)
-
-### Paperspace P6000 (legacy)
-
-```bash
-ssh paperspace@184.105.5.21
-# Quadro P6000 (24GB VRAM), 8 CPU, 32GB RAM, CUDA 12.2
-# Python/JAX at ~/clax/.venv/
-```
-
-**Known GPU issue**: XLA autotuner fails with l_max=50 on P6000 ("couldn't
-get temp CUBIN file name"). Works with l_max=25. May need to clear /tmp or
-use `XLA_FLAGS=--xla_gpu_autotune_level=0`.
+- **V100-32GB, H100-80GB, L40S-48GB** via SLURM (GPU-shared partition)
+- SSH: `ssh bridges2` (ControlMaster, re-auth: `ssh -fN bridges2`)
+- **Critical**: `CLAUDE_CODE_SKIP_AUTO_UPDATE=1` required in sbatch scripts
+- Bridges-2 repo path: `/ocean/projects/phy230064p/smishrasharma/jaxclass/`
+- `$PROJECT` = `/ocean/projects/phy230064p/smishrasharma` (1TB)
+- ~1,925 SU remaining (1 SU/gpu-hr for V100/L40S, 2 for H100)
 
 ---
 
