@@ -85,10 +85,10 @@ dead_arrow = dict(arrowstyle='-', color='#AA3377', lw=0.4, ls='--')
 # ── Figure ─────────────────────────────────────────────────────────────
 xmax = 128  # ~5.3 days
 fig, ax = plt.subplots(figsize=(7, 3.5))
+fig.patch.set_facecolor('white')
 
-# Day/night shading
-for s, e in [(-1, 16), (24, 40), (48, 64), (72, 88), (96, 112)]:
-    ax.axvspan(s, e, color=bg_day, zorder=0)
+# Day/night shading — use fill_between to stay within axes
+ax.set_facecolor(bg_day)
 for s, e in [(16, 24), (40, 48), (64, 72), (88, 96), (112, xmax)]:
     ax.axvspan(s, e, color=bg_night, zorder=0)
 
@@ -174,6 +174,8 @@ ax.yaxis.set_minor_formatter(mticker.NullFormatter())
 ax.tick_params(axis='y', labelsize=9)
 ax.tick_params(axis='x', labelsize=9)
 
-fig.savefig('figures/accuracy_timeline.pdf', bbox_inches='tight')
-fig.savefig('figures/accuracy_timeline.png', dpi=450, bbox_inches='tight')
+fig.savefig('figures/accuracy_timeline.pdf', bbox_inches='tight', pad_inches=0.25,
+            facecolor='white', edgecolor='none')
+fig.savefig('figures/accuracy_timeline.png', dpi=450, bbox_inches='tight', pad_inches=0.25,
+            facecolor='white', edgecolor='none')
 print("Saved to figures/accuracy_timeline.{pdf,png}")
