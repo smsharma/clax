@@ -120,11 +120,6 @@ for ds, y, txt, ofs in dead_ends:
 # Reference lines
 ax.axhline(1, color='k', ls='--', lw=0.5, alpha=0.4, zorder=1)
 ax.axhline(0.1, color='k', ls=':', lw=0.5, alpha=0.3, zorder=1)
-trans_yr = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-ax.text(0.995, 1.15, r'$1\%$', fontsize=7, color='k', alpha=0.5, va='bottom',
-        ha='right', transform=trans_yr)
-ax.text(0.995, 0.115, r'$0.1\%$', fontsize=7, color='k', alpha=0.5, va='bottom',
-        ha='right', transform=trans_yr)
 
 # Annotations for key milestones
 annots = [
@@ -161,18 +156,23 @@ dead_patch = plt.Line2D([0], [0], marker='X', color='w', markerfacecolor=c_dead,
                         markeredgecolor='white', ms=6, label='Dead end / revert')
 handles, labels = ax.get_legend_handles_labels()
 handles.append(dead_patch)
-ax.legend(handles=handles, loc='upper right', fontsize=8.5,
-          bbox_to_anchor=(1.0, 0.92))
+ax.legend(handles=handles, loc='upper right', fontsize=10)
 
 # Axes
-ax.set_ylabel(r'$|C_\ell^\mathrm{clax}/C_\ell^\mathrm{CLASS} - 1|$ [\%]', fontsize=9)
+ax.set_ylabel(r'$|C_\ell^\mathrm{clax}/C_\ell^\mathrm{CLASS} - 1|$', fontsize=11)
 ax.set_xlim(-1, xmax)
 ax.set_ylim(0.008, 5000)
 ax.set_xticks(day_positions)
 ax.set_xticklabels(day_labels)
 ax.xaxis.set_minor_locator(mticker.MultipleLocator(4))
-ax.tick_params(axis='y', labelsize=8)
-ax.tick_params(axis='x', labelsize=7)
+
+# Custom y-axis tick labels as percentages
+ax.set_yticks([0.01, 0.1, 1, 10, 100, 1000])
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(
+    lambda x, _: f'{x:g}\\%' if x >= 1 else f'{x:g}\\%'))
+ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+ax.tick_params(axis='y', labelsize=9)
+ax.tick_params(axis='x', labelsize=9)
 
 fig.savefig('figures/accuracy_timeline.pdf', bbox_inches='tight')
 fig.savefig('figures/accuracy_timeline.png', dpi=450, bbox_inches='tight')
