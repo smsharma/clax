@@ -1,5 +1,57 @@
 # clax Development Progress
 
+---
+
+## PT Branch (clax-pt): CLASS-PT EFT Power Spectra
+
+Tracks the path to sub-percent accuracy vs CLASS-PT, following the accuracy-convergence
+methodology. Each entry logs implementations, bugs found/fixed, and measured accuracy.
+
+### Current Status (clax-pt branch)
+
+| Component | State | Notes |
+|-----------|-------|-------|
+| FFTLog decomposition | ✅ implemented | NMAX=256, B=-0.3, biased DFT |
+| M22/M13 matrix loading | ✅ implemented + tested | Symmetry bug fixed (see below) |
+| P22 kernel | ✅ implemented | Bilinear zdotu convention |
+| P13 + UV counterterm | ✅ implemented | σ_v² trapezoidal integral |
+| IR resummation | ✅ implemented | DST-II BAO split (scipy), Gaussian fallback |
+| Bias expansion | ✅ implemented | P_mm, P_mg, P_gg (caveats below) |
+| RSD multipoles | ✅ implemented | ℓ=0,2,4 for matter and galaxies |
+| Unit tests | ✅ written | Matrix symmetry, FFTLog, P22 scaling |
+| **Accuracy vs CLASS-PT** | ⏳ blocked | classy not installed |
+
+**Blocker**: `classy` Python wrapper not installed → cannot generate reference spectra.
+**Next**: `pip install classy` or run CLASS-PT C binary to dump P_loop(k) for comparison.
+
+### PT Bugs Found and Fixed
+
+| # | Bug | Root Cause | Fix |
+|---|-----|------------|-----|
+| 1 | M22 Hermitian vs symmetric | `_load_complex_triangular` used `M[j,i] = tri[idx].conj()` — M22 is **symmetric** (CLASS-PT `zdotu` bilinear), not Hermitian | Changed to `M[j,i] = tri[idx]` (ept.py line 114) |
+
+**Why this matters**: A Hermitian fill spuriously conjugates off-diagonal entries in
+the bilinear form `x^T M22 x`, producing wrong P22. The correct convention is
+`I(η₁,η₂) = I(η₂,η₁)` (symmetric) because F2 kernel is symmetric in its arguments.
+
+### PT Accuracy Table (TBD — blocked on classy)
+
+| Observable | k range [h/Mpc] | Max |ΔP/P| | Target |
+|------------|----------------|------------|--------|
+| P_mm(k)   | 0.01 – 0.30    | TBD        | < 1%   |
+| P_gg(k)   | 0.01 – 0.30    | TBD        | < 1%   |
+| P_mg(k)   | 0.01 – 0.30    | TBD        | < 1%   |
+| P_mm ℓ=0 | 0.01 – 0.25    | TBD        | < 1%   |
+
+### PT Known Caveats
+
+1. Some bias cross-spectra (`Pk_Id2`, `Pk_IG2`, etc.) use approximate quadratic
+   forms rather than exact CLASS-PT `zspmv` calls — needs validation.
+2. Σ_BAO cutoff uses 0.25 h/Mpc; CLASS-PT uses 0.2 h/Mpc — small (~few%) effect.
+3. σ_v² integration over FFTLog grid rather than fine CLASS-PT grid — ~0.1% error.
+
+---
+
 ## Status: Speed-optimized fit_cl preset (34s V100) + full accuracy pipeline
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
