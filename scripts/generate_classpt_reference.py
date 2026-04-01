@@ -109,36 +109,36 @@ def generate_classpt_reference():
         # Matter spectra
         b = BIAS_PARAMS
         cosmo.initialize_output(k_h,z,len(k_h))
-        pk_mm_real = np.array([cosmo.pk_mm_real(b['cs'])])
+        pk_mm_real = np.asarray(cosmo.pk_mm_real(b['cs']))
 
         # Galaxy spectra at fiducial bias
-        pk_gg_real = np.array([
+        pk_gg_real = np.asarray(
             cosmo.pk_gg_real(b['b1'], b['b2'], b['bG2'], b['bGamma3'],
                              b['cs'], b['cs0'], b['Pshot'])
-        ])
-        pk_gm_real = np.array([
+        )
+        pk_gm_real = np.asarray(
             cosmo.pk_gm_real(b['b1'], b['b2'], b['bG2'], b['bGamma3'],
                              b['cs'], b['cs0'])
-        ])
+        )
 
         # RSD multipoles — matter
-        pk_mm_l0 = np.array([cosmo.pk_mm_l0(b['cs0'])])
-        pk_mm_l2 = np.array([cosmo.pk_mm_l2(b['cs2'])])
-        pk_mm_l4 = np.array([cosmo.pk_mm_l4(b['cs4'])])
+        pk_mm_l0 = np.asarray(cosmo.pk_mm_l0(b['cs0']))
+        pk_mm_l2 = np.asarray(cosmo.pk_mm_l2(b['cs2']))
+        pk_mm_l4 = np.asarray(cosmo.pk_mm_l4(b['cs4']))
 
         # RSD multipoles — galaxy
-        pk_gg_l0 = np.array([
+        pk_gg_l0 = np.asarray(
             cosmo.pk_gg_l0(b['b1'], b['b2'], b['bG2'], b['bGamma3'],
                            b['cs0'], b['Pshot'], b['b4'])
-        ])
-        pk_gg_l2 = np.array([
+        )
+        pk_gg_l2 = np.asarray(
             cosmo.pk_gg_l2(b['b1'], b['b2'], b['bG2'], b['bGamma3'],
                            b['cs2'], b['b4'])
-        ])
-        pk_gg_l4 = np.array([
+        )
+        pk_gg_l4 = np.asarray(
             cosmo.pk_gg_l4(b['b1'], b['b2'], b['bG2'], b['bGamma3'],
                            b['cs4'], b['b4'])
-        ])
+        )
 
         # Also save raw linear P(k) at this z
         pk_lin = np.array([cosmo.pk_lin(k / h, z) * h**3 for k in k_h])

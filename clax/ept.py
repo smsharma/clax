@@ -48,8 +48,8 @@ NMAX_EPT: int = 256
 B_MATTER: float = -0.3     # FFTLog bias for matter power spectrum (M22/M13)
 B_TRANSFER: float = -0.8   # FFTLog bias for transfer functions
 B_BASIC: float = -1.6      # FFTLog bias for M22basic (bias spectra; b2=-1.6 in CLASS-PT line 11789)
-KMIN_H: float = 0.0005    # k_min in h/Mpc  (CLASS-PT default)
-KMAX_H: float = 40.0      # k_max in h/Mpc  (CLASS-PT default)
+KMIN_H: float = 0.00005   # k_min in h/Mpc  — CLASS-PT nonlinear_pt.c:5066: kmin = 0.00005*h
+KMAX_H: float = 100.0     # k_max in h/Mpc  — CLASS-PT nonlinear_pt.c:5067: kmax = 100.*h
 CUTOFF: float = 10.0       # UV cutoff k_cut [h/Mpc] for P22 (exp(-(k/k_cut)^6))
 
 # Path to CLASS-PT matrix files.
