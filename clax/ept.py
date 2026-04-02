@@ -50,7 +50,7 @@ B_TRANSFER: float = -0.8   # FFTLog bias for transfer functions
 B_BASIC: float = -1.6      # FFTLog bias for M22basic (bias spectra; b2=-1.6 in CLASS-PT line 11789)
 KMIN_H: float = 0.00005   # k_min in h/Mpc  — CLASS-PT nonlinear_pt.c:5066: kmin = 0.00005*h
 KMAX_H: float = 100.0     # k_max in h/Mpc  — CLASS-PT nonlinear_pt.c:5067: kmax = 100.*h
-CUTOFF: float = 10.0       # UV cutoff k_cut [h/Mpc] for P22 (exp(-(k/k_cut)^6))
+CUTOFF: float = 3.0        # UV cutoff k_cut [h/Mpc] — CLASS-PT nonlinear_pt.c:5976: cutoff = 3.*h
 
 # Path to CLASS-PT matrix files.
 # Try ../CLASS-PT relative to the repo root first (HPC layout where CLASS-PT
@@ -101,9 +101,17 @@ def _load_complex_vector(filepath: str, n: int) -> np.ndarray:
 def _load_complex_triangular(filepath: str, n: int) -> np.ndarray:
     """Load n(n+1)/2 complex numbers from CLASS-PT ASCII file (packed triangular).
 
-    Then unpack to full n×n Hermitian matrix.
+    Then unpack to full n×n symmetric matrix.
     Format: first n(n+1)/2 lines real, then n(n+1)/2 lines imaginary.
-    Mirrors: nonlinear_pt.c load_M22 section (LAPACK lower-triangular packed).
+
+    The file uses LAPACK-style column-major lower-triangular packing (UPLO='L'),
+    matching the CLASS-PT zspmv_ call. Column j stores rows i = j, j+1, ..., n-1.
+    The index of element M[i,j] (i >= j) in the packed array is:
+        k = j*n - j*(j-1)//2 + (i-j)  (equivalently: i + j*(2n-1-j)//2)
+    This is confirmed by the matrix generation script (matrix_gen-matter.py line:
+        mout_red[i + (2*(Nmax+1)-1-j)*j//2] = m12mat[i][j])
+
+    Mirrors: nonlinear_pt.c load_M22 section + LAPACK zspmv_ UPLO='L' convention.
     """
     n_tri = n * (n + 1) // 2
     data = np.loadtxt(filepath)
@@ -112,12 +120,13 @@ def _load_complex_triangular(filepath: str, n: int) -> np.ndarray:
     )
     tri = data[:n_tri] + 1j * data[n_tri:]
 
-    # Unpack lower-triangular packed (row-major) to full symmetric matrix.
-    # Lower triangular packed: index k stores M[i,j] with i>=j, k = i*(i+1)/2 + j.
+    # Unpack LAPACK UPLO='L' column-major lower-triangular packed to full symmetric matrix.
+    # Column j stores rows i = j, j+1, ..., n-1; index k = j*n - j*(j-1)//2 + (i-j).
+    # Confirmed by diag_m22_packing.py: zspmv_ UPLO='L' matches this packing exactly.
     M = np.zeros((n, n), dtype=complex)
     idx = 0
-    for i in range(n):
-        for j in range(i + 1):
+    for j in range(n):
+        for i in range(j, n):
             M[i, j] = tri[idx]
             M[j, i] = tri[idx]  # symmetric: M22 uses zdotu (bilinear), not zdotc
             idx += 1
@@ -410,16 +419,18 @@ def _compute_p13(
     pk_disc: Float[Array, "Nk"],
     M13: Complex[Array, "Nmax+1"],
     lnk: Float[Array, "Nk"],
+    cutoff_h: float,
 ) -> Float[Array, "Nk"]:
     """Compute P13(k) via vector dot product + UV renormalization.
 
     P13_raw(k_j) = Re{ k_j³ × (x_j · M13) × P_lin(k_j) }
     P13_UV(k_j)  = -(61/105) σ_v² k_j² P_lin(k_j)   [UV subtraction]
-    P13(k_j)     = P13_raw + P13_UV
+    P13(k_j)     = (P13_raw + P13_UV) × exp[-(k_j/k_cut)⁶]
 
     where σ_v² = (1/6π²) ∫ dk P_lin(k) is the 1D velocity dispersion.
+    UV damping matches P22 (k_cut = 3 h/Mpc).
 
-    Mirrors: nonlinear_pt.c lines 6068–6079 (zdotu + sigma_v UV term).
+    Mirrors: nonlinear_pt.c lines 6068–6079 (zdotu + sigma_v UV term + exp damping).
     """
     # f13[j] = sum_m x[j,m] * M13[m]  (bilinear dot product)
     f13 = jnp.sum(x * M13[None, :], axis=-1)  # (Nk,) complex
@@ -431,7 +442,9 @@ def _compute_p13(
     sigma2_v = jnp.trapezoid(integrand, lnk) / (6.0 * jnp.pi ** 2)
     P13_UV = -(61.0 / 105.0) * sigma2_v * k ** 2 * pk_disc
 
-    return P13_raw + P13_UV
+    # UV damping (same cutoff as P22; cf. nonlinear_pt.c line 6068-6078)
+    uv_damp = jnp.exp(-(k / cutoff_h) ** 6)
+    return (P13_raw + P13_UV) * uv_damp
 
 
 # ---------------------------------------------------------------------------
@@ -908,7 +921,7 @@ def compute_ept(
 
     # --- P22 and P13 ---
     Pk_P22 = _compute_p22(x, k_h, M22, cutoff_h)
-    Pk_P13 = _compute_p13(x, k_h, pk_resummed, M13, lnk)
+    Pk_P13 = _compute_p13(x, k_h, pk_resummed, M13, lnk, cutoff_h)
     Pk_loop = Pk_P13 + Pk_P22
 
     # --- Counterterm basis: P_CTR = -k² P_lin ---
