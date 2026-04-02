@@ -98,12 +98,21 @@ def _load_complex_vector(filepath: str, n: int) -> np.ndarray:
     return data[:n] + 1j * data[n:]
 
 
-def _load_complex_triangular(filepath: str, n: int) -> np.ndarray:
-    """Load n(n+1)/2 complex numbers from CLASS-PT ASCII file (packed triangular).
+def _load_complex_triangular_lapack_l(filepath: str, n: int) -> np.ndarray:
+    """Load LAPACK-packed lower-triangular matrix from CLASS-PT ASCII file.
 
-    Then unpack to full n×n Hermitian matrix.
-    Format: first n(n+1)/2 lines real, then n(n+1)/2 lines imaginary.
-    Mirrors: nonlinear_pt.c load_M22 section (LAPACK lower-triangular packed).
+    The _packed.dat files store the matrix in LAPACK 'L' (lower triangular,
+    column-major) packed format, as used by zspmv in nonlinear_pt.c line 6099.
+
+    LAPACK 'L' column-major packed storage: column j (0-indexed) stores
+    A(j,j), A(j+1,j), ..., A(n-1,j). Position of A(i,j) for i >= j is:
+      idx = j*n - j*(j-1)//2 + (i-j)
+
+    This is confirmed by nonlinear_pt.c line 2412:
+      M22_oneline_complex[count] = re[count] + I * im[count + n_tri]
+    with count running linearly over the packed storage (column-major).
+
+    Mirrors: nonlinear_pt.c M22 loading for N=256 (_packed.dat files).
     """
     n_tri = n * (n + 1) // 2
     data = np.loadtxt(filepath)
@@ -112,21 +121,25 @@ def _load_complex_triangular(filepath: str, n: int) -> np.ndarray:
     )
     tri = data[:n_tri] + 1j * data[n_tri:]
 
-    # Unpack lower-triangular packed (row-major) to full symmetric matrix.
-    # Lower triangular packed: index k stores M[i,j] with i>=j, k = i*(i+1)/2 + j.
+    # Unpack LAPACK 'L' column-major lower triangular to full symmetric matrix.
+    # Column j: A(j,j), A(j+1,j), ..., A(n-1,j) stored at j*n-j*(j-1)//2 + (i-j).
     M = np.zeros((n, n), dtype=complex)
-    idx = 0
-    for i in range(n):
-        for j in range(i + 1):
-            M[i, j] = tri[idx]
-            M[j, i] = tri[idx]  # symmetric: M22 uses zdotu (bilinear), not zdotc
-            idx += 1
+    for j in range(n):
+        start_j = j * n - j * (j - 1) // 2
+        for i in range(j, n):
+            val = tri[start_j + (i - j)]
+            M[i, j] = val
+            M[j, i] = val  # symmetric (M22 uses zdotu bilinear form, not zdotc)
     return M
 
 
 @lru_cache(maxsize=4)
 def _load_matrices(nmax: int) -> dict:
     """Load all CLASS-PT kernel matrices for the given N_max.
+
+    For N=256, CLASS-PT uses _packed.dat files in LAPACK 'L' column-major
+    lower-triangular packed format (cf. nonlinear_pt.c line 980, 982).
+    For other N, non-packed files use row-major lower-triangular packing.
 
     Returns a dict with keys:
       M13   : (nmax+1,) complex  — P13 kernel (matter)
@@ -139,15 +152,36 @@ def _load_matrices(nmax: int) -> dict:
     def mat_path(name):
         return os.path.join(_MATRIX_DIR, name)
 
+    # Check for _packed.dat files (N=256 in CLASS-PT uses these)
+    packed_m22 = mat_path(f"M22oneline_N{nmax}_packed.dat")
+    packed_m22b = mat_path(f"M22basiconeline_N{nmax}_packed.dat")
+    use_packed = os.path.exists(packed_m22)
+
+    if use_packed:
+        m22 = _load_complex_triangular_lapack_l(packed_m22, n)
+        m22b = _load_complex_triangular_lapack_l(packed_m22b, n)
+    else:
+        # Non-packed files: row-major lower triangular
+        def _load_rm(path):
+            n_tri = n * (n + 1) // 2
+            data = np.loadtxt(path)
+            tri = data[:n_tri] + 1j * data[n_tri:]
+            M = np.zeros((n, n), dtype=complex)
+            idx = 0
+            for i in range(n):
+                for j in range(i + 1):
+                    M[i, j] = tri[idx]; M[j, i] = tri[idx]; idx += 1
+            return M
+        m22 = _load_rm(mat_path(f"M22oneline_N{nmax}.dat"))
+        m22b = _load_rm(mat_path(f"M22basiconeline_N{nmax}.dat"))
+
     return {
         "M13":  _load_complex_vector(
             mat_path(f"M13oneline_N{nmax}.dat"), n),
         "IFG2": _load_complex_vector(
             mat_path(f"IFG2oneline_N{nmax}.dat"), n),
-        "M22":  _load_complex_triangular(
-            mat_path(f"M22oneline_N{nmax}.dat"), n),
-        "M22b": _load_complex_triangular(
-            mat_path(f"M22basiconeline_N{nmax}.dat"), n),
+        "M22":  m22,
+        "M22b": m22b,
     }
 
 
@@ -441,18 +475,34 @@ def _compute_p13(
 def _ir_resummation_numpy(
     pk_lin_h: np.ndarray,
     k_h: np.ndarray,
+    rs_h: float = 99.0,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Separate linear P(k) into no-wiggle and wiggle components.
 
     Uses Discrete Sine Transform II (DST-II) to identify and remove the
     BAO oscillation band, then reconstructs P_nw. The Σ_BAO² damping
-    scale is computed from P_nw.
+    scale is computed from P_nw using the CLASS-PT filter formula.
 
     Mirrors: nonlinear_pt.c lines 5315–5776 (DST-based BAO extraction).
+
+    CRITICAL: CLASS-PT uses a LINEAR k-grid (not log-spaced) for the DST.
+    Modes 120–240 of a linear-k DST target k-space oscillation periods
+    of (k_max-k_min)/120 to (k_max-k_min)/240 ≈ 0.08–0.04 h/Mpc, which
+    brackets the BAO period 2π/r_s ≈ 0.06 h/Mpc. On a log-k grid those
+    modes map to entirely different scales, giving wrong P_nw.
+
+    For k outside [k_min2, k_max2], CLASS-PT sets P_nw = P_lin and P_w = 0.
+    cf. nonlinear_pt.c lines 5739–5748.
+
+    The Σ_BAO² formula uses a spherical Bessel j_2 filter to suppress
+    the contribution of modes below the BAO scale:
+      Σ_BAO² = (1/6π²) ∫₀^{ks} P_nw(q) × [1 - 3j₁(qr)/qr + ...] × q d(ln q)
+    cf. nonlinear_pt.c lines 5605–5640 (IntegrandBAO).
 
     Args:
         pk_lin_h: P_lin(k) in (Mpc/h)³, shape (N,)
         k_h:      k in h/Mpc, shape (N,)
+        rs_h:     BAO sound horizon at drag epoch in Mpc/h (default 99.0 Mpc/h)
 
     Returns:
         pk_nw:   no-wiggle (broadband) P(k), same shape as input
@@ -461,50 +511,73 @@ def _ir_resummation_numpy(
     """
     try:
         from scipy.fft import dst, idst
-        from scipy.interpolate import CubicSpline
     except ImportError:
-        # Fallback: Gaussian smoothing (less accurate but no scipy needed)
         return _ir_resummation_gaussian(pk_lin_h, k_h)
 
-    # Fine grid for DST
+    # LINEAR k-grid: CLASS-PT uses kmin2=0.00007 1/Mpc ≈ 1e-4 h/Mpc,
+    # kmax2=7 1/Mpc ≈ 10 h/Mpc (for h≈0.67).
+    # cf. nonlinear_pt.c:5322-5323 (hardcoded 0.00007 and 7 in 1/Mpc)
     N_IR = 65536
-    k_min2 = 7e-5   # h/Mpc
-    k_max2 = 7.0    # h/Mpc
-    k_ir = np.logspace(np.log10(k_min2), np.log10(k_max2), N_IR)
+    k_min2 = 1e-4   # h/Mpc
+    k_max2 = 10.0   # h/Mpc
+    k_ir = np.linspace(k_min2, k_max2, N_IR)
 
-    # Interpolate P_lin to fine grid
+    # Interpolate P_lin to the linear grid (log-log interpolation)
     log_k_in = np.log(k_h)
-    log_k_ir = np.log(k_ir)
     log_pk_in = np.log(np.clip(pk_lin_h, 1e-300, None))
-    pk_ir = np.exp(np.interp(log_k_ir, log_k_in, log_pk_in))
+    pk_ir = np.exp(np.interp(np.log(k_ir), log_k_in, log_pk_in))
 
-    # DST-II of log(k P(k))
+    # DST-II of log(k P(k)) — forward transform
     f_ir = np.log(k_ir * pk_ir)
     f_dst = dst(f_ir, type=2, norm="ortho")
 
-    # Zero out BAO bump: indices [N_left, N_right) in DST space
+    # Remove BAO modes 120–240 by linear interpolation across the gap.
+    # CLASS-PT uses spline interpolation (cmodd/cmeven separately).
+    # Linear interpolation is simpler and nearly as accurate.
+    # cf. nonlinear_pt.c:5418 (Nleft=120, Nright=240)
     N_left  = 120
     N_right = 240
     f_dst_nw = f_dst.copy()
-    f_dst_nw[N_left:N_right] = 0.0
+    f_dst_nw[N_left:N_right] = np.interp(
+        np.arange(N_left, N_right),
+        [N_left - 1, N_right],
+        [f_dst[N_left - 1], f_dst[N_right]],
+    )
 
-    # Inverse DST-III to reconstruct log(k P_nw)
-    f_nw_ir = idst(f_dst_nw, type=3, norm="ortho")
+    # Inverse DST-II to recover log(k P_nw) on linear grid
+    f_nw_ir = idst(f_dst_nw, type=2, norm="ortho")
     pk_nw_ir = np.exp(f_nw_ir) / k_ir
 
-    # Interpolate P_nw back to input k-grid
-    log_pnw_ir = np.log(np.clip(pk_nw_ir, 1e-300, None))
-    pk_nw = np.exp(np.interp(log_k_in, log_k_ir, log_pnw_ir))
-    pk_w  = pk_lin_h - pk_nw
+    # Map back to input k-grid; outside [k_min2, k_max2] set Pnw = Plin
+    pk_nw = pk_lin_h.copy()
+    in_range = (k_h >= k_min2) & (k_h <= k_max2)
+    if in_range.sum() > 1:
+        pk_nw[in_range] = np.exp(
+            np.interp(
+                np.log(k_h[in_range]),
+                np.log(k_ir),
+                np.log(np.clip(pk_nw_ir, 1e-300, None)),
+            )
+        )
+    pk_w = pk_lin_h - pk_nw
 
-    # Compute Σ_BAO² = (1/6π²) ∫_{0}^{k_IR} dk P_nw(k)
-    k_sigma_max = 0.25  # h/Mpc, integration cutoff for Σ_BAO
-    mask = k_h <= k_sigma_max
-    if mask.sum() > 2:
-        dlnk = np.diff(np.log(k_h[mask]))
-        sigma2_bao = np.trapz(pk_nw[mask] * k_h[mask], np.log(k_h[mask])) / (6.0 * np.pi ** 2)
-    else:
-        sigma2_bao = np.trapz(pk_nw * k_h, np.log(k_h)) / (6.0 * np.pi ** 2)
+    # Σ_BAO² with CLASS-PT j₂-filter formula, integrating up to ks=0.2 h/Mpc.
+    # IntegrandBAO = P_nw × [1 - 3sin(qr)/(qr) + 6(sin(qr)/(qr)³ - cos(qr)/(qr)²)]
+    # cf. nonlinear_pt.c:5614: ks = 0.2 * pba->h = 0.2 h/Mpc
+    k_s = 0.2  # h/Mpc
+    k_int = np.geomspace(k_min2, k_s, 1000)
+    pk_nw_int = np.exp(
+        np.interp(np.log(k_int), np.log(k_ir), np.log(np.clip(pk_nw_ir, 1e-300, None)))
+    )
+    x_bao = k_int * rs_h
+    bao_filter = (
+        1.0
+        - 3.0 * np.sin(x_bao) / x_bao
+        + 6.0 * (np.sin(x_bao) / x_bao ** 3 - np.cos(x_bao) / x_bao ** 2)
+    )
+    sigma2_bao = (
+        np.trapz(pk_nw_int * bao_filter * k_int, np.log(k_int)) / (6.0 * np.pi ** 2)
+    )
 
     return pk_nw, pk_w, float(sigma2_bao)
 
