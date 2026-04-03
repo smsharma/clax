@@ -956,6 +956,7 @@ def compute_ept(
     h: float,
     f: float,
     prec: EPTPrecisionParams = EPTPrecisionParams(),
+    _ir_precomputed: Optional[tuple] = None,
 ) -> EPTComponents:
     """Compute all EPT spectral components from linear P(k).
 
@@ -970,6 +971,25 @@ def compute_ept(
         h:        Hubble parameter h = H₀/100
         f:        growth rate f = d ln D / d ln a at the target redshift
         prec:     EPT precision parameters (static)
+        _ir_precomputed: optional tuple (pk_nw_np, pk_w_np, sigma2_bao) from
+                  _ir_resummation_numpy(), pre-computed outside the JAX trace.
+                  When provided, only pk_nw_np and sigma2_bao are used; the
+                  wiggle component is recomputed as pk_w = pk_lin_h - pk_nw
+                  (JAX-traced), so that gradients flow:
+                    pk_resummed = pk_nw + (pk_lin_h - pk_nw) * exp(-Σ²k²)
+                                = pk_lin_h × exp(-Σ²k²) + pk_nw × (1 - exp(-Σ²k²))
+                  Use this to enable jax.grad() through the IR resummation path:
+
+                      pk_nw_np, pk_w_np, sigma2 = _ir_resummation_numpy(pk_lin_np, k_np)
+                      def f(pk_lin):
+                          return compute_ept(pk_lin, k_ept, h=h, f=f,
+                                             _ir_precomputed=(pk_nw_np, pk_w_np, sigma2))
+                      grad = jax.grad(f)(pk_lin_ept)  # works!
+
+                  Physically correct: the no-wiggle template pk_nw is a property
+                  of the broadband shape at fixed cosmology. For a perturbation
+                  δpk around the fiducial, the wiggle component changes as
+                  δpk_w = δpk_lin, and the resummed spectrum damps it by exp(-Σ²k²).
 
     Returns:
         EPTComponents with all spectral arrays on the EPT k-grid
@@ -996,8 +1016,29 @@ def compute_ept(
 
     lnk = jnp.log(k_h)
 
-    # --- IR resummation (numpy preprocessing, not JAX-differentiable) ---
-    if prec.ir_resummation:
+    # --- IR resummation ---
+    if _ir_precomputed is not None:
+        # Use caller-supplied precomputed decomposition (enables jax.grad).
+        # pk_nw_np is fixed (not traced); pk_w is derived from pk_lin_h so that
+        # gradients flow through pk_lin_h → pk_w → pk_resummed → P13/P22.
+        #
+        # KEY: pk_w = pk_lin_h - pk_nw  (JAX-traced, depends on pk_lin_h)
+        # pk_resummed = pk_nw + pk_w × exp(-Σ²k²)
+        #             = pk_nw × (1-exp(-Σ²k²)) + pk_lin_h × exp(-Σ²k²)
+        # This is linear in pk_lin_h, so d(pk_resummed)/d(pk_lin_h) = exp(-Σ²k²) ≠ 0.
+        pk_nw_np, _pk_w_np_unused, sigma2_bao = _ir_precomputed
+        pk_nw = jnp.array(pk_nw_np)
+        # pk_w is traced: wiggle component = full spectrum minus no-wiggle
+        pk_w  = pk_lin_h - pk_nw
+        damp = jnp.exp(-sigma2_bao * k_h ** 2)
+        # IR-resummed linear spectrum (input to FFTLog)
+        pk_resummed = pk_nw + pk_w * damp
+        # Tree-level spectrum (slightly different from resummed; includes extra term)
+        # cf. CLASS-PT: Ptree = Pnw + Pw × exp(-Σ²k²)(1 + Σ²k²)
+        Pk_tree = pk_nw + pk_w * damp * (1.0 + sigma2_bao * k_h ** 2)
+    elif prec.ir_resummation:
+        # Default path: call NumPy IR resummation (NOT differentiable through pk_lin_h).
+        # Use _ir_precomputed to enable gradients.
         pk_nw_np, pk_w_np, sigma2_bao = _ir_resummation_numpy(
             np.array(pk_lin_h), np.array(k_h)
         )
