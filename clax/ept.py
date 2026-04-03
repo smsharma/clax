@@ -445,7 +445,7 @@ def _compute_p13(
     pk_disc: Float[Array, "Nk"],
     M13: Complex[Array, "Nmax+1"],
     lnk: Float[Array, "Nk"],
-    cutoff_h: float,
+    cutoff_h: float = CUTOFF,
 ) -> Float[Array, "Nk"]:
     """Compute P13(k) via vector dot product + UV renormalization.
 
