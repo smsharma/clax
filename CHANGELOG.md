@@ -15,39 +15,38 @@ methodology. Each entry logs implementations, bugs found/fixed, and measured acc
 | M22/M13 matrix loading | ✅ implemented + tested | Symmetry bug fixed (see below) |
 | P22 kernel | ✅ implemented | Bilinear zdotu convention |
 | P13 + UV counterterm | ✅ implemented | σ_v² trapezoidal integral |
-| IR resummation | ✅ implemented | DST-II BAO split (scipy), Gaussian fallback |
+| IR resummation | ✅ implemented + accurate | Linear k-grid DST, odd/even spline mode removal, j₂ sigma_BAO |
 | Bias expansion | ✅ implemented | P_mm, P_mg, P_gg (caveats below) |
 | RSD multipoles | ✅ implemented | ℓ=0,2,4 for matter and galaxies |
 | Unit tests | ✅ written | Matrix symmetry, FFTLog, P22 scaling |
-| **Accuracy vs CLASS-PT** | ⏳ blocked | classy not installed |
-
-**Blocker**: `classy` Python wrapper not installed → cannot generate reference spectra.
-**Next**: `pip install classy` or run CLASS-PT C binary to dump P_loop(k) for comparison.
+| **Accuracy vs CLASS-PT** | ✅ verified | P_mm max 0.45%, RMS 0.13% at k<0.3 h/Mpc |
 
 ### PT Bugs Found and Fixed
 
 | # | Bug | Root Cause | Fix |
 |---|-----|------------|-----|
 | 1 | M22 Hermitian vs symmetric | `_load_complex_triangular` used `M[j,i] = tri[idx].conj()` — M22 is **symmetric** (CLASS-PT `zdotu` bilinear), not Hermitian | Changed to `M[j,i] = tri[idx]` (ept.py line 114) |
+| 2 | M22 wrong packed format | `M22oneline_N256_packed.dat` uses LAPACK 'L' column-major, not row-major. Wrong formula gave nonsense P22 | New `_load_complex_triangular_lapack_l`: `start_j = j*n - j*(j-1)//2` |
+| 3 | IR resummation log k-grid | Used `np.logspace` for DST grid → BAO modes 120-240 map to wrong scales; P13_UV σ_v ≈ 1686 instead of ~23 | Linear k-grid `np.linspace(1e-4, 10, 65536)`, matching CLASS-PT kmin2/kmax2 |
+| 4 | IR resummation linear mode interp | Linear interpolation across DST modes 120-240 gave P_mm err 1.54% | Odd/even spline: split DST into even/odd indexed arrays, natural cubic spline each |
 
-**Why this matters**: A Hermitian fill spuriously conjugates off-diagonal entries in
-the bilinear form `x^T M22 x`, producing wrong P22. The correct convention is
-`I(η₁,η₂) = I(η₂,η₁)` (symmetric) because F2 kernel is symmetric in its arguments.
+### PT Accuracy Table (Planck 2018 fiducial, z=0.38)
 
-### PT Accuracy Table (TBD — blocked on classy)
-
-| Observable | k range [h/Mpc] | Max |ΔP/P| | Target |
-|------------|----------------|------------|--------|
-| P_mm(k)   | 0.01 – 0.30    | TBD        | < 1%   |
-| P_gg(k)   | 0.01 – 0.30    | TBD        | < 1%   |
-| P_mg(k)   | 0.01 – 0.30    | TBD        | < 1%   |
-| P_mm ℓ=0 | 0.01 – 0.25    | TBD        | < 1%   |
+| Observable | k range [h/Mpc] | Max |ΔP/P| | RMS |ΔP/P| | Target |
+|------------|----------------|------------|------------|--------|
+| P_mm(k)   | 0.005 – 0.30   | 0.45%      | 0.13%      | ✅ < 1% |
+| P_gg(k)   | 0.005 – 0.30   | TBD        | TBD        | < 1%   |
+| P_mg(k)   | 0.005 – 0.30   | TBD        | TBD        | < 1%   |
+| P_mm ℓ=0 | 0.005 – 0.25   | TBD        | TBD        | < 1%   |
 
 ### PT Known Caveats
 
 1. Some bias cross-spectra (`Pk_Id2`, `Pk_IG2`, etc.) use approximate quadratic
    forms rather than exact CLASS-PT `zspmv` calls — needs validation.
-2. Σ_BAO cutoff uses 0.25 h/Mpc; CLASS-PT uses 0.2 h/Mpc — small (~few%) effect.
+2. `rs_h` default = 99.0 Mpc/h hardcoded; should come from thermodynamics background.
+   Actual Planck 2018 value: 99.09 Mpc/h. Effect on sigma_BAO: <0.1%.
+3. σ_v and sigma_BAO confirmed: CLASS-PT full k-range sigma_v = 23.44 (Mpc/h)²,
+   matching our computation. Not a source of error.
 3. σ_v² integration over FFTLog grid rather than fine CLASS-PT grid — ~0.1% error.
 
 ---
