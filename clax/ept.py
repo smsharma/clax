@@ -801,7 +801,9 @@ def _compute_bias_spectra(
     # nu1=-0.5*etam[i], nu2=-0.5*etam[l], nu12=nu1+nu2 (b=-0.3 matter basis)
     # Common denominator D = 98 nu1 nu2 nu12² - 91 nu12² + 36 nu1 nu2
     #                         - 14 nu1 nu2 nu12 + 3 nu12 + 58
-    # From CLASS-PT lines 6647, 6928, 7159, 7275
+    # From CLASS-PT nonlinear_pt.c lines 6647, 6928, 7054, 7159, 7275,
+    #   7395, 7506, 7618, 7739 (M22 kernels) and 6820, 6960, 7083,
+    #   7201, 7313, 7433, 7544, 7657 (M13 kernels).
     # ===========================================================
     nu_i  = -0.5 * etam[jnp.newaxis, :]   # (1, Nmax+1) complex
     nu_l  = -0.5 * etam[:, jnp.newaxis]   # (Nmax+1, 1) complex
@@ -814,7 +816,7 @@ def _compute_bias_spectra(
                 + 3 * nu12 + 58)
     D_inv = 196.0 / D_matter  # 196 / D  (combines with M22's own factor)
 
-    # N_dd, N_vd, N_vv polynomials (from CLASS-PT monopole vv kernel, line 6647)
+    # Shared polynomials used in multiple kernels
     N_dd = (50 - 9*nu2 + 98*nu1**3*nu2 - 35*nu2**2
             + 7*nu1**2*(-5 - 18*nu2 + 28*nu2**2)
             + nu1*(-9 - 66*nu2 - 126*nu2**2 + 98*nu2**3))
@@ -826,7 +828,7 @@ def _compute_bias_spectra(
             + 5*nu1**2*(-3 - 10*nu2 + 14*nu2**2)
             + nu1*(-8 - 24*nu2 - 50*nu2**2 + 35*nu2**3))
 
-    # M22 monopole kernels (matter; CLASS-PT lines 6647, 6928)
+    # --- M22 monopole kernels (lines 6647, 6928, 7054) ---
     k_0_vv = D_inv * f**2 * (14*f**2*N_vv + 18*f*N_vd + 9*N_dd) / 8820.0
     M22_0_vv = M22 * k_0_vv
 
@@ -834,16 +836,31 @@ def _compute_bias_spectra(
              + 2*nu1**3*(1 + 5*nu2)
              + 2*nu1**2*(-5 - 2*nu2 + 10*nu2**2)
              + nu1*(3 - 24*nu2 - 4*nu2**2 + 10*nu2**3))
-    N_vd2 = (18 + 11*nu2 + 42*nu1**3*nu2 - 31*nu2**2
-             + nu1**2*(-31 - 22*nu2 + 84*nu2**2)
-             + nu1*(11 - 74*nu2 - 22*nu2**2 + 42*nu2**3))
-    k_0_vd = D_inv * f * (21*f**2*N_vd3 + 14*f*N_vd2 + 5*N_dd) / 1470.0
+    N_vd2_0 = (18 + 11*nu2 + 42*nu1**3*nu2 - 31*nu2**2
+               + nu1**2*(-31 - 22*nu2 + 84*nu2**2)
+               + nu1*(11 - 74*nu2 - 22*nu2**2 + 42*nu2**3))
+    # M22_0_vd: cf. nonlinear_pt.c line 6928 — note 5*N_dd2 where N_dd2 is different!
+    N_dd2_0 = (46 + 13*nu2 + 98*nu1**3*nu2 - 63*nu2**2
+               + 7*nu1**2*(-9 - 10*nu2 + 28*nu2**2)
+               + nu1*(13 - 138*nu2 - 70*nu2**2 + 98*nu2**3))
+    k_0_vd = D_inv * f * (21*f**2*N_vd3 + 14*f*N_vd2_0 + 5*N_dd2_0) / 1470.0
     M22_0_vd = M22 * k_0_vd
 
-    # M22 monopole dd: standard matter P22 (no extra μ factors in dd)
-    M22_0_dd = M22
+    # M22_0_dd: cf. nonlinear_pt.c line 7054
+    N_dd2_0dd = (4 - 2*nu2 - 5*nu2**2 + nu2**3
+                 + nu1**3*(1 + 3*nu2)
+                 + nu1**2*(-5 + 2*nu2 + 6*nu2**2)
+                 + nu1*(-2 - 4*nu2 + 2*nu2**2 + 3*nu2**3))
+    N_dd3_0dd = (10 - nu2 + 14*nu1**3*nu2 - 17*nu2**2
+                 + nu1**2*(-17 + 6*nu2 + 28*nu2**2)
+                 + nu1*(-1 - 22*nu2 + 6*nu2**2 + 14*nu2**3))
+    N_dd4_0dd = (58 + 3*nu2 + 98*nu1**3*nu2 - 91*nu2**2
+                 + 7*nu1**2*(-13 - 2*nu2 + 28*nu2**2)
+                 + nu1*(3 - 146*nu2 - 14*nu2**2 + 98*nu2**3))
+    k_0_dd = D_inv * (98*f**2*N_dd2_0dd + 70*f*N_dd3_0dd + 15*N_dd4_0dd) / 2940.0
+    M22_0_dd = M22 * k_0_dd
 
-    # M22 quadrupole kernels (CLASS-PT lines 7159, 7275)
+    # --- M22 quadrupole kernels (lines 7159, 7275, 7395) ---
     N1_2vv = (142 - 21*nu2 + 280*nu1**3*nu2 - 106*nu2**2
               + 2*nu1**2*(-53 - 174*nu2 + 280*nu2**2)
               + nu1*(-21 - 204*nu2 - 348*nu2**2 + 280*nu2**3))
@@ -861,8 +878,50 @@ def _compute_bias_spectra(
     N_2vd2 = (306 + 161*nu2 + 672*nu1**3*nu2 - 538*nu2**2
               + 2*nu1**2*(-269 - 134*nu2 + 672*nu2**2)
               + nu1*(161 - 1196*nu2 - 268*nu2**2 + 672*nu2**3))
-    k_2_vd = D_inv * f * (7*f**2*N_2vd3 + f*N_2vd2 + 4*N_dd) / 588.0
+    # cf. nonlinear_pt.c line 7275: 7f²*N_2vd3 + f*N_2vd2 + 4*N_dd2_2vd
+    N_dd2_2vd = (46 + 13*nu2 + 98*nu1**3*nu2 - 63*nu2**2
+                 + 7*nu1**2*(-9 - 10*nu2 + 28*nu2**2)
+                 + nu1*(13 - 138*nu2 - 70*nu2**2 + 98*nu2**3))
+    k_2_vd = D_inv * f * (7*f**2*N_2vd3 + f*N_2vd2 + 4*N_dd2_2vd) / 588.0
     M22_2_vd = M22 * k_2_vd
+
+    # M22_2_dd: cf. nonlinear_pt.c line 7395
+    N_2dd_a = (10 - nu2 + 14*nu1**3*nu2 - 17*nu2**2
+               + nu1**2*(-17 + 6*nu2 + 28*nu2**2)
+               + nu1*(-1 - 22*nu2 + 6*nu2**2 + 14*nu2**3))
+    N_2dd_b = (26 - 13*nu2 - 37*nu2**2 + 2*nu2**3
+               + nu1**3*(2 + 24*nu2)
+               + nu1**2*(-37 + 22*nu2 + 48*nu2**2)
+               + nu1*(-13 - 26*nu2 + 22*nu2**2 + 24*nu2**3))
+    k_2_dd = D_inv * f * (4*N_2dd_a + f*N_2dd_b) / 84.0
+    M22_2_dd = M22 * k_2_dd
+
+    # --- M22 hexadecapole kernels (lines 7506, 7618, 7739) ---
+    N1_4vv = (50 + 98*nu1**3*nu2 - nu2*(9 + 35*nu2)
+              + 7*nu1**2*(-5 + 2*nu2*(-9 + 14*nu2))
+              + nu1*(-9 + 2*nu2*(-33 + 7*nu2*(-9 + 7*nu2))))
+    N2_4vv = (206 + 420*nu1**3*nu2 + nu2*(7 - 208*nu2)
+              + 8*nu1**2*(-26 + nu2*(-53 + 105*nu2))
+              + nu1*(7 + 4*nu2*(-108 + nu2*(-106 + 105*nu2))))
+    N3_4vv = (483 + 40*nu1**3*(-1 + 28*nu2) - 2*nu2*(-57 + 10*nu2*(29 + 2*nu2))
+              + 20*nu1**2*(-29 + 2*nu2*(-25 + 56*nu2))
+              + 2*nu1*(57 + 2*nu2*(-327 + 10*nu2*(-25 + 28*nu2))))
+    k_4_vv = D_inv * f**2 * (1144*N1_4vv + 728*f*N2_4vv + 147*f**2*N3_4vv) / 980980.0
+    M22_4_vv = M22 * k_4_vv
+
+    N_4vd_a = (58 + 21*nu2 + 112*nu1**3*nu2 - 106*nu2**2
+               + 2*nu1**2*(-53 - 6*nu2 + 112*nu2**2)
+               + nu1*(21 - 204*nu2 - 12*nu2**2 + 112*nu2**3))
+    N_4vd_b = (26 + 13*nu2 - 60*nu2**2 - 8*nu2**3
+               + nu1**3*(-8 + 60*nu2)
+               + 4*nu1**2*(-15 + 4*nu2 + 30*nu2**2)
+               + nu1*(13 - 104*nu2 + 16*nu2**2 + 60*nu2**3))
+    k_4_vd = D_inv * f**2 * (11*N_4vd_a + 14*f*N_4vd_b) / 2695.0
+    M22_4_vd = M22 * k_4_vd
+
+    # M22_4_dd: cf. nonlinear_pt.c line 7739 — (2nu1-1)(2nu2-1)(1+nu12)(2+nu12)*f²/35
+    k_4_dd = D_inv * f**2 * (2*nu1 - 1) * (2*nu2 - 1) * (1 + nu12) * (2 + nu12) / 35.0
+    M22_4_dd = M22 * k_4_dd
 
     # Quadratic form helper for matter x basis (b=-0.3)
     def qf_rsd(M):
@@ -871,39 +930,72 @@ def _compute_bias_spectra(
 
     P22_0_vv = qf_rsd(M22_0_vv)
     P22_0_vd = qf_rsd(M22_0_vd)
-    P22_0_dd = qf_rsd(M22_0_dd)  # standard P22
+    P22_0_dd = qf_rsd(M22_0_dd)
     P22_2_vv = qf_rsd(M22_2_vv)
     P22_2_vd = qf_rsd(M22_2_vd)
+    P22_2_dd = qf_rsd(M22_2_dd)
+    P22_4_vv = qf_rsd(M22_4_vv)
+    P22_4_vd = qf_rsd(M22_4_vd)
+    P22_4_dd = qf_rsd(M22_4_dd)
 
-    # M13 RSD UV counterterms (from CLASS-PT lines 7101):
-    # P13UV_0_dd = -k² σ_v² P_lin (61 - 2f + 35f²) / 105
-    # P13UV_0_vd = -k² σ_v² 2f(625 + 558f + 315f²) / 1575  (approx)
-    # P13UV_0_vv = -k² σ_v² f²(441 + 566f + 175f²) / 1225  (from CLASS-PT line 9818)
-    sigma2_v = jnp.trapezoid(pk_disc * k, lnk) / (6.0 * jnp.pi ** 2)
+    # M13 RSD kernels — applied to the standard M13 vector element-wise.
+    # nu1_m = -0.5 * etam (1D, shape (Nmax+1,))
+    # cf. nonlinear_pt.c lines 6820, 6960, 7083, 7201, 7313, 7433, 7544, 7657
+    nu1_m = -0.5 * etam  # (Nmax+1,) complex
 
-    # P13 monopole dd: standard M13 + RSD UV counterterm
-    f13_dd = jnp.sum(x * M13[None, :], axis=-1)
-    P13_0_dd_raw = jnp.real(k ** 3 * f13_dd * pk_disc)
-    P13_0_dd_UV  = -(61.0 - 2.0*f + 35.0*f**2) / 105.0 * sigma2_v * k**2 * pk_disc
-    P13_0_dd = (P13_0_dd_raw + P13_0_dd_UV) * uv_damp
+    M13_0_vv = M13 * (112.0 / (1 + 9*nu1_m)
+                      * 3*f**2*(7*(-5 + 3*nu1_m) + 6*f*(-7 + 5*nu1_m)) / 3920.0)
+    M13_0_vd = M13 * (112.0 / (1 + 9*nu1_m)
+                      * f*(-35 - 18*f + 45*nu1_m + 54*f*nu1_m) / 840.0)
+    M13_0_dd = M13 / (1 + 9*nu1_m) * (1 + 9*nu1_m + 6*f*(1 + nu1_m))
 
-    # P13 monopole vv/vd: M13 with RSD kernels (CLASS-PT lines 6711, 6822)
-    # M13_0_vv: M13 × 112/(1+9ν) × f²(3ν-1) × 2/196 × 3/4 ...
-    # These require reading the M13 multipole kernel from nonlinear_pt.c.
-    # Placeholder: use UV-only P13 (the 22-type loop dominates anyway)
-    P13_0_vv_UV = -(441.0 + 566.0*f + 175.0*f**2) / 1225.0 * f**2 * sigma2_v * k**2 * pk_disc
-    P13_0_vd_UV = -2.0 * f * (625.0 + 558.0*f + 315.0*f**2) / 1575.0 * sigma2_v * k**2 * pk_disc
+    M13_2_vv = M13 * (112.0 / (1 + 9*nu1_m)
+                      * 3*f**2*(-5 + 3*nu1_m + f*(-6 + 5*nu1_m)) / 196.0)
+    M13_2_vd = M13 * (112.0 / (1 + 9*nu1_m)
+                      * f*(-49 - 9*f + 63*nu1_m + 108*f*nu1_m) / 588.0)
+    M13_2_dd = M13 * (112.0 / (1 + 9*nu1_m) * 3*f*(1 + nu1_m) / 28.0)
 
-    # 1-loop RSD multipole components
-    Pk_0_vv1 = P22_0_vv + P13_0_vv_UV * uv_damp  # TODO: add M13_0_vv loop
-    Pk_0_vd1 = P22_0_vd + P13_0_vd_UV * uv_damp  # TODO: add M13_0_vd loop
+    M13_4_vv = M13 * (112.0 / (1 + 9*nu1_m)
+                      * 3*f**2*(-55 + 33*nu1_m + f*(-66 + 90*nu1_m)) / 5390.0)
+    M13_4_vd = M13 * (112.0 / (1 + 9*nu1_m) * 9*f**2*(1 + 2*nu1_m) / 245.0)
+
+    # P13 integrals: k³ Re{sum_m x_m M13_m P(k)}
+    def p13_rsd(M13_kernel, sigma2_UV_coeff):
+        """P13 = k³ Re{x·M13_kernel·P} + UV term.  UV coeff is σ_v²k²P prefactor."""
+        f13 = jnp.sum(x * M13_kernel[None, :], axis=-1)
+        return (jnp.real(k**3 * f13 * pk_disc) + sigma2_UV_coeff * k**2 * pk_disc) * uv_damp
+
+    sigma2_v = jnp.trapezoid(pk_disc * k, lnk) / (6.0 * jnp.pi**2)
+
+    # UV counterterm coefficients (from CLASS-PT lines 6832, 6980, 7101, 7211, 7323, 7443, 7554, 7667)
+    UV_0_vv = -sigma2_v * f**2 * (441 + 566*f + 175*f**2) / 1225.0
+    UV_0_vd = -sigma2_v * 2*f * (625 + 558*f + 315*f**2) / 1575.0
+    UV_0_dd = -sigma2_v * (61 - 2*f + 35*f**2) / 105.0
+    UV_2_vv = -sigma2_v * 2*f**2 * (54 + 74*f + 25*f**2) / 105.0
+    UV_2_vd = -sigma2_v * 4*f * (175 + 180*f + 126*f**2) / 441.0
+    UV_2_dd = -sigma2_v * 2*f * (35*f - 2) / 105.0
+    UV_4_vv = -sigma2_v * 24*f**2 * (33 + 58*f + 25*f**2) / 1925.0
+    UV_4_vd = -sigma2_v * 16*f**2 * (22 + 35*f) / 1225.0
+
+    P13_0_vv = p13_rsd(M13_0_vv, UV_0_vv)
+    P13_0_vd = p13_rsd(M13_0_vd, UV_0_vd)
+    P13_0_dd = p13_rsd(M13_0_dd, UV_0_dd)
+    P13_2_vv = p13_rsd(M13_2_vv, UV_2_vv)
+    P13_2_vd = p13_rsd(M13_2_vd, UV_2_vd)
+    P13_2_dd = p13_rsd(M13_2_dd, UV_2_dd)
+    P13_4_vv = p13_rsd(M13_4_vv, UV_4_vv)
+    P13_4_vd = p13_rsd(M13_4_vd, UV_4_vd)
+
+    # 1-loop RSD multipole components = P13 + P22
+    Pk_0_vv1 = P13_0_vv + P22_0_vv
+    Pk_0_vd1 = P13_0_vd + P22_0_vd
     Pk_0_dd1 = P13_0_dd + P22_0_dd
-    Pk_2_vv1 = P22_2_vv   # TODO: add M13_2_vv loop
-    Pk_2_vd1 = P22_2_vd   # TODO: add M13_2_vd loop
-    Pk_2_dd1 = jnp.zeros_like(k)  # dd quadrupole 1-loop (M22_2_dd placeholder)
-    Pk_4_vv1 = jnp.zeros_like(k)  # hexadecapole vv 1-loop (M22_4_vv placeholder)
-    Pk_4_vd1 = jnp.zeros_like(k)  # placeholder
-    Pk_4_dd1 = jnp.zeros_like(k)  # placeholder
+    Pk_2_vv1 = P13_2_vv + P22_2_vv
+    Pk_2_vd1 = P13_2_vd + P22_2_vd
+    Pk_2_dd1 = P13_2_dd + P22_2_dd
+    Pk_4_vv1 = P13_4_vv + P22_4_vv
+    Pk_4_vd1 = P13_4_vd + P22_4_vd
+    Pk_4_dd1 = P22_4_dd  # M13_4_dd not in CLASS-PT (no b_Gamma3 term)
 
     # ===========================================================
     # RSD BIAS CROSS-TERMS
@@ -1138,10 +1230,11 @@ def pk_gm_real(
 ) -> Float[Array, "Nk"]:
     """Real-space galaxy-matter cross-power spectrum.
 
-    P_gm(k) = [b1*(P_tree + P_loop) + (cs*b1 + cs0/2)*P_CTR/h²
-               + b2/2 P_Id2 + bG2 P_IG2
-               + (bG2 + 0.4 bΓ3) P_IFG2] × h³
+    P_gm(k) = b1*(P_tree + P_loop) + (cs*b1 + cs0)*P_CTR/h²
+              + b2/2 P_Id2 + bG2 P_IG2
+              + (bG2 + 0.4 bΓ3) P_IFG2
 
+    EPTComponents are in (Mpc/h)³, so no h³ conversion needed.
     cf. CLASS-PT classy.pyx::pk_gm_real()
 
     Args:
@@ -1161,7 +1254,7 @@ def pk_gm_real(
         + (b2 / 2.0) * ept.Pk_Id2
         + bG2 * ept.Pk_IG2
         + (bG2 + 0.4 * bGamma3) * ept.Pk_IFG2
-    ) * h ** 3
+    )
 
 
 def pk_gg_real(
@@ -1176,11 +1269,12 @@ def pk_gg_real(
 ) -> Float[Array, "Nk"]:
     """Real-space galaxy-galaxy power spectrum.
 
-    P_gg(k) = [b1²(P_tree + P_loop) + 2(cs b1² + cs0 b1) P_CTR/h²
-               + b1 b2 P_Id2 + b2²/4 P_Id2d2
-               + 2 b1 bG2 P_IG2 + b1(2bG2 + 0.8 bΓ3) P_IFG2
-               + bG2² P_IG2G2 + b2 bG2 P_Id2G2] × h³ + Pshot
+    P_gg(k) = b1²(P_tree + P_loop) + 2(cs b1² + cs0 b1) P_CTR/h²
+              + b1 b2 P_Id2 + b2²/4 P_Id2d2
+              + 2 b1 bG2 P_IG2 + b1(2bG2 + 0.8 bΓ3) P_IFG2
+              + bG2² P_IG2G2 + b2 bG2 P_Id2G2 + Pshot
 
+    EPTComponents are in (Mpc/h)³, so no h³ conversion needed.
     cf. CLASS-PT classy.pyx::pk_gg_real()
     """
     h = ept.h
@@ -1193,7 +1287,7 @@ def pk_gg_real(
         + b1 * (2.0 * bG2 + 0.8 * bGamma3) * ept.Pk_IFG2
         + bG2 ** 2 * ept.Pk_IG2G2
         + b2 * bG2 * ept.Pk_Id2G2
-    ) * h ** 3 + Pshot
+    ) + Pshot
 
 
 def pk_mm_l0(
@@ -1202,10 +1296,11 @@ def pk_mm_l0(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter power spectrum monopole (ℓ=0).
 
-    P_0(k) = [P_0_vv_tree + P_0_vd_tree + P_0_dd_tree
-              + P_0_vv_1loop + P_0_vd_1loop + P_0_dd_1loop
-              + 2 cs0 P_CTR_0/h²] × h³
+    P_0(k) = P_0_vv_tree + P_0_vd_tree + P_0_dd_tree
+             + P_0_vv_1loop + P_0_vd_1loop + P_0_dd_1loop
+             + 2 cs0 P_CTR_0/h²
 
+    EPTComponents are in (Mpc/h)³, so no h³ conversion needed.
     cf. CLASS-PT classy.pyx::pk_mm_l0()
     """
     f = ept.f
@@ -1218,7 +1313,7 @@ def pk_mm_l0(
         + ept.Pk_0_vd1
         + ept.Pk_0_dd1
         + 2.0 * cs0 * ept.Pk_ctr0 / h ** 2
-    ) * h ** 3
+    )
 
 
 def pk_mm_l2(
@@ -1227,6 +1322,7 @@ def pk_mm_l2(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter quadrupole (ℓ=2).
 
+    EPTComponents are in (Mpc/h)³, so no h³ conversion needed.
     cf. CLASS-PT classy.pyx::pk_mm_l2()
     """
     h = ept.h
@@ -1237,7 +1333,7 @@ def pk_mm_l2(
         + ept.Pk_2_vd1
         + ept.Pk_2_dd1
         + 2.0 * cs2 * ept.Pk_ctr2 / h ** 2
-    ) * h ** 3
+    )
 
 
 def pk_mm_l4(
@@ -1246,6 +1342,7 @@ def pk_mm_l4(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter hexadecapole (ℓ=4).
 
+    EPTComponents are in (Mpc/h)³, so no h³ conversion needed.
     cf. CLASS-PT classy.pyx::pk_mm_l4()
     """
     h = ept.h
@@ -1255,7 +1352,7 @@ def pk_mm_l4(
         + ept.Pk_4_vd1
         + ept.Pk_4_dd1
         + 2.0 * cs4 * ept.Pk_ctr4 / h ** 2
-    ) * h ** 3
+    )
 
 
 def pk_gg_l0(
@@ -1298,16 +1395,19 @@ def pk_gg_l0(
         + (2.0 * bG2 + 0.8 * bGamma3) * (b1 * ept.Pk_IFG2_0b1 + ept.Pk_IFG2_0)
     )
 
-    # Higher-order stochastic (b4 term, from CLASS-PT eq. at line 1199)
-    # P_b4 = f² b4 (k/h)² (f²/9 + 2fb1/7 + b1²/5) × (35/8) × P_CTR_4/h
+    # Higher-order stochastic (b4 term, from CLASS-PT classy.pyx line 1199)
+    # CLASS-PT: fz²*b4*(self.kh/h)²*(...)*(35/8)*pk_mult[13]*h
+    # Note: CLASS-PT passes k in 1/Mpc to initialize_output, so self.kh is in 1/Mpc.
+    # (self.kh/h)² = (k_1Mpc/h)² = k_h² = kh²  (where kh is in h/Mpc in clax)
+    # pk_mult[13]*h ≈ Pk_ctr4 (both in h-units at the ~1% level)
     P_b4 = (
-        f ** 2 * b4 * (kh / h) ** 2
+        f ** 2 * b4 * kh ** 2
         * (f ** 2 / 9.0 + 2.0 * f * b1 / 7.0 + b1 ** 2 / 5.0)
         * (35.0 / 8.0)
-        * ept.Pk_ctr4 * h
+        * ept.Pk_ctr4
     )
 
-    return (P_loop_l0 + P_bias_l0 + 2.0 * cs0 * ept.Pk_ctr0 / h ** 2) * h ** 3 + Pshot + P_b4
+    return (P_loop_l0 + P_bias_l0 + 2.0 * cs0 * ept.Pk_ctr0 / h ** 2) + Pshot + P_b4
 
 
 def pk_gg_l2(
@@ -1342,14 +1442,15 @@ def pk_gg_l2(
     )
 
     # b4 stochastic term for quadrupole
+    # cf. classy.pyx line 1206: (kh/h)² means k_h² since CLASS-PT kh is in 1/Mpc
     P_b4 = (
-        f ** 2 * b4 * (kh / h) ** 2
+        f ** 2 * b4 * kh ** 2
         * (f ** 2 * 70.0 + 165.0 * f * b1 + 99.0 * b1 ** 2)
         * (4.0 / 693.0) * (35.0 / 8.0)
-        * ept.Pk_ctr4 * h
+        * ept.Pk_ctr4
     )
 
-    return (P_loop_l2 + P_bias_l2 + 2.0 * cs2 * ept.Pk_ctr2 / h ** 2) * h ** 3 + P_b4
+    return (P_loop_l2 + P_bias_l2 + 2.0 * cs2 * ept.Pk_ctr2 / h ** 2) + P_b4
 
 
 def pk_gg_l4(
@@ -1383,14 +1484,15 @@ def pk_gg_l4(
     )
 
     # b4 stochastic for hexadecapole
+    # cf. classy.pyx line 1213: (kh/h)² means k_h² since CLASS-PT kh is in 1/Mpc
     P_b4 = (
-        f ** 2 * b4 * (kh / h) ** 2
+        f ** 2 * b4 * kh ** 2
         * (f ** 2 * 210.0 + 390.0 * f * b1 + 143.0 * b1 ** 2)
         * (8.0 / 5005.0) * (35.0 / 8.0)
-        * ept.Pk_ctr4 * h
+        * ept.Pk_ctr4
     )
 
-    return (P_loop_l4 + P_bias_l4 + 2.0 * cs4 * ept.Pk_ctr4 / h ** 2) * h ** 3 + P_b4
+    return (P_loop_l4 + P_bias_l4 + 2.0 * cs4 * ept.Pk_ctr4 / h ** 2) + P_b4
 
 
 # ---------------------------------------------------------------------------

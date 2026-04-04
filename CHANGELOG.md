@@ -30,23 +30,49 @@ methodology. Each entry logs implementations, bugs found/fixed, and measured acc
 | 3 | IR resummation log k-grid | Used `np.logspace` for DST grid → BAO modes 120-240 map to wrong scales; P13_UV σ_v ≈ 1686 instead of ~23 | Linear k-grid `np.linspace(1e-4, 10, 65536)`, matching CLASS-PT kmin2/kmax2 |
 | 4 | IR resummation linear mode interp | Linear interpolation across DST modes 120-240 gave P_mm err 1.54% | Odd/even spline: split DST into even/odd indexed arrays, natural cubic spline each |
 
-### PT Accuracy Table (Planck 2018 fiducial, z=0.38)
+### PT Accuracy Table (Planck 2018 fiducial, z=0.38, b1=2 b4=500 all other bias=0)
 
-| Observable | k range [h/Mpc] | Max |ΔP/P| | RMS |ΔP/P| | Target |
-|------------|----------------|------------|------------|--------|
-| P_mm(k)   | 0.005 – 0.30   | 0.45%      | 0.13%      | ✅ < 1% |
-| P_gg(k)   | 0.005 – 0.30   | TBD        | TBD        | < 1%   |
-| P_mg(k)   | 0.005 – 0.30   | TBD        | TBD        | < 1%   |
-| P_mm ℓ=0 | 0.005 – 0.25   | TBD        | TBD        | < 1%   |
+Reference: `reference_data/classpt_z0.38_fullrange.npz` — CLASS-PT on ept_kgrid (256 pts, 5e-5–100 h/Mpc).
+Measured 2026-04-04. Figures in `notebooks/figures/fig3-fig11_*_validation.png`.
 
-### PT Known Caveats
+| Observable    | k range [h/Mpc] | Max |ΔP/P| | Mean |ΔP/P| | Status | Target |
+|---------------|----------------|------------|------------|--------|--------|
+| P_mm real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 0.5% |
+| P_gg real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 1%   |
+| P_gm real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 1%   |
+| P_mm ℓ=0     | 0.005 – 0.30   | **1.75%**  | 0.45%      | ❌ FAIL | < 1%   |
+| P_mm ℓ=2     | 0.005 – 0.30   | **3.77%**  | 0.63%      | ❌ FAIL | < 2%   |
+| P_mm ℓ=4     | 0.005 – 0.30   | **7.91%**  | 0.76%      | ❌ FAIL | < 5%   |
+| P_gg ℓ=0     | 0.005 – 0.30   | **1.41%**  | 0.42%      | ❌ FAIL | < 1%   |
+| P_gg ℓ=2     | 0.005 – 0.30   | **5.08%**  | 0.68%      | ❌ FAIL | < 2%   |
+| P_gg ℓ=4     | 0.005 – 0.30   | **36.89%** | 1.91%      | ❌ FAIL | < 10%  |
 
-1. Some bias cross-spectra (`Pk_Id2`, `Pk_IG2`, etc.) use approximate quadratic
-   forms rather than exact CLASS-PT `zspmv` calls — needs validation.
+Notes on failing multipoles (2026-04-04):
+- Errors are **systematic negative at high k** (k > 0.15 h/Mpc), consistent with
+  incomplete 1-loop M22/M13 RSD kernel implementation.
+- Loop components (Pk_0_vv1 etc.) match CLASS-PT at ~0.4–4.7% at k=0.3 — source of error.
+- P_gg ℓ=4 failure (36.89%) is amplified: pk_gg_l4 ≈ tree+loop - b4_term, and b4 nearly
+  cancels at high k, magnifying relative errors from the underlying ~8% pk_mm_l4 error.
+- All 1-loop M22/M13 kernels for all multipoles were implemented from CLASS-PT
+  `nonlinear_pt.c` (lines 6647–7739). Remaining discrepancy likely in sub-leading terms
+  or UV counterterm coefficient details.
+
+### PT Bugs Found and Fixed (2026-04-04 session)
+
+| # | Bug | Root Cause | Fix |
+|---|-----|------------|-----|
+| 5 | Spurious `h³` multiply in all bias/multipole functions | `pk_gm_real`, `pk_gg_real`, `pk_mm_l0/l2/l4`, `pk_gg_l0/l2/l4` each multiplied output by `h**3` before return. EPTComponents already store values in (Mpc/h)³. | Removed `* h**3` from all 8 functions |
+| 6 | Wrong b4 k-factor `(kh/h)²` | Used `(kh/h)**2` but CLASS-PT passes k in 1/Mpc to `initialize_output`, so `self.kh/h = k_h` (h/Mpc). Should be `kh**2`. | Changed to `kh**2` in pk_gg_l0/l2/l4 |
+| 7 | Incomplete M22 RSD kernels | M22_0_dd was using identity; M22_2_dd, M22_4_vv/vd/dd were zero placeholders | Implemented all M22 RSD kernels from nonlinear_pt.c lines 7054/7395/7506/7618/7739 |
+| 8 | Incomplete M13 RSD kernels | M13 multipoles for ℓ=2,4 were zero | Implemented M13_0_vv/vd/dd, M13_2_vv/vd/dd, M13_4_vv/vd from nonlinear_pt.c |
+| 9 | Wrong UV counterterm coefficients | ℓ=2,4 UV coefficients were incorrect placeholders | Fixed from nonlinear_pt.c lines 6832, 7211, 7323, 7443, 7554, 7667 |
+
+### PT Known Caveats (post 2026-04-04)
+
+1. RSD multipole 1-loop kernels: all implemented but still ~2-8% error at k>0.15 h/Mpc.
+   Sub-leading terms or coefficient differences not yet traced. See accuracy table above.
 2. `rs_h` default = 99.0 Mpc/h hardcoded; should come from thermodynamics background.
    Actual Planck 2018 value: 99.09 Mpc/h. Effect on sigma_BAO: <0.1%.
-3. σ_v and sigma_BAO confirmed: CLASS-PT full k-range sigma_v = 23.44 (Mpc/h)²,
-   matching our computation. Not a source of error.
 3. σ_v² integration over FFTLog grid rather than fine CLASS-PT grid — ~0.1% error.
 
 ---
