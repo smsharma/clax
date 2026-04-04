@@ -619,7 +619,7 @@ def _ir_resummation_numpy(
         + 6.0 * (np.sin(x_bao) / x_bao ** 3 - np.cos(x_bao) / x_bao ** 2)
     )
     sigma2_bao = (
-        np.trapz(pk_nw_int * bao_filter * k_int, np.log(k_int)) / (6.0 * np.pi ** 2)
+        np.trapezoid(pk_nw_int * bao_filter * k_int, np.log(k_int)) / (6.0 * np.pi ** 2)
     )
 
     return pk_nw, pk_w, float(sigma2_bao)
@@ -648,7 +648,7 @@ def _ir_resummation_gaussian(
 
     pk_nw = np.exp(log_pk_nw)
     pk_w  = pk_lin_h - pk_nw
-    sigma2_bao = np.trapz(pk_nw * k_h, np.log(k_h)) / (6.0 * np.pi ** 2)
+    sigma2_bao = np.trapezoid(pk_nw * k_h, np.log(k_h)) / (6.0 * np.pi ** 2)
     return pk_nw, pk_w, float(sigma2_bao)
 
 
