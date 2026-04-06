@@ -39,7 +39,7 @@ from clax.ept import (
 # Load reference data
 # ---------------------------------------------------------------------------
 
-REF_FILE = os.path.join(_REPO, "reference_data", "classpt_z0.6.npz")
+REF_FILE = os.path.join(_REPO, "reference_data", "classpt_z0.38_fullrange.npz")
 if not os.path.isfile(REF_FILE):
     print(f"ERROR: reference file not found: {REF_FILE}")
     print("Run: conda run -n sbi_pytorch_osx-arm64-py310forge "
@@ -50,7 +50,7 @@ ref = np.load(REF_FILE, allow_pickle=True)
 k_h    = ref["k_h"]           # (256,) h/Mpc
 z      = float(ref["z"])
 h      = float(ref["h"])
-f      = float(ref["f"])
+f      = float(ref["fz"])
 pk_lin = ref["pk_lin"]         # (256,) (Mpc/h)^3
 
 # Bias / EFT parameters used when generating reference
