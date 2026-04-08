@@ -113,7 +113,7 @@ clax = {
 ref_spectra = {
     "pk_mm_real": np.squeeze(ref["pk_mm_real"]),
     "pk_gg_real": np.squeeze(ref["pk_gg_real"]),
-    "pk_gm_real": np.squeeze(ref["pk_gm_real"]),
+    "pk_gm_real": np.squeeze(ref["pk_mg_real"]),
     "pk_mm_l0":   np.squeeze(ref["pk_mm_l0"]),
     "pk_mm_l2":   np.squeeze(ref["pk_mm_l2"]),
     "pk_mm_l4":   np.squeeze(ref["pk_mm_l4"]),
