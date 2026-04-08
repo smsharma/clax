@@ -1100,13 +1100,15 @@ def _compute_bias_spectra(
              * (3 + 4*nu1**2 + 8*nu2 + 4*nu2**2 + 8*nu1*(1 + nu2)) / 32.0)
     M22_mu8_mat = M22 * k_mu8
 
-    # M13_mu6: uses the (112/(1+9*nu1_m)) convention from existing M13 kernels
+    # M13_mu6: nonlinear_pt.c line 8159 — M13_mu6 = M13 * 18*f³*nu1 / (1+9*nu1)
     M13_mu6_mat = M13 * (112.0 / (1 + 9*nu1_m)) * (9.0 * 2.0 * f**3 * nu1_m / 112.0)
+    # UV counterterm for mu^6 P13: nonlinear_pt.c line 8226
+    UV_mu6 = -sigma2_v * f**3 * (46.0 + 35.0 * f) / 35.0
 
     P22_mu6_vv = qf_rsd(M22_mu6_vv_mat)
     P22_mu6_vd = qf_rsd(M22_mu6_vd_mat)
     P22_mu8    = qf_rsd(M22_mu8_mat)
-    P13_mu6    = p13_rsd(M13_mu6_mat, jnp.zeros_like(k))
+    P13_mu6    = p13_rsd(M13_mu6_mat, UV_mu6)
 
     # 1-loop RSD multipole components = P13 + P22
     Pk_0_vv1 = P13_0_vv + P22_0_vv
@@ -1598,11 +1600,8 @@ def _pk_mm_tree_mu68_at_mu(
     wiggle_ratio = jnp.where(ept.pk_nw > 1e-100, ept.pk_w / pk_nw_safe, jnp.zeros_like(ept.pk_nw))
     P13ratio = 1.0 + wiggle_ratio * Exp
 
-    # New mu^6/mu^8 terms (nonlinear_pt.c lines 8069-8159)
-    P_mu68 = ((ept.P13_mu6 * P13ratio + ept.P22_mu6_vv) * mu**6
-              + ept.P22_mu8 * mu**8)
-
-    return Ptree + P_mu68
+    # P_mu68 is handled analytically by the Pk_*_vv1 multipole kernels (Fix 1).
+    return Ptree
 
 
 def pk_mm_l0(
