@@ -841,30 +841,28 @@ def _compute_bias_spectra(
     Pk_ctr4 = -k ** 2 * pk_disc * (8.0 / 35.0) * f ** 2  # hexadecapole (pm[13] = -P_CTR_4)
 
     # ===========================================================
-    # RSD TREE-LEVEL MULTIPOLES (Kaiser formula with isotropic IR resummation)
-    # CLASS-PT uses Pbin (= Pnw + Pw*exp(-Σ²k²)) with isotropic SigmaBAO for
-    # the tree-level RSD multipoles (nonlinear_pt.c lines 6903, 7022, 7129,
-    # 7240, 7362, 7586).  Clax uses Pk_tree = Pnw + Pw*exp(-Σ²k²)*(1+Σ²k²),
-    # which empirically gives a closer match to CLASS-PT's Pbin than our
-    # Pbin_clax does, because the (1+Σ²k²) factor compensates the slightly
-    # different sigma2_bao from our DST procedure.
-    #
-    # Tree is computed analytically (isotropic): no anisotropic GL loop needed.
-    # Pk_2_dd = Pk_4_vd = Pk_4_dd = 0 exactly (∫L₂·1 dμ = ∫L₄·μ² dμ = 0).
+    # RSD TREE-LEVEL MULTIPOLES (anisotropic IR resummation via GL quadrature)
+    # Following ps_1loop_jax / CLASS-PT AP path: compute the full P_tree(k,mu)
+    # with anisotropic Sigmatot(mu) at each GL node, then project onto Legendre
+    # multipoles.  The tree integrand at each GL node is:
+    #   p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
+    # This matches ps_1loop_jax get_pkmu_irres_LO_NLO (line 485) and CLASS-PT
+    # AP path (nonlinear_pt.c line 9388).  No empirical alpha factor needed.
     #
     # Storage convention: Pk_0_vv/vd/dd store the f-weighted components
     # so that galaxy combination is:
     #   P_0^gal = Pk_0_vv + b1 Pk_0_vd + b1² Pk_0_dd + 1-loop
+    # Accumulated in the GL loop below.
     # ===========================================================
-    Pk_0_vv = (f ** 2 / 5.0)       * Pk_tree  # f²/5 × Pk_tree
-    Pk_0_vd = (2.0 * f / 3.0)      * Pk_tree  # 2f/3 × Pk_tree
-    Pk_0_dd =                        Pk_tree   # Pk_tree
-    Pk_2_vv = (4.0 * f ** 2 / 7.0)  * Pk_tree  # 4f²/7 × Pk_tree
-    Pk_2_vd = (4.0 * f / 3.0)       * Pk_tree  # 4f/3 × Pk_tree
-    Pk_2_dd = jnp.zeros_like(k)                 # zero: ∫L₂·1 dμ = 0
-    Pk_4_vv = (8.0 * f ** 2 / 35.0) * Pk_tree  # 8f²/35 × Pk_tree
-    Pk_4_vd = jnp.zeros_like(k)                 # zero: ∫L₄·μ² dμ = 0
-    Pk_4_dd = jnp.zeros_like(k)                 # zero: ∫L₄·1 dμ = 0
+    Pk_0_vv = jnp.zeros_like(k)
+    Pk_0_vd = jnp.zeros_like(k)
+    Pk_0_dd = jnp.zeros_like(k)
+    Pk_2_vv = jnp.zeros_like(k)
+    Pk_2_vd = jnp.zeros_like(k)
+    Pk_2_dd = jnp.zeros_like(k)
+    Pk_4_vv = jnp.zeros_like(k)
+    Pk_4_vd = jnp.zeros_like(k)
+    Pk_4_dd = jnp.zeros_like(k)
 
     # ===========================================================
     # RSD 1-LOOP MULTIPOLES (from M22 × kernel and M13)
@@ -1260,6 +1258,23 @@ def _compute_bias_spectra(
         _L2 = 0.5 * (3*_mu2 - 1)
         _L4 = (35*_mu2**2 - 30*_mu2 + 3) / 8.0
 
+        # Anisotropic tree: ps_1loop_jax eq. and CLASS-PT AP path (nonlinear_pt.c line 9388)
+        # p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
+        _p_tree = pk_nw_arr + _pk_w_for_ratio * _Eg * (1.0 + _Sig * k**2)
+        _tree_vv = f**2 * _mu2**2 * _p_tree
+        _tree_vd = 2.0 * f * _mu2 * _p_tree
+        _tree_dd = _p_tree
+
+        Pk_0_vv = Pk_0_vv + _w_g * 0.5 * _L0 * _tree_vv
+        Pk_2_vv = Pk_2_vv + _w_g * 2.5 * _L2 * _tree_vv
+        Pk_4_vv = Pk_4_vv + _w_g * 4.5 * _L4 * _tree_vv
+        Pk_0_vd = Pk_0_vd + _w_g * 0.5 * _L0 * _tree_vd
+        Pk_2_vd = Pk_2_vd + _w_g * 2.5 * _L2 * _tree_vd
+        Pk_4_vd = Pk_4_vd + _w_g * 4.5 * _L4 * _tree_vd
+        Pk_0_dd = Pk_0_dd + _w_g * 0.5 * _L0 * _tree_dd
+        Pk_2_dd = Pk_2_dd + _w_g * 2.5 * _L2 * _tree_dd
+        Pk_4_dd = Pk_4_dd + _w_g * 4.5 * _L4 * _tree_dd
+
         Pk_0_vv1 = Pk_0_vv1 + _w_g * 0.5 * _L0 * _Pvv
         Pk_2_vv1 = Pk_2_vv1 + _w_g * 2.5 * _L2 * _Pvv
         Pk_4_vv1 = Pk_4_vv1 + _w_g * 4.5 * _L4 * _Pvv
@@ -1511,13 +1526,13 @@ def compute_ept(
         damp = jnp.exp(-sigma2_bao * k_h ** 2)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * damp
-        # Tree-level spectrum: Pbin with partial BAO resummation correction.
-        # CLASS-PT (AP path) uses anisotropic Sigmatot(mu); when projected onto
-        # isotropic multipoles, the effective damping is intermediate between
-        # full isotropic (alpha=0) and Pnw+Pw*exp*(1+Sig2k2) (alpha=1).
-        # Empirically alpha=0.27 minimises max error across all 9 RSD spectra.
-        _TREE_ALPHA = 0.27
-        Pk_tree = pk_nw + pk_w * damp * (1.0 + _TREE_ALPHA * sigma2_bao * k_h ** 2)
+        # Tree-level spectrum for real-space: use raw pk_lin_h (no IR damping).
+        # ps_1loop_jax uses pk_lin for the real-space tree (get_pk_real has
+        # "# no IR resummation"). This avoids sensitivity to our DST-derived
+        # sigma2_bao, which may differ slightly from CLASS-PT's.
+        # RSD tree multipoles are computed via anisotropic GL quadrature in
+        # _compute_bias_spectra (see Pk_0/2/4_vv/vd/dd accumulated there).
+        Pk_tree = pk_lin_h
     elif prec.ir_resummation:
         # Default path: call NumPy IR resummation (NOT differentiable through pk_lin_h).
         # Use _ir_precomputed to enable gradients.
@@ -1528,10 +1543,9 @@ def compute_ept(
         pk_w  = jnp.array(pk_w_np)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2)
-        # Tree-level spectrum: Pbin with partial BAO resummation correction.
-        # See comment above for _TREE_ALPHA = 0.27 choice.
-        _TREE_ALPHA = 0.27
-        Pk_tree = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2) * (1.0 + _TREE_ALPHA * sigma2_bao * k_h ** 2)
+        # Tree-level spectrum for real-space: use raw pk_lin_h (no IR damping).
+        # RSD tree multipoles are computed via anisotropic GL quadrature.
+        Pk_tree = pk_lin_h
     else:
         pk_resummed = pk_lin_h
         Pk_tree = pk_lin_h
