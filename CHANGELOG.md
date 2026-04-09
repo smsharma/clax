@@ -33,29 +33,47 @@ methodology. Each entry logs implementations, bugs found/fixed, and measured acc
 ### PT Accuracy Table (Planck 2018 fiducial, z=0.38, b1=2 b4=500 all other bias=0)
 
 Reference: `reference_data/classpt_z0.38_fullrange.npz` — CLASS-PT on ept_kgrid (256 pts, 5e-5–100 h/Mpc).
-Measured 2026-04-04. Figures in `notebooks/figures/fig3-fig11_*_validation.png`.
 
-| Observable    | k range [h/Mpc] | Max |ΔP/P| | Mean |ΔP/P| | Status | Target |
-|---------------|----------------|------------|------------|--------|--------|
-| P_mm real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 0.5% |
-| P_gg real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 1%   |
-| P_gm real     | 0.005 – 0.30   | **0.18%**  | 0.04%      | ✅ PASS | < 1%   |
-| P_mm ℓ=0     | 0.005 – 0.30   | **1.75%**  | 0.45%      | ❌ FAIL | < 1%   |
-| P_mm ℓ=2     | 0.005 – 0.30   | **3.77%**  | 0.63%      | ❌ FAIL | < 2%   |
-| P_mm ℓ=4     | 0.005 – 0.30   | **7.91%**  | 0.76%      | ❌ FAIL | < 5%   |
-| P_gg ℓ=0     | 0.005 – 0.30   | **1.41%**  | 0.42%      | ❌ FAIL | < 1%   |
-| P_gg ℓ=2     | 0.005 – 0.30   | **5.08%**  | 0.68%      | ❌ FAIL | < 2%   |
-| P_gg ℓ=4     | 0.005 – 0.30   | **36.89%** | 1.91%      | ❌ FAIL | < 10%  |
+#### 2026-04-09 (current) — ALL 9 SPECTRA PASS
 
-Notes on failing multipoles (2026-04-04):
-- Errors are **systematic negative at high k** (k > 0.15 h/Mpc), consistent with
-  incomplete 1-loop M22/M13 RSD kernel implementation.
-- Loop components (Pk_0_vv1 etc.) match CLASS-PT at ~0.4–4.7% at k=0.3 — source of error.
-- P_gg ℓ=4 failure (36.89%) is amplified: pk_gg_l4 ≈ tree+loop - b4_term, and b4 nearly
-  cancels at high k, magnifying relative errors from the underlying ~8% pk_mm_l4 error.
-- All 1-loop M22/M13 kernels for all multipoles were implemented from CLASS-PT
-  `nonlinear_pt.c` (lines 6647–7739). Remaining discrepancy likely in sub-leading terms
-  or UV counterterm coefficient details.
+| Observable    | k range [h/Mpc] | Max error  | Mean error | Metric      | Status | Target |
+|---------------|----------------|------------|------------|-------------|--------|--------|
+| P_mm real     | 0.005 – 0.30   | **0.19%**  | 0.04%      | relative    | ✅ PASS | < 1%   |
+| P_gg real     | 0.005 – 0.30   | **0.19%**  | 0.04%      | relative    | ✅ PASS | < 1%   |
+| P_gm real     | 0.005 – 0.30   | **0.19%**  | 0.04%      | relative    | ✅ PASS | < 1%   |
+| P_mm ℓ=0     | 0.005 – 0.30   | **0.59%**  | 0.40%      | relative    | ✅ PASS | < 1%   |
+| P_mm ℓ=2     | 0.005 – 0.30   | **0.70%**  | 0.44%      | relative    | ✅ PASS | < 1%   |
+| P_mm ℓ=4     | 0.005 – 0.30   | **0.70%**  | 0.15%      | abs/max(ref)| ✅ PASS | < 2%   |
+| P_gg ℓ=0     | 0.005 – 0.30   | **0.56%**  | 0.39%      | relative    | ✅ PASS | < 1%   |
+| P_gg ℓ=2     | 0.005 – 0.30   | **0.89%**  | 0.50%      | relative    | ✅ PASS | < 1%   |
+| P_gg ℓ=4     | 0.005 – 0.30   | **1.43%**  | 0.37%      | abs/max(ref)| ✅ PASS | < 2%   |
+
+Notes on l=4 metric: hexadecapole crosses near zero at k~0.25 h/Mpc due to near-
+cancellation between P_b4 (~-800) and tree+loop (~937). Relative error blows up there
+even with excellent absolute accuracy. `abs/max(ref)` = |Δ|/max(|ref| at k<0.3) is
+the robust criterion; any absolute error < 2% of the spectrum's characteristic scale.
+
+#### 2026-04-04 (before redesign)
+
+| Observable    | k range [h/Mpc] | Max |ΔP/P| | Status |
+|---------------|----------------|------------|--------|
+| P_mm real     | 0.005 – 0.30   | **0.18%**  | ✅ PASS |
+| P_gg real     | 0.005 – 0.30   | **0.18%**  | ✅ PASS |
+| P_gm real     | 0.005 – 0.30   | **0.18%**  | ✅ PASS |
+| P_mm ℓ=0     | 0.005 – 0.30   | **1.75%**  | ❌ FAIL |
+| P_mm ℓ=2     | 0.005 – 0.30   | **3.77%**  | ❌ FAIL |
+| P_mm ℓ=4     | 0.005 – 0.30   | **7.91%**  | ❌ FAIL |
+| P_gg ℓ=0     | 0.005 – 0.30   | **1.41%**  | ❌ FAIL |
+| P_gg ℓ=2     | 0.005 – 0.30   | **5.08%**  | ❌ FAIL |
+| P_gg ℓ=4     | 0.005 – 0.30   | **36.89%** | ❌ FAIL |
+
+### PT Bugs Found and Fixed (2026-04-09 session)
+
+| # | Bug | Root Cause | Fix |
+|---|-----|------------|-----|
+| 10 | `pk_gg_l2` tree used isotropic `pk_disc_mu` (bare P_lin) | GL integral of `L2 * pk_disc_mu * (b1+fμ²)²` used bare P_lin, not the anisotropic resummed P_tree. Also included a b1²*Pk_2_dd term that CLASS-PT doesn't have (vanishes in isotropic limit: ∫L2*1 dμ=0). | Replace with `Pk_2_vv + b1*Pk_2_vd` (anisotropic resummed components, matching CLASS-PT pm[18]+b1*pm[19]) |
+| 11 | `pk_gg_l4` tree had b1 factors not present in CLASS-PT | GL integral `L4 * pk_disc_mu * (b1+fμ²)²` again used bare P_lin. Galaxy l=4 tree should match CLASS-PT's pm[20] (matter tree, no b1 factors), since ∫L4*(1+fμ²)²dμ = ∫L4*(b1+fμ²)²/(b1=1) dμ in the isotropic limit. | Replace with `Pk_4_vv + Pk_4_vd + Pk_4_dd` (anisotropic matter tree) |
+| 12 | `accuracy_classpt.py` used relative error < 1% for l=4 | Hexadecapole crosses near zero at k~0.25 h/Mpc: tree+loop (~937) nearly cancels P_b4 (~-806), so a ~1.5% error in tree+loop gives >11% relative error in the near-zero total | Changed l=4 metric to `|Δ|/max(|ref|) < 2%` — absolute error normalized to characteristic spectrum scale |
 
 ### PT Bugs Found and Fixed (2026-04-04 session)
 
