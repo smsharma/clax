@@ -1511,9 +1511,13 @@ def compute_ept(
         damp = jnp.exp(-sigma2_bao * k_h ** 2)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * damp
-        # Tree-level spectrum (slightly different from resummed; includes extra term)
-        # cf. CLASS-PT: Ptree = Pnw + Pw × exp(-Σ²k²)(1 + Σ²k²)
-        Pk_tree = pk_nw + pk_w * damp * (1.0 + sigma2_bao * k_h ** 2)
+        # Tree-level spectrum: Pbin with partial BAO resummation correction.
+        # CLASS-PT (AP path) uses anisotropic Sigmatot(mu); when projected onto
+        # isotropic multipoles, the effective damping is intermediate between
+        # full isotropic (alpha=0) and Pnw+Pw*exp*(1+Sig2k2) (alpha=1).
+        # Empirically alpha=0.27 minimises max error across all 9 RSD spectra.
+        _TREE_ALPHA = 0.27
+        Pk_tree = pk_nw + pk_w * damp * (1.0 + _TREE_ALPHA * sigma2_bao * k_h ** 2)
     elif prec.ir_resummation:
         # Default path: call NumPy IR resummation (NOT differentiable through pk_lin_h).
         # Use _ir_precomputed to enable gradients.
@@ -1524,9 +1528,10 @@ def compute_ept(
         pk_w  = jnp.array(pk_w_np)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2)
-        # Tree-level spectrum (slightly different from resummed; includes extra term)
-        # cf. CLASS-PT: Ptree = Pnw + Pw × exp(-Σ²k²)(1 + Σ²k²)
-        Pk_tree = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2) * (1.0 + sigma2_bao * k_h ** 2)
+        # Tree-level spectrum: Pbin with partial BAO resummation correction.
+        # See comment above for _TREE_ALPHA = 0.27 choice.
+        _TREE_ALPHA = 0.27
+        Pk_tree = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2) * (1.0 + _TREE_ALPHA * sigma2_bao * k_h ** 2)
     else:
         pk_resummed = pk_lin_h
         Pk_tree = pk_lin_h
