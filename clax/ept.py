@@ -247,13 +247,17 @@ class EPTComponents:
     Pk_ctr2:  Float[Array, "Nk"]   # quadrupole counterterm (index 12)
     Pk_ctr4:  Float[Array, "Nk"]   # hexadecapole counterterm (index 13)
 
-    # RSD tree-level multipoles (indices 15–20)
+    # RSD tree-level multipoles (indices 15–20 + 49–51 for aniso corrections)
     Pk_0_vv:  Float[Array, "Nk"]   # monopole tree, vv (index 15)
     Pk_0_vd:  Float[Array, "Nk"]   # monopole tree, vd (index 16)
     Pk_0_dd:  Float[Array, "Nk"]   # monopole tree, dd (index 17)
     Pk_2_vv:  Float[Array, "Nk"]   # quadrupole tree, vv (index 18)
     Pk_2_vd:  Float[Array, "Nk"]   # quadrupole tree, vd (index 19)
     Pk_4_vv:  Float[Array, "Nk"]   # hexadecapole tree, vv (index 20)
+    # Anisotropic tree corrections (zero in isotropic approx; non-zero with Sigmatot(mu))
+    Pk_2_dd:  Float[Array, "Nk"]   # quadrupole tree, dd (index 49)
+    Pk_4_vd:  Float[Array, "Nk"]   # hexadecapole tree, vd (index 50)
+    Pk_4_dd:  Float[Array, "Nk"]   # hexadecapole tree, dd (index 51)
 
     # RSD 1-loop multipoles (indices 21–29): vv, vd, dd for each multipole
     Pk_0_vv1: Float[Array, "Nk"]   # monopole 1-loop, vv (index 21)
@@ -312,6 +316,7 @@ class EPTComponents:
             self.Pk_4_b2, self.Pk_4_bG2, self.Pk_4_b1b2, self.Pk_4_b1bG2,
             self.pk_nw, self.pk_w,                               # 43, 44
             self.P22_mu6_vv, self.P22_mu6_vd, self.P22_mu8, self.P13_mu6,  # 45-48
+            self.Pk_2_dd, self.Pk_4_vd, self.Pk_4_dd,          # 49, 50, 51
         ]
         aux = (self.h, self.f, self.sigma2_bao, self.delta_sigma2_bao)
         return arrays, aux
@@ -341,6 +346,7 @@ class EPTComponents:
             sigma2_bao=sigma2_bao, delta_sigma2_bao=delta_sigma2_bao,
             P22_mu6_vv=arrays[45], P22_mu6_vd=arrays[46],
             P22_mu8=arrays[47], P13_mu6=arrays[48],
+            Pk_2_dd=arrays[49], Pk_4_vd=arrays[50], Pk_4_dd=arrays[51],
         )
 
 
@@ -509,6 +515,7 @@ def _ir_resummation_numpy(
     pk_lin_h: np.ndarray,
     k_h: np.ndarray,
     rs_h: float = 99.0,
+    h: float = 0.6736,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Separate linear P(k) into no-wiggle and wiggle components.
 
@@ -541,6 +548,8 @@ def _ir_resummation_numpy(
         pk_lin_h: P_lin(k) in (Mpc/h)³, shape (N,)
         k_h:      k in h/Mpc, shape (N,)
         rs_h:     BAO sound horizon at drag epoch in Mpc/h (default 99.0 Mpc/h)
+        h:        Hubble parameter h = H₀/100 (needed to match CLASS-PT DST grid
+                  which is hardcoded in 1/Mpc: kmin2=0.00007 1/Mpc, kmax2=7 1/Mpc)
 
     Returns:
         pk_nw:   no-wiggle (broadband) P(k), same shape as input
@@ -552,12 +561,15 @@ def _ir_resummation_numpy(
     except ImportError:
         return _ir_resummation_gaussian(pk_lin_h, k_h)
 
-    # LINEAR k-grid: CLASS-PT uses kmin2=0.00007 1/Mpc ≈ 1e-4 h/Mpc,
-    # kmax2=7 1/Mpc ≈ 10 h/Mpc (for h≈0.67).
-    # cf. nonlinear_pt.c:5322-5323 (hardcoded 0.00007 and 7 in 1/Mpc)
+    # LINEAR k-grid matching CLASS-PT nonlinear_pt.c:5322-5323 which hardcodes
+    # kmin2=0.00007 1/Mpc and kmax2=7 1/Mpc (in physical 1/Mpc units).
+    # Converting to h-units: kmin2_h = 0.00007/h h/Mpc, kmax2_h = 7/h h/Mpc.
+    # Using the exact CLASS-PT values is critical: the DST mode number for the
+    # BAO oscillation is n_BAO ≈ kmax2/BAO_period, so a 4% kmax2 difference
+    # shifts the BAO mode by 4%, causing different Pnw extraction.
     N_IR = 65536
-    k_min2 = 1e-4   # h/Mpc
-    k_max2 = 10.0   # h/Mpc
+    k_min2 = 7e-5 / h   # 0.00007 1/Mpc in h/Mpc (CLASS-PT kmin2)
+    k_max2 = 7.0 / h    # 7 1/Mpc in h/Mpc (CLASS-PT kmax2)
     k_ir = np.linspace(k_min2, k_max2, N_IR)
 
     # Interpolate P_lin to the linear grid (log-log interpolation)
@@ -713,6 +725,8 @@ def _compute_bias_spectra(
     cmsym_w: Optional[Complex[Array, "Nmax+1"]] = None,
     pk_nw: Optional[Float[Array, "Nk"]] = None,
     sigma2_bao: Optional[float] = None,
+    delta_sigma2_bao: Optional[float] = None,
+    pk_w: Optional[Float[Array, "Nk"]] = None,
 ) -> dict:
     """Compute bias cross-spectra and RSD multipole components.
 
@@ -827,27 +841,28 @@ def _compute_bias_spectra(
     Pk_ctr4 = -k ** 2 * pk_disc * (8.0 / 35.0) * f ** 2  # hexadecapole (pm[13] = -P_CTR_4)
 
     # ===========================================================
-    # RSD TREE-LEVEL MULTIPOLES (Kaiser formula with IR resummation)
-    # CLASS-PT uses Pbin (= pk_disc = Pnw + Pw*exp(-Σ²k²)) for tree-level,
-    # NOT Pk_tree (which has the extra BAO enhancement factor Σ²k²).
-    # cf. nonlinear_pt.c lines 6903, 7022, 7129, 7240, 7362, 7586:
-    #   Ptree_0_vv = Pbin * f²/5
-    #   Ptree_0_vd = Pbin * 2f/3
-    #   Ptree_0_dd = Pbin
-    #   Ptree_2_vv = Pbin * 4f²/7
-    #   Ptree_2_vd = Pbin * 4f/3
-    #   Ptree_4_vv = Pbin * 8f²/35
+    # RSD TREE-LEVEL MULTIPOLES (anisotropic IR resummation via GL quadrature)
+    # Following ps_1loop_jax / CLASS-PT AP path: compute the full P_tree(k,mu)
+    # with anisotropic Sigmatot(mu) at each GL node, then project onto Legendre
+    # multipoles.  The tree integrand at each GL node is:
+    #   p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
+    # This matches ps_1loop_jax get_pkmu_irres_LO_NLO (line 485) and CLASS-PT
+    # AP path (nonlinear_pt.c line 9388).  No empirical alpha factor needed.
     #
     # Storage convention: Pk_0_vv/vd/dd store the f-weighted components
     # so that galaxy combination is:
     #   P_0^gal = Pk_0_vv + b1 Pk_0_vd + b1² Pk_0_dd + 1-loop
+    # Accumulated in the GL loop below.
     # ===========================================================
-    Pk_0_vv = (f ** 2 / 5.0)       * pk_disc  # f²/5 × Pbin (CLASS-PT Ptree_0_vv)
-    Pk_0_vd = (2.0 * f / 3.0)      * pk_disc  # 2f/3 × Pbin (b1 applied by caller)
-    Pk_0_dd =                        pk_disc  # Pbin
-    Pk_2_vv = (4.0 * f ** 2 / 7.0)  * pk_disc  # 4f²/7 Pbin (CLASS-PT line 7240)
-    Pk_2_vd = (4.0 * f / 3.0)       * pk_disc  # 4f/3 Pbin (CLASS-PT line 7362)
-    Pk_4_vv = (8.0 * f ** 2 / 35.0) * pk_disc  # 8f²/35 Pbin (CLASS-PT line 7586)
+    Pk_0_vv = jnp.zeros_like(k)
+    Pk_0_vd = jnp.zeros_like(k)
+    Pk_0_dd = jnp.zeros_like(k)
+    Pk_2_vv = jnp.zeros_like(k)
+    Pk_2_vd = jnp.zeros_like(k)
+    Pk_2_dd = jnp.zeros_like(k)
+    Pk_4_vv = jnp.zeros_like(k)
+    Pk_4_vd = jnp.zeros_like(k)
+    Pk_4_dd = jnp.zeros_like(k)
 
     # ===========================================================
     # RSD 1-LOOP MULTIPOLES (from M22 × kernel and M13)
@@ -1100,24 +1115,175 @@ def _compute_bias_spectra(
              * (3 + 4*nu1**2 + 8*nu2 + 4*nu2**2 + 8*nu1*(1 + nu2)) / 32.0)
     M22_mu8_mat = M22 * k_mu8
 
-    # M13_mu6: uses the (112/(1+9*nu1_m)) convention from existing M13 kernels
+    # M13_mu6: nonlinear_pt.c line 8159 — M13_mu6 = M13 * 18*f³*nu1 / (1+9*nu1)
     M13_mu6_mat = M13 * (112.0 / (1 + 9*nu1_m)) * (9.0 * 2.0 * f**3 * nu1_m / 112.0)
+    # UV counterterm for mu^6 P13: nonlinear_pt.c line 8226
+    UV_mu6 = -sigma2_v * f**3 * (46.0 + 35.0 * f) / 35.0
 
-    P22_mu6_vv = qf_rsd(M22_mu6_vv_mat)
-    P22_mu6_vd = qf_rsd(M22_mu6_vd_mat)
-    P22_mu8    = qf_rsd(M22_mu8_mat)
-    P13_mu6    = p13_rsd(M13_mu6_mat, jnp.zeros_like(k))
+    # Bare mu-power M13 kernels (CLASS-PT nonlinear_pt.c lines 8155-8158)
+    M13_mu2_dd_bare = M13 * (2.0 / (1 + 9*nu1_m)) * 9*f*(1+nu1_m)
+    M13_mu2_vd_bare = M13 * (2.0 / (1 + 9*nu1_m)) * (-f*(7+9*f-9*nu1_m))
+    M13_mu4_vv_bare = M13 * (1.0 / (1 + 9*nu1_m)) * (-3*f**2*(5+6*f-3*nu1_m))
+    M13_mu4_vd_bare = M13 * (2.0 / (1 + 9*nu1_m)) * (9*f**2*(1+2*nu1_m))
 
-    # 1-loop RSD multipole components = P13 + P22
-    Pk_0_vv1 = P13_0_vv + P22_0_vv
-    Pk_0_vd1 = P13_0_vd + P22_0_vd
-    Pk_0_dd1 = P13_0_dd + P22_0_dd
-    Pk_2_vv1 = P13_2_vv + P22_2_vv
-    Pk_2_vd1 = P13_2_vd + P22_2_vd
-    Pk_2_dd1 = P13_2_dd + P22_2_dd
-    Pk_4_vv1 = P13_4_vv + P22_4_vv
-    Pk_4_vd1 = P13_4_vd + P22_4_vd
-    Pk_4_dd1 = P22_4_dd  # M13_4_dd not in CLASS-PT (no b_Gamma3 term)
+    # UV counterterms for bare channels (CLASS-PT lines 8219-8225)
+    UV_mu0_dd = -sigma2_v * 61.0 / 105.0
+    UV_mu2_dd = -sigma2_v * f * (105*f - 6) / 105.0
+    UV_mu2_vd = -sigma2_v * f * (250 + 144*f) / 105.0
+    UV_mu4_vv = -sigma2_v * f**2 * (63 + 48*f) / 35.0
+    UV_mu4_vd = -sigma2_v * f**2 * (44 + 70*f) / 35.0
+
+    # Bare mu-power M22 kernels (CLASS-PT lines 8059-8067)
+    k_mu2_vd_bare = D_inv * (-f) * (
+        7*f*(-1+2*nu1)*(-1+2*nu2)*(6+7*nu12)
+        - 4*(46 + 13*nu2 + 98*nu1**3*nu2 - 63*nu2**2
+             + 7*nu1**2*(-9-10*nu2+28*nu2**2)
+             + nu1*(13-138*nu2-70*nu2**2+98*nu2**3))
+    ) / 392.0
+    k_mu2_dd_bare = D_inv * f * (
+        7*f*(2+2*nu1**3-nu2-nu2**2+2*nu2**3-nu1**2*(1+2*nu2)-nu1*(1+2*nu2+2*nu2**2))
+        + 4*(10-nu2+14*nu1**3*nu2-17*nu2**2
+             +nu1**2*(-17+6*nu2+28*nu2**2)
+             +nu1*(-1-22*nu2+6*nu2**2+14*nu2**3))
+    ) / 56.0
+    k_mu4_vv_bare = D_inv * f**2 * (
+        147*f**2*(-1+2*nu1)*(-1+2*nu2)
+        - 28*f*(-1+2*nu1)*(-1+2*nu2)*(-2+7*nu12)
+        + 8*(50-9*nu2+98*nu1**3*nu2-35*nu2**2
+             +7*nu1**2*(-5-18*nu2+28*nu2**2)
+             +nu1*(-9-66*nu2-126*nu2**2+98*nu2**3))
+    ) / 1568.0
+    k_mu4_vd_bare = D_inv * f**2 * (
+        58+21*nu2+112*nu1**3*nu2-106*nu2**2
+        + 2*nu1**2*(-53-6*nu2+112*nu2**2)
+        + 7*f*(2+nu1+4*nu1**3+nu2-8*nu1*nu2-8*nu1**2*nu2-8*nu1*nu2**2+4*nu2**3)
+        + nu1*(21-204*nu2-12*nu2**2+112*nu2**3)
+    ) / 56.0
+    k_mu4_dd_bare = D_inv * f**2 * (2*nu1-1)*(2*nu2-1)*(2+nu1**2+3*nu2+nu2**2+nu1*(3+2*nu2)) / 8.0
+
+    M22_mu2_vd_bare = M22 * k_mu2_vd_bare
+    M22_mu2_dd_bare = M22 * k_mu2_dd_bare
+    M22_mu4_vv_bare = M22 * k_mu4_vv_bare
+    M22_mu4_vd_bare = M22 * k_mu4_vd_bare
+    M22_mu4_dd_bare = M22 * k_mu4_dd_bare
+
+    def qf_split(M):
+        """Returns (P22_nw, P22_w) separately for anisotropic GL integration."""
+        y_nw = x_nw @ M
+        p22_nw = jnp.real(k**3 * jnp.sum(x_nw * y_nw, axis=-1)) * uv_damp
+        if use_ir_rsd:
+            y_w2 = x_w2 @ M
+            p22_w = jnp.real(k**3 * jnp.sum(x_nw * y_w2, axis=-1)) * uv_damp
+            return p22_nw, p22_w
+        return p22_nw, jnp.zeros_like(p22_nw)
+
+    def p13_split(M13_kernel, UV_coeff):
+        """Returns (P13_nw, P13_w) for anisotropic GL integration."""
+        f13_nw = jnp.sum(x_nw * M13_kernel[None, :], axis=-1)
+        p13_nw = (jnp.real(k**3 * f13_nw * pk_nw_arr) + UV_coeff * k**2 * pk_nw_arr) * uv_damp
+        if use_ir_rsd:
+            f13_w = jnp.sum(x_w * M13_kernel[None, :], axis=-1)
+            p13_w = jnp.real(k**3 * f13_w * pk_nw_arr) * uv_damp
+            return p13_nw, p13_w
+        return p13_nw, jnp.zeros_like(p13_nw)
+
+    # Compute nw/w split for all mu-power channels
+    P22_mu0_dd_nw, P22_mu0_dd_w = qf_split(M22)
+    P13_mu0_dd_nw, P13_mu0_dd_w = p13_split(M13, UV_mu0_dd)
+    P22_mu2_vd_nw, P22_mu2_vd_w = qf_split(M22_mu2_vd_bare)
+    P22_mu2_dd_nw, P22_mu2_dd_w = qf_split(M22_mu2_dd_bare)
+    P13_mu2_vd_nw, P13_mu2_vd_w = p13_split(M13_mu2_vd_bare, UV_mu2_vd)
+    P13_mu2_dd_nw, P13_mu2_dd_w = p13_split(M13_mu2_dd_bare, UV_mu2_dd)
+    P22_mu4_vv_nw, P22_mu4_vv_w = qf_split(M22_mu4_vv_bare)
+    P22_mu4_vd_nw, P22_mu4_vd_w = qf_split(M22_mu4_vd_bare)
+    P22_mu4_dd_nw, P22_mu4_dd_w = qf_split(M22_mu4_dd_bare)
+    P13_mu4_vv_nw, P13_mu4_vv_w = p13_split(M13_mu4_vv_bare, UV_mu4_vv)
+    P13_mu4_vd_nw, P13_mu4_vd_w = p13_split(M13_mu4_vd_bare, UV_mu4_vd)
+    P22_mu6_vv_nw, P22_mu6_vv_w = qf_split(M22_mu6_vv_mat)
+    P22_mu6_vd_nw, P22_mu6_vd_w = qf_split(M22_mu6_vd_mat)
+    P13_mu6_nw,    P13_mu6_w    = p13_split(M13_mu6_mat, UV_mu6)
+    P22_mu8_nw,    P22_mu8_w    = qf_split(M22_mu8_mat)
+
+    # EPTComponents still needs these combined (for _pk_mm_tree_mu68_at_mu)
+    P22_mu6_vv = P22_mu6_vv_nw + P22_mu6_vv_w * Exp
+    P22_mu6_vd = P22_mu6_vd_nw + P22_mu6_vd_w * Exp
+    P22_mu8    = P22_mu8_nw + P22_mu8_w * Exp
+    P13_mu6    = P13_mu6_nw + P13_mu6_w * Exp
+
+    # GL loop with anisotropic Sigmatot for 1-loop multipoles
+    # Replaces old analytic Pk_0/2/4_vv1 = P13_0/2/4_vv + P22_0/2/4_vv
+    Pk_0_vv1 = jnp.zeros_like(k)
+    Pk_2_vv1 = jnp.zeros_like(k)
+    Pk_4_vv1 = jnp.zeros_like(k)
+    Pk_0_vd1 = jnp.zeros_like(k)
+    Pk_2_vd1 = jnp.zeros_like(k)
+    Pk_4_vd1 = jnp.zeros_like(k)
+    Pk_0_dd1 = jnp.zeros_like(k)
+    Pk_2_dd1 = jnp.zeros_like(k)
+    Pk_4_dd1 = jnp.zeros_like(k)
+
+    _pk_w_for_ratio = (jnp.asarray(pk_w) if pk_w is not None else jnp.zeros_like(k)) if use_ir_rsd else jnp.zeros_like(k)
+    _pk_nw_safe = jnp.where(pk_nw_arr > 1e-100, pk_nw_arr, jnp.ones_like(pk_nw_arr))
+    _delta_sig2 = delta_sigma2_bao if delta_sigma2_bao is not None else 0.0
+    _sig2_bao = sigma2_bao if sigma2_bao is not None else 0.0
+
+    for _mu_g, _w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
+        _mu2 = float(_mu_g)**2
+        _Sig = _sig2_bao*(1 + f*_mu2*(2+f)) + _delta_sig2*f**2*_mu2*(_mu2-1)
+        _Eg  = jnp.exp(-_Sig * k**2)
+        _r13 = jnp.where(pk_nw_arr > 1e-100,
+                         1.0 + (_pk_w_for_ratio / _pk_nw_safe) * _Eg,
+                         jnp.ones_like(k))
+
+        # vv: mu^4 + mu^6 + mu^8
+        _Pvv = (
+            (P13_mu4_vv_nw * _r13 + P22_mu4_vv_nw + (P22_mu4_vv_w + P13_mu4_vv_w) * _Eg) * _mu2**2
+          + (P13_mu6_nw * _r13 + P22_mu6_vv_nw + (P22_mu6_vv_w + P13_mu6_w) * _Eg) * _mu2**3
+          + (P22_mu8_nw + P22_mu8_w * _Eg) * _mu2**4
+        )
+        # dd: mu^0 + mu^2 + mu^4
+        _Pdd = (
+            (P22_mu0_dd_nw + P13_mu0_dd_nw * _r13 + (P13_mu0_dd_w + P22_mu0_dd_w) * _Eg)
+          + (P22_mu2_dd_nw + P13_mu2_dd_nw * _r13 + (P22_mu2_dd_w + P13_mu2_dd_w) * _Eg) * _mu2
+          + (P22_mu4_dd_nw + P22_mu4_dd_w * _Eg) * _mu2**2
+        )
+        # vd: mu^2 + mu^4 + mu^6
+        _Pvd = (
+            (P13_mu2_vd_nw * _r13 + P22_mu2_vd_nw + (P22_mu2_vd_w + P13_mu2_vd_w) * _Eg) * _mu2
+          + (P13_mu4_vd_nw * _r13 + P22_mu4_vd_nw + (P22_mu4_vd_w + P13_mu4_vd_w) * _Eg) * _mu2**2
+          + (P22_mu6_vd_nw + P22_mu6_vd_w * _Eg) * _mu2**3
+        )
+
+        _L0 = 1.0
+        _L2 = 0.5 * (3*_mu2 - 1)
+        _L4 = (35*_mu2**2 - 30*_mu2 + 3) / 8.0
+
+        # Anisotropic tree: ps_1loop_jax eq. and CLASS-PT AP path (nonlinear_pt.c line 9388)
+        # p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
+        _p_tree = pk_nw_arr + _pk_w_for_ratio * _Eg * (1.0 + _Sig * k**2)
+        _tree_vv = f**2 * _mu2**2 * _p_tree
+        _tree_vd = 2.0 * f * _mu2 * _p_tree
+        _tree_dd = _p_tree
+
+        Pk_0_vv = Pk_0_vv + _w_g * 0.5 * _L0 * _tree_vv
+        Pk_2_vv = Pk_2_vv + _w_g * 2.5 * _L2 * _tree_vv
+        Pk_4_vv = Pk_4_vv + _w_g * 4.5 * _L4 * _tree_vv
+        Pk_0_vd = Pk_0_vd + _w_g * 0.5 * _L0 * _tree_vd
+        Pk_2_vd = Pk_2_vd + _w_g * 2.5 * _L2 * _tree_vd
+        Pk_4_vd = Pk_4_vd + _w_g * 4.5 * _L4 * _tree_vd
+        Pk_0_dd = Pk_0_dd + _w_g * 0.5 * _L0 * _tree_dd
+        Pk_2_dd = Pk_2_dd + _w_g * 2.5 * _L2 * _tree_dd
+        Pk_4_dd = Pk_4_dd + _w_g * 4.5 * _L4 * _tree_dd
+
+        Pk_0_vv1 = Pk_0_vv1 + _w_g * 0.5 * _L0 * _Pvv
+        Pk_2_vv1 = Pk_2_vv1 + _w_g * 2.5 * _L2 * _Pvv
+        Pk_4_vv1 = Pk_4_vv1 + _w_g * 4.5 * _L4 * _Pvv
+        Pk_0_dd1 = Pk_0_dd1 + _w_g * 0.5 * _L0 * _Pdd
+        Pk_2_dd1 = Pk_2_dd1 + _w_g * 2.5 * _L2 * _Pdd
+        Pk_4_dd1 = Pk_4_dd1 + _w_g * 4.5 * _L4 * _Pdd
+        Pk_0_vd1 = Pk_0_vd1 + _w_g * 0.5 * _L0 * _Pvd
+        Pk_2_vd1 = Pk_2_vd1 + _w_g * 2.5 * _L2 * _Pvd
+        Pk_4_vd1 = Pk_4_vd1 + _w_g * 4.5 * _L4 * _Pvd
 
     # ===========================================================
     # RSD BIAS CROSS-TERMS
@@ -1253,6 +1419,7 @@ def _compute_bias_spectra(
         "Pk_ctr0": Pk_ctr0, "Pk_ctr2": Pk_ctr2, "Pk_ctr4": Pk_ctr4,
         "Pk_0_vv": Pk_0_vv, "Pk_0_vd": Pk_0_vd, "Pk_0_dd": Pk_0_dd,
         "Pk_2_vv": Pk_2_vv, "Pk_2_vd": Pk_2_vd, "Pk_4_vv": Pk_4_vv,
+        "Pk_2_dd": Pk_2_dd, "Pk_4_vd": Pk_4_vd, "Pk_4_dd": Pk_4_dd,
         "Pk_0_vv1": Pk_0_vv1, "Pk_0_vd1": Pk_0_vd1, "Pk_0_dd1": Pk_0_dd1,
         "Pk_2_vv1": Pk_2_vv1, "Pk_2_vd1": Pk_2_vd1, "Pk_2_dd1": Pk_2_dd1,
         "Pk_4_vv1": Pk_4_vv1, "Pk_4_vd1": Pk_4_vd1, "Pk_4_dd1": Pk_4_dd1,
@@ -1359,22 +1526,26 @@ def compute_ept(
         damp = jnp.exp(-sigma2_bao * k_h ** 2)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * damp
-        # Tree-level spectrum (slightly different from resummed; includes extra term)
-        # cf. CLASS-PT: Ptree = Pnw + Pw × exp(-Σ²k²)(1 + Σ²k²)
-        Pk_tree = pk_nw + pk_w * damp * (1.0 + sigma2_bao * k_h ** 2)
+        # Tree-level spectrum for real-space: use raw pk_lin_h (no IR damping).
+        # ps_1loop_jax uses pk_lin for the real-space tree (get_pk_real has
+        # "# no IR resummation"). This avoids sensitivity to our DST-derived
+        # sigma2_bao, which may differ slightly from CLASS-PT's.
+        # RSD tree multipoles are computed via anisotropic GL quadrature in
+        # _compute_bias_spectra (see Pk_0/2/4_vv/vd/dd accumulated there).
+        Pk_tree = pk_lin_h
     elif prec.ir_resummation:
         # Default path: call NumPy IR resummation (NOT differentiable through pk_lin_h).
         # Use _ir_precomputed to enable gradients.
         pk_nw_np, pk_w_np, sigma2_bao, delta_sigma2_bao = _ir_resummation_numpy(
-            np.array(pk_lin_h), np.array(k_h)
+            np.array(pk_lin_h), np.array(k_h), h=h
         )
         pk_nw = jnp.array(pk_nw_np)
         pk_w  = jnp.array(pk_w_np)
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2)
-        # Tree-level spectrum (slightly different from resummed; includes extra term)
-        # cf. CLASS-PT: Ptree = Pnw + Pw × exp(-Σ²k²)(1 + Σ²k²)
-        Pk_tree = pk_nw + pk_w * jnp.exp(-sigma2_bao * k_h ** 2) * (1.0 + sigma2_bao * k_h ** 2)
+        # Tree-level spectrum for real-space: use raw pk_lin_h (no IR damping).
+        # RSD tree multipoles are computed via anisotropic GL quadrature.
+        Pk_tree = pk_lin_h
     else:
         pk_resummed = pk_lin_h
         Pk_tree = pk_lin_h
@@ -1436,6 +1607,8 @@ def compute_ept(
         cmsym_w=cmsym_w_jnp,
         pk_nw=pk_nw_jnp,
         sigma2_bao=sigma2_bao if prec.ir_resummation else None,
+        delta_sigma2_bao=delta_sigma2_bao if prec.ir_resummation else None,
+        pk_w=pk_w if prec.ir_resummation else None,
     )
 
     _sigma2 = float(sigma2_bao) if sigma2_bao is not None else 0.0
@@ -1598,11 +1771,8 @@ def _pk_mm_tree_mu68_at_mu(
     wiggle_ratio = jnp.where(ept.pk_nw > 1e-100, ept.pk_w / pk_nw_safe, jnp.zeros_like(ept.pk_nw))
     P13ratio = 1.0 + wiggle_ratio * Exp
 
-    # New mu^6/mu^8 terms (nonlinear_pt.c lines 8069-8159)
-    P_mu68 = ((ept.P13_mu6 * P13ratio + ept.P22_mu6_vv) * mu**6
-              + ept.P22_mu8 * mu**8)
-
-    return Ptree + P_mu68
+    # P_mu68 is handled analytically by the Pk_*_vv1 multipole kernels (Fix 1).
+    return Ptree
 
 
 def pk_mm_l0(
@@ -1611,18 +1781,14 @@ def pk_mm_l0(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter monopole (ℓ=0).
 
-    Tree via 40-pt GL quadrature with anisotropic Sigmatot(μ) + new mu^6/mu^8.
-    Existing mu^0/mu^2/mu^4 1-loop added analytically.
-    cf. CLASS-PT nonlinear_pt.c lines 9385–9417.
+    Tree via isotropic IR-resummed Kaiser formula (matches CLASS-PT non-AP).
+    1-loop added analytically.
+    cf. CLASS-PT nonlinear_pt.c lines 6901–6910.
     """
-    f = ept.f
-    k = ept.kh
-    result = jnp.zeros_like(k)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        result = result + w_g * _pk_mm_tree_mu68_at_mu(float(mu_g), k, ept, f)
-    new_l0 = 0.5 * result
+    # Tree: isotropic Pbin × (1 + 2f/3 + f²/5)  [CLASS-PT non-AP]
+    tree_l0 = ept.Pk_0_dd + ept.Pk_0_vd + ept.Pk_0_vv
     P1loop_l0 = ept.Pk_0_dd1 + ept.Pk_0_vd1 + ept.Pk_0_vv1
-    return new_l0 + P1loop_l0 + 2.0 * cs0 * ept.Pk_ctr0
+    return tree_l0 + P1loop_l0 + 2.0 * cs0 * ept.Pk_ctr0
 
 
 def pk_mm_l2(
@@ -1631,19 +1797,14 @@ def pk_mm_l2(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter quadrupole (ℓ=2).
 
-    Tree via 40-pt GL quadrature with anisotropic Sigmatot(μ) + new mu^6/mu^8.
-    Existing mu^0/mu^2/mu^4 1-loop added analytically.
-    cf. CLASS-PT nonlinear_pt.c lines 9385–9417.
+    Tree via isotropic IR-resummed Kaiser formula (matches CLASS-PT non-AP).
+    1-loop added analytically.
+    cf. CLASS-PT nonlinear_pt.c lines 7020–7030.
     """
-    f = ept.f
-    k = ept.kh
-    result = jnp.zeros_like(k)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        L2 = 0.5 * (3.0 * float(mu_g)**2 - 1.0)
-        result = result + w_g * L2 * _pk_mm_tree_mu68_at_mu(float(mu_g), k, ept, f)
-    new_l2 = (5.0 / 2.0) * result
+    # Tree: anisotropic GL integral; Pk_2_dd is non-zero with Sigmatot(mu)
+    tree_l2 = ept.Pk_2_vv + ept.Pk_2_vd + ept.Pk_2_dd
     P1loop_l2 = ept.Pk_2_vv1 + ept.Pk_2_vd1 + ept.Pk_2_dd1
-    return new_l2 + P1loop_l2 + 2.0 * cs2 * ept.Pk_ctr2
+    return tree_l2 + P1loop_l2 + 2.0 * cs2 * ept.Pk_ctr2
 
 
 def pk_mm_l4(
@@ -1652,20 +1813,14 @@ def pk_mm_l4(
 ) -> Float[Array, "Nk"]:
     """Redshift-space matter-matter hexadecapole (ℓ=4).
 
-    Tree via 40-pt GL quadrature with anisotropic Sigmatot(μ) + new mu^6/mu^8.
-    Existing mu^0/mu^2/mu^4 1-loop added analytically.
-    cf. CLASS-PT nonlinear_pt.c lines 9385–9417.
+    Tree via isotropic IR-resummed Kaiser formula (matches CLASS-PT non-AP).
+    1-loop added analytically.
+    cf. CLASS-PT nonlinear_pt.c lines 7127–7140.
     """
-    f = ept.f
-    k = ept.kh
-    result = jnp.zeros_like(k)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        mu2 = float(mu_g)**2
-        L4 = (35.0 * mu2**2 - 30.0 * mu2 + 3.0) / 8.0
-        result = result + w_g * L4 * _pk_mm_tree_mu68_at_mu(float(mu_g), k, ept, f)
-    new_l4 = (9.0 / 2.0) * result
+    # Tree: anisotropic GL integral; Pk_4_vd, Pk_4_dd non-zero with Sigmatot(mu)
+    tree_l4 = ept.Pk_4_vv + ept.Pk_4_vd + ept.Pk_4_dd
     P1loop_l4 = ept.Pk_4_vv1 + ept.Pk_4_vd1 + ept.Pk_4_dd1
-    return new_l4 + P1loop_l4 + 2.0 * cs4 * ept.Pk_ctr4
+    return tree_l4 + P1loop_l4 + 2.0 * cs4 * ept.Pk_ctr4
 
 
 def pk_gg_l0(
@@ -1689,16 +1844,8 @@ def pk_gg_l0(
     h = ept.h
     kh = ept.kh
 
-    # Gauss-Legendre quadrature: anisotropic galaxy tree (b1 + f*mu^2)^2 * Pbin(mu)
-    result = jnp.zeros_like(kh)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        mu = float(mu_g)
-        Sigmatot = (ept.sigma2_bao * (1.0 + f * mu**2 * (2.0 + f))
-                    + ept.delta_sigma2_bao * f**2 * mu**2 * (mu**2 - 1.0))
-        Exp_mu = jnp.exp(-Sigmatot * kh**2)
-        pk_disc_mu = ept.pk_nw + ept.pk_w * Exp_mu
-        result = result + w_g * pk_disc_mu * (b1 + f * mu**2)**2
-    new_l0_tree = 0.5 * result
+    # Tree: isotropic Pbin × (b1² + 2f·b1/3 + f²/5)  [CLASS-PT non-AP]
+    new_l0_tree = b1 ** 2 * ept.Pk_0_dd + b1 * ept.Pk_0_vd + ept.Pk_0_vv
 
     # 1-loop contributions (isotropic IR, analytical)
     P_loop_l0 = (
@@ -1746,17 +1893,10 @@ def pk_gg_l2(
     h = ept.h
     kh = ept.kh
 
-    # Gauss-Legendre quadrature: anisotropic galaxy tree
-    result = jnp.zeros_like(kh)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        mu = float(mu_g)
-        Sigmatot = (ept.sigma2_bao * (1.0 + f * mu**2 * (2.0 + f))
-                    + ept.delta_sigma2_bao * f**2 * mu**2 * (mu**2 - 1.0))
-        Exp_mu = jnp.exp(-Sigmatot * kh**2)
-        pk_disc_mu = ept.pk_nw + ept.pk_w * Exp_mu
-        L2 = 0.5 * (3.0 * mu**2 - 1.0)
-        result = result + w_g * L2 * pk_disc_mu * (b1 + f * mu**2)**2
-    new_l2_tree = (5.0 / 2.0) * result
+    # Tree: Kaiser formula (b1+fμ²)² projected to L2; the b1²*dd term vanishes
+    # because ∫L2(μ)*1 dμ = 0, so Pk_2_dd = 0 in CLASS-PT's normalization.
+    # cf. CLASS-PT classy.pyx: pm[18]+b1*pm[19] for tree (no b1² term).
+    new_l2_tree = ept.Pk_2_vv + b1 * ept.Pk_2_vd
 
     P_loop_l2 = (
         ept.Pk_2_vv1
@@ -1799,18 +1939,10 @@ def pk_gg_l4(
     h = ept.h
     kh = ept.kh
 
-    # Gauss-Legendre quadrature: anisotropic galaxy tree
-    result = jnp.zeros_like(kh)
-    for mu_g, w_g in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
-        mu = float(mu_g)
-        Sigmatot = (ept.sigma2_bao * (1.0 + f * mu**2 * (2.0 + f))
-                    + ept.delta_sigma2_bao * f**2 * mu**2 * (mu**2 - 1.0))
-        Exp_mu = jnp.exp(-Sigmatot * kh**2)
-        pk_disc_mu = ept.pk_nw + ept.pk_w * Exp_mu
-        mu2 = mu**2
-        L4 = (35.0 * mu2**2 - 30.0 * mu2 + 3.0) / 8.0
-        result = result + w_g * L4 * pk_disc_mu * (b1 + f * mu**2)**2
-    new_l4_tree = (9.0 / 2.0) * result
+    # Tree: CLASS-PT uses pm[20] (the matter anisotropic tree) for both matter
+    # and galaxy l=4; b1 factors appear only on the 1-loop terms pm[28]/pm[29].
+    # cf. CLASS-PT classy.pyx line 1213: pm[20]+pm[27]+b1*pm[28]+b1²*pm[29].
+    new_l4_tree = ept.Pk_4_vv + ept.Pk_4_vd + ept.Pk_4_dd
 
     P_loop_l4 = (
         ept.Pk_4_vv1
