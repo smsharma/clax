@@ -3,8 +3,9 @@
 Integrates the linearized Einstein-Boltzmann equations for each Fourier mode k,
 producing source functions S(k,τ) for temperature, E-polarization, and lensing.
 
-Uses approximation-free integration: the full Boltzmann hierarchy is solved at
-all times with a stiff implicit solver. No TCA/RSA/UFA switching.
+Uses the full Boltzmann hierarchy by default, with an optional CLASS-style
+late-time ``ncdm`` fluid approximation controlled by
+``PrecisionParams.ncdm_fluid_approximation``.
 
 Key function:
     perturbations_solve(params, prec, bg, th) -> PerturbationResult
@@ -33,12 +34,14 @@ from dataclasses import dataclass
 
 import diffrax
 import jax
+import jax.flatten_util as jfu
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
 from clax import constants as const
 from clax.background import BackgroundResult
 from clax.interpolation import CubicSpline
+from clax.ode import _get_adjoint
 from clax.params import CosmoParams, PrecisionParams
 from clax.thermodynamics import ThermoResult
 
@@ -47,12 +50,149 @@ from clax.thermodynamics import ThermoResult
 _RSA_DAMPING_ENABLED = True
 
 
+@dataclass(frozen=True)
+class PerturbationPIDControllerConfig:
+    """Static scalar-perturbation PID controller configuration.
+
+    The defaults follow the DISCO-EB strategy: use a filtered state-space norm
+    plus tuned PID gains instead of Diffrax's unweighted default norm.
+    """
+
+    pcoeff: float = 0.25
+    icoeff: float = 0.80
+    dcoeff: float = 0.0
+    factormax: float = 20.0
+    factormin: float = 0.3
+
+
+SCALAR_PID_FILTERED_VARIABLE_NAMES: tuple[str, ...] = (
+    "eta",
+    "delta_cdm",
+    "delta_b",
+    "F_g_0",
+    "theta_b",
+    "F_g_1",
+)
+
+
+def _resolve_scalar_pid_config(
+    *,
+    pt_pid_pcoeff: float = 0.25,
+    pt_pid_icoeff: float = 0.80,
+    pt_pid_dcoeff: float = 0.0,
+    pt_pid_factormax: float = 20.0,
+    pt_pid_factormin: float = 0.3,
+) -> PerturbationPIDControllerConfig:
+    """Build a static PID configuration for scalar perturbation solves."""
+    return PerturbationPIDControllerConfig(
+        pcoeff=pt_pid_pcoeff,
+        icoeff=pt_pid_icoeff,
+        dcoeff=pt_pid_dcoeff,
+        factormax=pt_pid_factormax,
+        factormin=pt_pid_factormin,
+    )
+
+
+def _scalar_pid_filtered_variable_indices(idx) -> jnp.ndarray:
+    """Map the fixed DISCO-EB-style filtered variables onto the active state layout."""
+    missing = [name for name in SCALAR_PID_FILTERED_VARIABLE_NAMES if name not in idx]
+    if missing:
+        raise KeyError(
+            f"Unknown scalar PID filter names {missing!r}; available names include {sorted(idx.keys())[:12]!r}..."
+        )
+    return jnp.asarray([idx[name] for name in SCALAR_PID_FILTERED_VARIABLE_NAMES], dtype=jnp.int32)
+
+
+def _scalar_pid_filtered_variable_weights(k) -> jnp.ndarray:
+    """Return the fixed DISCO-EB-style k-dependent weights for scalar PID control."""
+    k2 = jnp.maximum(jnp.asarray(k) ** 2, 1e-30)
+    return jnp.asarray([k2, 1.0, 1.0, 1.0, 1.0 / k2, 1.0], dtype=float)
+
+
+@jax.custom_jvp
+def _rms_norm_safe(x):
+    """RMS norm with finite JVP at zero and inf-valued inputs."""
+    x_sq = jnp.real(x * jnp.conj(x))
+    return jnp.sqrt(jnp.mean(x_sq))
+
+
+@_rms_norm_safe.defjvp
+def _rms_norm_safe_jvp(primals, tangents):
+    (x,) = primals
+    (tx,) = tangents
+    out = _rms_norm_safe(x)
+    pred = (out == 0) | jnp.isinf(out)
+    numerator = jnp.where(pred, 0, x)
+    denominator = jnp.where(pred, 1, out * x.size)
+    t_out = jnp.dot(numerator / denominator, tx)
+    return out, t_out
+
+
+def _scalar_pid_filtered_rms_norm(
+    x,
+    filter_indices: jnp.ndarray,
+    filter_weights: jnp.ndarray,
+):
+    """Compute a filtered RMS norm for scalar perturbation error control."""
+    x_flat, _ = jfu.ravel_pytree(x)
+    if x_flat.size == 0:
+        return jnp.asarray(0.0)
+    return _rms_norm_safe(x_flat[filter_indices] * filter_weights)
+
+
+def _make_scalar_pid_controller(
+    *,
+    prec: PrecisionParams,
+    k,
+    idx,
+    config: PerturbationPIDControllerConfig,
+):
+    """Construct the DISCO-EB-style scalar perturbation PID controller."""
+    filter_indices = _scalar_pid_filtered_variable_indices(idx)
+    filter_weights = _scalar_pid_filtered_variable_weights(k)
+    return diffrax.PIDController(
+        rtol=prec.pt_ode_rtol,
+        atol=prec.pt_ode_atol,
+        norm=lambda err: _scalar_pid_filtered_rms_norm(err, filter_indices, filter_weights),
+        pcoeff=config.pcoeff,
+        icoeff=config.icoeff,
+        dcoeff=config.dcoeff,
+        factormax=config.factormax,
+        factormin=config.factormin,
+    )
+
+
+def _make_scalar_pid_controller_unfiltered(
+    *,
+    prec: PrecisionParams,
+    config: PerturbationPIDControllerConfig,
+):
+    """Construct a plain tuned PID controller without the k-dependent filtered norm."""
+    return diffrax.PIDController(
+        rtol=prec.pt_ode_rtol,
+        atol=prec.pt_ode_atol,
+        pcoeff=config.pcoeff,
+        icoeff=config.icoeff,
+        dcoeff=config.dcoeff,
+        factormax=config.factormax,
+        factormin=config.factormin,
+    )
+
+
 # ---------------------------------------------------------------------------
 # State vector index layout
 # ---------------------------------------------------------------------------
 
-def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int,
-                   n_q_ncdm: int = 0, l_max_ncdm: int = 17):
+def _build_indices(
+    l_max_g: int,
+    l_max_pol: int,
+    l_max_ur: int,
+    n_q_ncdm: int = 0,
+    l_max_ncdm: int = 17,
+    *,
+    include_polarization: bool = True,
+    include_ncdm_fluid: bool = True,
+):
     """Build index mapping for the perturbation state vector.
 
     Returns a dict mapping variable names to indices.
@@ -78,11 +218,13 @@ def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int,
         idx[f'F_g_{l}'] = i; i += 1
     idx['F_g_end'] = i
 
-    # Photon polarization hierarchy
-    idx['G_g_start'] = i
-    for l in range(l_max_pol + 1):
-        idx[f'G_g_{l}'] = i; i += 1
-    idx['G_g_end'] = i
+    idx['has_polarization'] = include_polarization
+    if include_polarization:
+        # Photon polarization hierarchy
+        idx['G_g_start'] = i
+        for l in range(l_max_pol + 1):
+            idx[f'G_g_{l}'] = i; i += 1
+        idx['G_g_end'] = i
 
     # Massless neutrinos (ultra-relativistic)
     idx['F_ur_start'] = i
@@ -100,6 +242,14 @@ def _build_indices(l_max_g: int, l_max_pol: int, l_max_ur: int,
     n_ncdm_vars = n_q_ncdm * (l_max_ncdm + 1)
     i += n_ncdm_vars
     idx['psi_ncdm_end'] = i
+
+    # Integrated ncdm fluid variables used by the CLASS late-time closure.
+    idx['ncdm_fluid_start'] = i
+    if n_q_ncdm > 0 and include_ncdm_fluid:
+        idx['ncdm_fluid_delta'] = i; i += 1
+        idx['ncdm_fluid_theta'] = i; i += 1
+        idx['ncdm_fluid_shear'] = i; i += 1
+    idx['ncdm_fluid_end'] = i
 
     idx['n_eq'] = i
     return idx
@@ -159,6 +309,84 @@ def _ncdm_integrated_moments(y, q, w, M, a, k, idx):
     return rho_delta, rho_plus_p_theta, rho_plus_p_shear, delta_p, rho_unnorm, p_unnorm
 
 
+def _ncdm_fluid_mode_code(mode: str) -> int:
+    """Map CLASS-style ``ncdm_fluid_approximation`` strings to integer codes."""
+    mode_map = {"mb": 0, "hu": 1, "class": 2, "none": 3}
+    try:
+        return mode_map[mode.lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported ncdm_fluid_approximation={mode!r}; expected one of "
+            "'mb', 'hu', 'class', 'none'."
+        ) from exc
+
+
+def _ncdm_background_quantities(bg: BackgroundResult, loga):
+    """Return background ``ncdm`` quantities needed by the CLASS fluid closure."""
+    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
+    p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
+    pseudo_p_ncdm = bg.pseudo_p_ncdm_of_loga.evaluate(loga)
+    w_ncdm = bg.w_ncdm_of_loga.evaluate(loga)
+    ca2_ncdm = bg.ca2_ncdm_of_loga.evaluate(loga)
+    return rho_ncdm, p_ncdm, pseudo_p_ncdm, w_ncdm, ca2_ncdm
+
+
+def _ncdm_hierarchy_observables(y, q, w, M, a, k, idx):
+    """Project the full ``ncdm`` hierarchy onto integrated fluid observables."""
+    rho_delta_ncdm, rho_plus_p_theta_ncdm, rho_plus_p_shear_ncdm, delta_p_ncdm_raw, rho_unnorm_ncdm, p_unnorm_ncdm = (
+        _ncdm_integrated_moments(y, q, w, M, a, k, idx)
+    )
+    rho_plus_p_ncdm = jnp.maximum(rho_unnorm_ncdm + p_unnorm_ncdm, 1e-30)
+    delta_ncdm = rho_delta_ncdm / jnp.maximum(rho_unnorm_ncdm, 1e-30)
+    theta_ncdm = rho_plus_p_theta_ncdm / rho_plus_p_ncdm
+    shear_ncdm = rho_plus_p_shear_ncdm / rho_plus_p_ncdm
+    delta_p_over_rho_ncdm = delta_p_ncdm_raw / jnp.maximum(rho_unnorm_ncdm, 1e-30)
+    return delta_ncdm, theta_ncdm, shear_ncdm, delta_p_over_rho_ncdm
+
+
+def _ncdm_fluid_active(mode_code: int, trigger_tau_over_tau_k: float, tau, k, idx) -> bool:
+    """Return whether the CLASS ``ncdm`` fluid approximation is active."""
+    return (idx["n_q_ncdm"] > 0) & (mode_code != 3) & ((tau * k) > trigger_tau_over_tau_k)
+
+
+def _ncdm_observables_from_state(
+    y,
+    tau,
+    k,
+    bg: BackgroundResult,
+    idx,
+    q_ncdm,
+    w_ncdm,
+    M_ncdm,
+    mode_code: int = 3,
+    trigger_tau_over_tau_k: float = 31.0,
+):
+    """Return ``delta_ncdm``, ``theta_ncdm``, ``shear_ncdm`` and ``delta_p/rho``."""
+    loga = bg.loga_of_tau.evaluate(tau)
+    a = jnp.exp(loga)
+    _, _, _, _, ca2_ncdm = _ncdm_background_quantities(bg, loga)
+
+    delta_ncdm_h, theta_ncdm_h, shear_ncdm_h, delta_p_over_rho_h = _ncdm_hierarchy_observables(
+        y, q_ncdm, w_ncdm, M_ncdm, a, k, idx
+    )
+    is_ncdmfa = _ncdm_fluid_active(mode_code, trigger_tau_over_tau_k, tau, k, idx)
+
+    if idx["ncdm_fluid_end"] > idx["ncdm_fluid_start"]:
+        delta_ncdm_f = y[idx["ncdm_fluid_delta"]]
+        theta_ncdm_f = y[idx["ncdm_fluid_theta"]]
+        shear_ncdm_f = y[idx["ncdm_fluid_shear"]]
+    else:
+        delta_ncdm_f = delta_ncdm_h
+        theta_ncdm_f = theta_ncdm_h
+        shear_ncdm_f = shear_ncdm_h
+
+    delta_ncdm = jnp.where(is_ncdmfa, delta_ncdm_f, delta_ncdm_h)
+    theta_ncdm = jnp.where(is_ncdmfa, theta_ncdm_f, theta_ncdm_h)
+    shear_ncdm = jnp.where(is_ncdmfa, shear_ncdm_f, shear_ncdm_h)
+    delta_p_over_rho_ncdm = jnp.where(is_ncdmfa, ca2_ncdm * delta_ncdm_f, delta_p_over_rho_h)
+    return delta_ncdm, theta_ncdm, shear_ncdm, delta_p_over_rho_ncdm
+
+
 # ---------------------------------------------------------------------------
 # PerturbationResult
 # ---------------------------------------------------------------------------
@@ -199,6 +427,23 @@ class PerturbationResult:
             self.source_SW, self.source_ISW_vis, self.source_ISW_fs, self.source_Doppler,
             self.source_Doppler_nonIBP, self.source_T0_noDopp,
         ], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, fields):
+        return cls(*fields)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class MatterPerturbationResult:
+    """Reduced perturbation output for the dedicated linear-matter-power path."""
+
+    k_grid: Float[Array, "Nk"]
+    tau_grid: Float[Array, "Ntau"]
+    delta_m: Float[Array, "Nk Ntau"]
+
+    def tree_flatten(self):
+        return [self.k_grid, self.tau_grid, self.delta_m], None
 
     @classmethod
     def tree_unflatten(cls, aux, fields):
@@ -285,6 +530,7 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq, args_ncdm=None):
     shear_ur = ktau_two / (45.0 + 12.0 * fracnu) * (3.0 * s2_squared - 1.0) * (
         1.0 + (4.0 * fracnu - 5.0) / 4.0 / (2.0 * fracnu + 15.0) * tau_ini * om
     ) * curvature_ini
+    l3_ur = ktau_three * 2.0 / 7.0 / (12.0 * fracnu + 45.0) * curvature_ini
 
     # Metric η: cf. CLASS line 5511
     eta = curvature_ini * (
@@ -313,6 +559,8 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq, args_ncdm=None):
     y0 = y0.at[idx['F_ur_0']].set(delta_ur)
     y0 = y0.at[idx['F_ur_1']].set(4.0 * theta_ur / (3.0 * k))
     y0 = y0.at[idx['F_ur_2']].set(2.0 * shear_ur)  # F_2 = 2σ
+    if idx['F_ur_end'] - idx['F_ur_start'] >= 4:
+        y0 = y0.at[idx['F_ur_3']].set(l3_ur)
 
     # Massive neutrino (ncdm) Boltzmann hierarchy Ψ_l(q)
     # At early times, ncdm is relativistic and ICs match massless neutrinos
@@ -339,7 +587,18 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq, args_ncdm=None):
             y0 = y0.at[base + 1].set(psi1_val)
             # Ψ_2(q) = -1/2 * σ_ur * dlnf0/dlnq
             y0 = y0.at[base + 2].set(-0.5 * shear_ur * dlnf0[iq])
-            # Higher moments: 0
+            if l_max_ncdm >= 3:
+                # CLASS also seeds the l=3 moment; starting from zero distorts Psi_2.
+                y0 = y0.at[base + 3].set(-0.25 * l3_ur * dlnf0[iq])
+            # Higher moments remain zero.
+
+        if idx["ncdm_fluid_end"] > idx["ncdm_fluid_start"]:
+            delta_ncdm_ini, theta_ncdm_ini, shear_ncdm_ini, _ = _ncdm_hierarchy_observables(
+                y0, q_ncdm, w_ncdm, M_ncdm, a_ini, k, idx
+            )
+            y0 = y0.at[idx['ncdm_fluid_delta']].set(delta_ncdm_ini)
+            y0 = y0.at[idx['ncdm_fluid_theta']].set(theta_ncdm_ini)
+            y0 = y0.at[idx['ncdm_fluid_shear']].set(shear_ncdm_ini)
 
     # Polarization starts at 0 (correct for adiabatic IC)
 
@@ -398,7 +657,7 @@ def _compute_theta_b_prime_blended(
 
     # dtau_c = d(tau_c)/d(tau) = -ddkappa*tau_c^2 (cf. CLASS perturbations.c:10074)
     # ddkappa = d(kappa_dot)/d(tau) = d(kappa_dot)/d(loga) * aH
-    dkd_dloga = th.kappa_dot_of_loga.derivative(loga)
+    dkd_dloga = th.dkappa_dot_dloga_of_loga.evaluate(loga)
     ddkappa = dkd_dloga * a_prime_over_a
     dtau_c = -ddkappa * tau_c * tau_c
     dtau_c_over_tau_c = dtau_c / jnp.maximum(tau_c, 1e-30)
@@ -487,8 +746,11 @@ def _perturbation_rhs(tau, y, args):
     # ncdm quadrature arrays (static across k-modes, stored as extra args)
     # Note: use _qw prefix to avoid collision with background w_ncdm (equation of state)
     if len(args) > 8:
-        q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, dlnf0_ncdm_qw = args[8], args[9], args[10], args[11]
+        ncdmfa_mode_code, ncdmfa_trigger = args[8], args[9]
+        q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, dlnf0_ncdm_qw = args[10], args[11], args[12], args[13]
     else:
+        ncdmfa_mode_code = 3
+        ncdmfa_trigger = 31.0
         q_ncdm_qw = jnp.zeros(1)
         w_ncdm_qw = jnp.zeros(1)
         M_ncdm_qw = 0.0
@@ -506,10 +768,7 @@ def _perturbation_rhs(tau, y, args):
     rho_b = bg.rho_b_of_loga.evaluate(loga)
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
-    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
-    p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
-    w_ncdm = bg.w_ncdm_of_loga.evaluate(loga)
-    ca2_ncdm = bg.ca2_ncdm_of_loga.evaluate(loga)
+    rho_ncdm, p_ncdm, pseudo_p_ncdm, w_ncdm, ca2_ncdm = _ncdm_background_quantities(bg, loga)
 
     # Thermodynamic quantities
     kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
@@ -525,7 +784,15 @@ def _perturbation_rhs(tau, y, args):
     delta_g = F_g[0]
     theta_g = 3.0 * k * F_g[1] / 4.0
 
-    G_g = y[idx['G_g_start']:idx['G_g_end']]
+    has_polarization = idx.get('has_polarization', True)
+    if has_polarization:
+        G_g = y[idx['G_g_start']:idx['G_g_end']]
+        G_g_0 = G_g[0]
+        G_g_2 = G_g[2]
+    else:
+        G_g = jnp.zeros(0, dtype=y.dtype)
+        G_g_0 = jnp.array(0.0, dtype=y.dtype)
+        G_g_2 = jnp.array(0.0, dtype=y.dtype)
 
     F_ur = y[idx['F_ur_start']:idx['F_ur_end']]
     delta_ur = F_ur[0]
@@ -535,25 +802,30 @@ def _perturbation_rhs(tau, y, args):
     # cf. CLASS perturbations.c:7047-7118
     n_q = idx['n_q_ncdm']
     l_max_ncdm = idx['l_max_ncdm']
+    is_ncdmfa = _ncdm_fluid_active(ncdmfa_mode_code, ncdmfa_trigger, tau, k, idx)
     if n_q > 0:
-        (rho_delta_ncdm, rho_plus_p_theta_ncdm, rho_plus_p_shear_ncdm,
-         delta_p_ncdm_raw, rho_unnorm_ncdm, p_unnorm_ncdm) = _ncdm_integrated_moments(
-            y, q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, a, k, idx)
-        # Convert to physical: δ_ncdm = rho_delta / rho_unnorm
-        delta_ncdm = rho_delta_ncdm / jnp.maximum(rho_unnorm_ncdm, 1e-30)
-        # θ_ncdm = rho_plus_p_theta / (rho_unnorm + p_unnorm)
-        theta_ncdm = rho_plus_p_theta_ncdm / jnp.maximum(rho_unnorm_ncdm + p_unnorm_ncdm, 1e-30)
-        # σ_ncdm = rho_plus_p_shear / (rho_unnorm + p_unnorm)
-        shear_ncdm_F2 = rho_plus_p_shear_ncdm / jnp.maximum(rho_unnorm_ncdm + p_unnorm_ncdm, 1e-30)
-        # δp_ncdm / ρ_ncdm
-        delta_p_over_rho_ncdm = delta_p_ncdm_raw / jnp.maximum(rho_unnorm_ncdm, 1e-30)
+        delta_ncdm_h, theta_ncdm_h, shear_ncdm_h, delta_p_over_rho_ncdm_h = _ncdm_hierarchy_observables(
+            y, q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, a, k, idx
+        )
+        if idx["ncdm_fluid_end"] > idx["ncdm_fluid_start"]:
+            delta_ncdm_f = y[idx['ncdm_fluid_delta']]
+            theta_ncdm_f = y[idx['ncdm_fluid_theta']]
+            shear_ncdm_f = y[idx['ncdm_fluid_shear']]
+        else:
+            delta_ncdm_f = delta_ncdm_h
+            theta_ncdm_f = theta_ncdm_h
+            shear_ncdm_f = shear_ncdm_h
+        delta_ncdm = jnp.where(is_ncdmfa, delta_ncdm_f, delta_ncdm_h)
+        theta_ncdm = jnp.where(is_ncdmfa, theta_ncdm_f, theta_ncdm_h)
+        shear_ncdm_F2 = jnp.where(is_ncdmfa, shear_ncdm_f, shear_ncdm_h)
+        delta_p_over_rho_ncdm = jnp.where(is_ncdmfa, ca2_ncdm * delta_ncdm_f, delta_p_over_rho_ncdm_h)
     else:
         delta_ncdm = delta_ur
         theta_ncdm = theta_ur
         shear_ncdm_F2 = F_ur[2] / 2.0
         delta_p_over_rho_ncdm = delta_ur / 3.0
 
-    Pi = F_g[2] + G_g[0] + G_g[2]
+    Pi = F_g[2] + G_g_0 + G_g_2
 
     # === TCA CRITERION (shared helper, dual criteria matching CLASS) ===
     is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
@@ -592,7 +864,7 @@ def _perturbation_rhs(tau, y, args):
     rsa_theta_g = -0.5 * h_prime_raw
     # Reionization correction for theta_g (rsa_MD_with_reio)
     # cf. CLASS perturbations.c:10427-10435
-    dkd_dloga = th.kappa_dot_of_loga.derivative(loga)
+    dkd_dloga = th.dkappa_dot_dloga_of_loga.evaluate(loga)
     ddkappa = dkd_dloga * a_prime_over_a  # d²κ/dτ²
     rsa_theta_g = rsa_theta_g + (3.0 / k2) * (
         ddkappa * (theta_b + 0.5 * h_prime_raw)
@@ -612,11 +884,10 @@ def _perturbation_rhs(tau, y, args):
     delta_ur_ein = jnp.where(is_rsa, rsa_delta_ur, delta_ur)
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur)
 
-    # Total density perturbation δρ with RSA substitution
-    # ncdm uses integrated moments from full Ψ_l(q) hierarchy
-    # RSA for ncdm: use algebraic RSA values when RSA is active
-    delta_ncdm_ein = jnp.where(is_rsa, rsa_delta_ur, delta_ncdm)
-    theta_ncdm_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ncdm)
+    # Total density perturbation δρ with RSA substitution.
+    # CLASS applies RSA to photons and ur, but not to ncdm.
+    delta_ncdm_ein = delta_ncdm
+    theta_ncdm_ein = theta_ncdm
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein)
 
@@ -633,10 +904,9 @@ def _perturbation_rhs(tau, y, args):
     # cf. CLASS line 6635: η' = 1.5 * a² * (ρ+p)θ / k²  (flat space)
     eta_prime = 1.5 * a2 * rho_plus_p_theta / k2
 
-    # Total pressure perturbation δp with RSA substitution
-    # ncdm: use δp from integrated moments (NOT rho*delta/3 which assumes w=1/3)
-    delta_p_ncdm_ein = jnp.where(is_rsa, rho_ncdm * rsa_delta_ur / 3.0,
-                                  rho_ncdm * delta_p_over_rho_ncdm)
+    # Total pressure perturbation δp with RSA substitution.
+    # Keep exact ncdm pressure perturbations even when photon/ur RSA is active.
+    delta_p_ncdm_ein = rho_ncdm * delta_p_over_rho_ncdm
     delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 + delta_p_ncdm_ein
 
     # α = (h' + 6η') / (2k²) -- gauge variable
@@ -663,9 +933,9 @@ def _perturbation_rhs(tau, y, args):
     F_g_2_blended = jnp.where(is_tca > 0.5, tca_F_g_2_1st, F_g[2])
     F_g_2_blended = jnp.where(is_rsa, 0.0, F_g_2_blended)
     F_ur_2_blended = jnp.where(is_rsa, 0.0, F_ur[2])
-    # ncdm shear: use integrated moments from Ψ_l(q) hierarchy
-    # Under RSA, ncdm shear → 0 (same as photon/neutrino)
-    shear_ncdm_blended = jnp.where(is_rsa, 0.0, shear_ncdm_F2)
+    # ncdm shear: use integrated moments from Ψ_l(q) hierarchy.
+    # CLASS does not zero ncdm shear under photon/ur RSA.
+    shear_ncdm_blended = shear_ncdm_F2
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_blended
                         + 2.0/3.0 * rho_ur * F_ur_2_blended
                         + (rho_ncdm + p_ncdm) * shear_ncdm_blended)
@@ -679,7 +949,7 @@ def _perturbation_rhs(tau, y, args):
     theta_prime_0 = (-a_prime_over_a * theta_b + k2 * (cs2 * delta_b + R_tca / 4.0 * delta_g)) / (1.0 + R_tca)
     metric_shear_prime = k2 * alpha_prime
     # dtau_c = -ddkappa*tau_c^2 (cf. CLASS perturbations.c:10074)
-    dkd_dloga_rhs = th.kappa_dot_of_loga.derivative(loga)
+    dkd_dloga_rhs = th.dkappa_dot_dloga_of_loga.evaluate(loga)
     ddkappa_rhs = dkd_dloga_rhs * a_prime_over_a
     dtau_c_rhs = -ddkappa_rhs * tau_c * tau_c
     # Apply second-order shear correction
@@ -690,7 +960,7 @@ def _perturbation_rhs(tau, y, args):
     # === BARYON VELOCITY (TCA/full blended via shared helper) ===
     R = 4.0 * rho_g / (3.0 * rho_b)
     theta_b_prime = _compute_theta_b_prime_blended(
-        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
+        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g_0, G_g_2,
         a_prime_over_a, cs2, k, k2, kappa_dot,
         rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime, is_tca, tau_c,
         alpha_prime=alpha_prime,
@@ -700,7 +970,7 @@ def _perturbation_rhs(tau, y, args):
     # Need TCA theta_b' for photon velocity computation
     # Recompute TCA shear and theta_b_tca for photon velocity
     theta_b_tca = _compute_theta_b_prime_blended(
-        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g[0], G_g[2],
+        theta_b, delta_b, theta_g, delta_g, F_g[2], G_g_0, G_g_2,
         a_prime_over_a, cs2, k, k2, kappa_dot,
         rho_g, rho_b, bg, th, loga, a, h_prime, eta_prime,
         jnp.ones_like(is_tca), tau_c,  # force TCA mode
@@ -802,28 +1072,29 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['F_g_start'] + l].add(-rsa_rate * F_g[l])
     dy = jax.lax.fori_loop(2, l_max_g + 1, rsa_damp_step, dy)
 
-    # === POLARIZATION HIERARCHY ===
-    # During TCA, all polarization is zero (scattering damps it instantly).
-    # Drive polarization to zero: G'_l = -G_l / tau_c
-    G0_full = -k*G_g[1] - kappa_dot*(G_g[0] - Pi/2.0)
-    G0_tca = -G_g[0] / tau_c
-    dy = dy.at[idx['G_g_0']].set(jnp.where(is_tca > 0.5, G0_tca, G0_full))
+    if has_polarization:
+        # === POLARIZATION HIERARCHY ===
+        # During TCA, all polarization is zero (scattering damps it instantly).
+        # Drive polarization to zero: G'_l = -G_l / tau_c
+        G0_full = -k*G_g[1] - kappa_dot*(G_g[0] - Pi/2.0)
+        G0_tca = -G_g[0] / tau_c
+        dy = dy.at[idx['G_g_0']].set(jnp.where(is_tca > 0.5, G0_tca, G0_full))
 
-    G1_full = k/3.0*(G_g[0] - 2.0*G_g[2]) - kappa_dot*G_g[1]
-    G1_tca = -G_g[1] / tau_c
-    dy = dy.at[idx['G_g_1']].set(jnp.where(is_tca > 0.5, G1_tca, G1_full))
+        G1_full = k/3.0*(G_g[0] - 2.0*G_g[2]) - kappa_dot*G_g[1]
+        G1_tca = -G_g[1] / tau_c
+        dy = dy.at[idx['G_g_1']].set(jnp.where(is_tca > 0.5, G1_tca, G1_full))
 
-    def pol_hierarchy_step(l, dy_acc):
-        Gl_prime = k/(2.0*l+1.0)*(l*G_g[l-1] - (l+1.0)*G_g[jnp.minimum(l+1, l_max_pol)]) - kappa_dot*G_g[l]
-        Gl_prime = Gl_prime + jnp.where(l == 2, kappa_dot * Pi / 10.0, 0.0)
-        Gl_prime_tca = -G_g[l] / tau_c
-        Gl_prime = jnp.where(is_tca > 0.5, Gl_prime_tca, Gl_prime)
-        return dy_acc.at[idx['G_g_start'] + l].set(Gl_prime)
-    dy = jax.lax.fori_loop(2, l_max_pol, pol_hierarchy_step, dy)
+        def pol_hierarchy_step(l, dy_acc):
+            Gl_prime = k/(2.0*l+1.0)*(l*G_g[l-1] - (l+1.0)*G_g[jnp.minimum(l+1, l_max_pol)]) - kappa_dot*G_g[l]
+            Gl_prime = Gl_prime + jnp.where(l == 2, kappa_dot * Pi / 10.0, 0.0)
+            Gl_prime_tca = -G_g[l] / tau_c
+            Gl_prime = jnp.where(is_tca > 0.5, Gl_prime_tca, Gl_prime)
+            return dy_acc.at[idx['G_g_start'] + l].set(Gl_prime)
+        dy = jax.lax.fori_loop(2, l_max_pol, pol_hierarchy_step, dy)
 
-    G_lmax_prime_full = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau_safe*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
-    G_lmax_prime_tca = -G_g[l_max_pol] / tau_c
-    dy = dy.at[idx['G_g_start'] + l_max_pol].set(jnp.where(is_tca > 0.5, G_lmax_prime_tca, G_lmax_prime_full))
+        G_lmax_prime_full = k*G_g[l_max_pol-1] - (l_max_pol+1.0)/tau_safe*G_g[l_max_pol] - kappa_dot*G_g[l_max_pol]
+        G_lmax_prime_tca = -G_g[l_max_pol] / tau_c
+        dy = dy.at[idx['G_g_start'] + l_max_pol].set(jnp.where(is_tca > 0.5, G_lmax_prime_tca, G_lmax_prime_full))
 
     # === MASSLESS NEUTRINO HIERARCHY ===
     # Neutrinos have no scattering — no TCA. Full hierarchy at all times.
@@ -853,10 +1124,11 @@ def _perturbation_rhs(tau, y, args):
         return dy_acc.at[idx['F_ur_start'] + l].add(-rsa_rate * F_ur[l])
     dy = jax.lax.fori_loop(2, l_max_ur + 1, rsa_damp_ur_step, dy)
 
-    # RSA damping for polarization (target = 0 for all moments)
-    def rsa_damp_pol_step(l, dy_acc):
-        return dy_acc.at[idx['G_g_start'] + l].add(-rsa_rate * G_g[l])
-    dy = jax.lax.fori_loop(0, l_max_pol + 1, rsa_damp_pol_step, dy)
+    if has_polarization:
+        # RSA damping for polarization (target = 0 for all moments)
+        def rsa_damp_pol_step(l, dy_acc):
+            return dy_acc.at[idx['G_g_start'] + l].add(-rsa_rate * G_g[l])
+        dy = jax.lax.fori_loop(0, l_max_pol + 1, rsa_damp_pol_step, dy)
 
     # === MASSIVE NEUTRINO (ncdm) BOLTZMANN HIERARCHY Ψ_l(q) ===
     # Full phase-space evolution for each momentum bin q.
@@ -870,6 +1142,7 @@ def _perturbation_rhs(tau, y, args):
     n_l_ncdm = l_max_ncdm + 1
     ncdm_start = idx['psi_ncdm_start']
     epsilon_ncdm = jnp.sqrt(q_ncdm_qw**2 + (M_ncdm_qw * a)**2)
+    has_ncdm_fluid = idx["ncdm_fluid_end"] > idx["ncdm_fluid_start"]
 
     if n_q > 0:
         def ncdm_hierarchy_all_q(iq, dy_acc):
@@ -907,14 +1180,74 @@ def _perturbation_rhs(tau, y, args):
             dy_acc = jax.lax.fori_loop(3, l_max_ncdm, ncdm_l_step, dy_acc)
 
             # l=l_max: truncation (Ma & Bertschinger closure)
-            # dΨ_lmax/dτ = (kq/ε)*Ψ_{lmax-1} - (lmax+1)/τ*Ψ_lmax
+            # CLASS uses k*cotKgen = 1/tau in the flat case here rather than
+            # the capped photon ``tau_safe`` helper above.
+            # cf. perturbations.c:9124-9128
+            tau_ncdm_closure = jnp.maximum(tau, 1.0e-30)
             dpsi_lmax = kq_over_eps * psi[l_max_ncdm - 1] \
-                        - (l_max_ncdm + 1.0) / tau_safe * psi[l_max_ncdm]
+                        - (l_max_ncdm + 1.0) / tau_ncdm_closure * psi[l_max_ncdm]
             dy_acc = dy_acc.at[base + l_max_ncdm].set(dpsi_lmax)
 
             return dy_acc
 
         dy = jax.lax.fori_loop(0, n_q, ncdm_hierarchy_all_q, dy)
+
+        def freeze_ncdm_hierarchy(iq, dy_acc):
+            base = ncdm_start + iq * n_l_ncdm
+            def zero_l(l, dy_inner):
+                return dy_inner.at[base + l].set(0.0)
+            return jax.lax.fori_loop(0, n_l_ncdm, zero_l, dy_acc)
+
+        dy = jax.lax.cond(
+            is_ncdmfa,
+            lambda dy_in: jax.lax.fori_loop(0, n_q, freeze_ncdm_hierarchy, dy_in),
+            lambda dy_in: dy_in,
+            dy,
+        )
+
+        if has_ncdm_fluid:
+            fluid_delta = y[idx['ncdm_fluid_delta']]
+            fluid_theta = y[idx['ncdm_fluid_theta']]
+            fluid_shear = y[idx['ncdm_fluid_shear']]
+            w_safe = jnp.maximum(w_ncdm, 1e-30)
+            p_safe = jnp.maximum(p_ncdm, 1e-30)
+            rho_plus_p_safe = jnp.maximum(1.0 + w_ncdm, 1e-30)
+            ceff2_ncdm = ca2_ncdm
+            cvis2_ncdm = jnp.where(
+                ncdmfa_mode_code == 1,
+                w_ncdm,
+                3.0 * w_ncdm * ca2_ncdm,
+            )
+            metric_euler = 0.0
+            metric_ufa_class = metric_continuity
+            fluid_delta_prime = -(1.0 + w_ncdm) * (fluid_theta + metric_continuity) \
+                - 3.0 * a_prime_over_a * (ceff2_ncdm - w_ncdm) * fluid_delta
+            fluid_theta_prime = -a_prime_over_a * (1.0 - 3.0 * ca2_ncdm) * fluid_theta \
+                + ceff2_ncdm / rho_plus_p_safe * k2 * fluid_delta \
+                - k2 * fluid_shear + metric_euler
+            fluid_shear_mb = -3.0 * (
+                a_prime_over_a * (2.0 / 3.0 - ca2_ncdm - pseudo_p_ncdm / (3.0 * p_safe))
+                + 1.0 / tau_safe
+            ) * fluid_shear + 8.0 / 3.0 * cvis2_ncdm / rho_plus_p_safe * (fluid_theta + metric_shear)
+            fluid_shear_hu = -3.0 * a_prime_over_a * ca2_ncdm / w_safe * fluid_shear \
+                + 8.0 / 3.0 * cvis2_ncdm / rho_plus_p_safe * (fluid_theta + metric_shear)
+            fluid_shear_class = -3.0 * (
+                a_prime_over_a * (2.0 / 3.0 - ca2_ncdm - pseudo_p_ncdm / (3.0 * p_safe))
+                + 1.0 / tau_safe
+            ) * fluid_shear + 8.0 / 3.0 * cvis2_ncdm / rho_plus_p_safe * (fluid_theta + metric_continuity)
+            fluid_shear_prime = jnp.where(
+                ncdmfa_mode_code == 1,
+                fluid_shear_hu,
+                jnp.where(ncdmfa_mode_code == 0, fluid_shear_mb, fluid_shear_class),
+            )
+            track_rate = 20.0 * jnp.maximum(a_prime_over_a, 1.0 / tau_safe)
+            fluid_delta_rhs = jnp.where(is_ncdmfa, fluid_delta_prime, track_rate * (delta_ncdm_h - fluid_delta))
+            fluid_theta_rhs = jnp.where(is_ncdmfa, fluid_theta_prime, track_rate * (theta_ncdm_h - fluid_theta))
+            fluid_shear_rhs = jnp.where(is_ncdmfa, fluid_shear_prime, track_rate * (shear_ncdm_h - fluid_shear))
+
+            dy = dy.at[idx['ncdm_fluid_delta']].set(fluid_delta_rhs)
+            dy = dy.at[idx['ncdm_fluid_theta']].set(fluid_theta_rhs)
+            dy = dy.at[idx['ncdm_fluid_shear']].set(fluid_shear_rhs)
 
     # === SET METRIC DERIVATIVES ===
     dy = dy.at[idx['eta']].set(eta_prime)
@@ -933,7 +1266,9 @@ def _perturbation_rhs(tau, y, args):
 # ---------------------------------------------------------------------------
 
 def _extract_sources(y, k, tau, bg, th, idx,
-                     q_ncdm=None, w_ncdm=None, M_ncdm=0.0):
+                     q_ncdm=None, w_ncdm=None, M_ncdm=0.0,
+                     ncdmfa_mode_code: int = 3,
+                     ncdmfa_trigger: float = 31.0):
     """Extract CMB source functions from the perturbation state.
 
     Uses the non-IBP form: S_T0 × j_l + S_T1 × j_l' in the transfer integral.
@@ -979,18 +1314,14 @@ def _extract_sources(y, k, tau, bg, th, idx,
     rho_b = bg.rho_b_of_loga.evaluate(loga)
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
-    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
-    p_ncdm = bg.p_ncdm_of_loga.evaluate(loga)
+    rho_ncdm, p_ncdm, _, _, _ = _ncdm_background_quantities(bg, loga)
 
     # Massive neutrino integrated moments from Ψ_l(q) hierarchy
     n_q = idx['n_q_ncdm']
     if n_q > 0 and q_ncdm is not None:
-        (rho_delta_ncdm_s, rho_plus_p_theta_ncdm_s, rho_plus_p_shear_ncdm_s,
-         _, rho_unnorm_s, p_unnorm_s) = _ncdm_integrated_moments(
-            y, q_ncdm, w_ncdm, M_ncdm, a, k, idx)
-        delta_ncdm_src = rho_delta_ncdm_s / jnp.maximum(rho_unnorm_s, 1e-30)
-        theta_ncdm_src = rho_plus_p_theta_ncdm_s / jnp.maximum(rho_unnorm_s + p_unnorm_s, 1e-30)
-        shear_ncdm_F2_src = rho_plus_p_shear_ncdm_s / jnp.maximum(rho_unnorm_s + p_unnorm_s, 1e-30)
+        delta_ncdm_src, theta_ncdm_src, shear_ncdm_F2_src, _ = _ncdm_observables_from_state(
+            y, tau, k, bg, idx, q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger
+        )
     else:
         delta_ncdm_src = F_ur_0
         theta_ncdm_src = 3.0 * k * F_ur_1 / 4.0
@@ -1017,7 +1348,7 @@ def _extract_sources(y, k, tau, bg, th, idx,
     rsa_theta_g = -0.5 * h_prime_raw
     # Reionization correction for theta_g (rsa_MD_with_reio)
     # cf. CLASS perturbations.c:10427-10435
-    dkd_dloga_src = th.kappa_dot_of_loga.derivative(loga)
+    dkd_dloga_src = th.dkappa_dot_dloga_of_loga.evaluate(loga)
     ddkappa_src = dkd_dloga_src * a_prime_over_a  # d²κ/dτ²
     cs2_src = th.cs2_of_loga.evaluate(loga)
     rsa_theta_g = rsa_theta_g + (3.0 / k2) * (
@@ -1035,9 +1366,9 @@ def _extract_sources(y, k, tau, bg, th, idx,
     delta_ur_ein = jnp.where(is_rsa, rsa_delta_ur, F_ur_0)
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur_raw)
 
-    # ncdm: use integrated moments; RSA override when active
-    delta_ncdm_ein_src = jnp.where(is_rsa, rsa_delta_ur, delta_ncdm_src)
-    theta_ncdm_ein_src = jnp.where(is_rsa, rsa_theta_ur, theta_ncdm_src)
+    # ncdm: keep exact integrated moments even when photon/ur RSA is active.
+    delta_ncdm_ein_src = delta_ncdm_src
+    theta_ncdm_ein_src = theta_ncdm_src
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
                  + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein_src)
 
@@ -1057,12 +1388,12 @@ def _extract_sources(y, k, tau, bg, th, idx,
     # cf. CLASS perturbations.c:6644
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
 
-    # α' from trace-free ij Einstein constraint (also RSA-corrected shear)
+    # α' from trace-free ij Einstein constraint (also RSA-corrected photon/ur shear)
     # cf. CLASS perturbations.c:6671-6674
     # For RSA: photon shear → 0, neutrino shear → 0
     F_g_2_ein = jnp.where(is_rsa, 0.0, F_g_2)
     F_ur_2_ein = jnp.where(is_rsa, 0.0, F_ur_2)
-    shear_ncdm_ein_src = jnp.where(is_rsa, 0.0, shear_ncdm_F2_src)
+    shear_ncdm_ein_src = shear_ncdm_F2_src
     rho_plus_p_shear = (2.0/3.0 * rho_g * F_g_2_ein
                         + 2.0/3.0 * rho_ur * F_ur_2_ein
                         + (rho_ncdm + p_ncdm) * shear_ncdm_ein_src)
@@ -1167,11 +1498,56 @@ def _extract_sources(y, k, tau, bg, th, idx,
     source_lens = exp_m_kappa * 2.0 * phi_newt
 
     # Matter density contrast (for P(k))
-    delta_m = (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
+    # Include ncdm when hierarchy is active (n_q > 0) to match CLASS P_m(k)
+    if n_q > 0 and q_ncdm is not None:
+        delta_m = (rho_b * delta_b + rho_cdm * delta_cdm + rho_ncdm * delta_ncdm_src) / (rho_b + rho_cdm + rho_ncdm)
+    else:
+        delta_m = (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
 
     return (source_T0, source_T1, source_T2, source_E, source_lens, delta_m,
             source_SW, source_ISW_vis, source_ISW_fs, source_Doppler,
             source_Doppler_nonIBP, source_T0_noDopp)
+
+
+def _extract_delta_m(
+    y,
+    k,
+    tau,
+    bg,
+    idx,
+    *,
+    q_ncdm=None,
+    w_ncdm=None,
+    M_ncdm=0.0,
+    ncdmfa_mode_code: int = 3,
+    ncdmfa_trigger: float = 31.0,
+):
+    """Extract total matter density contrast from one perturbation state."""
+    loga = bg.loga_of_tau.evaluate(tau)
+    rho_b = bg.rho_b_of_loga.evaluate(loga)
+    rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
+    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(loga)
+
+    delta_b = y[idx["delta_b"]]
+    delta_cdm = y[idx["delta_cdm"]]
+    n_q = idx["n_q_ncdm"]
+    if n_q > 0 and q_ncdm is not None:
+        delta_ncdm, _, _, _ = _ncdm_observables_from_state(
+            y,
+            tau,
+            k,
+            bg,
+            idx,
+            q_ncdm,
+            w_ncdm,
+            M_ncdm,
+            ncdmfa_mode_code,
+            ncdmfa_trigger,
+        )
+        return (rho_b * delta_b + rho_cdm * delta_cdm + rho_ncdm * delta_ncdm) / (
+            rho_b + rho_cdm + rho_ncdm
+        )
+    return (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
 
 
 # ---------------------------------------------------------------------------
@@ -1210,22 +1586,154 @@ def _make_tau_grid(tau_min, tau_max, tau_star, n_points):
     return jnp.concatenate([grid_early, grid_recomb, grid_late])
 
 
+def _mpk_tau_n_points(prec: PrecisionParams) -> int:
+    """Return the compact save grid size for the dedicated matter-power path."""
+    return max(64, prec.pt_tau_n_points // 2)
+
+
 def _k_grid(prec: PrecisionParams) -> Float[Array, "Nk"]:
     """Generate logarithmic k-grid for perturbation integration."""
     n_k = int(math.log10(prec.pt_k_max_cl / prec.pt_k_min) * prec.pt_k_per_decade)
     return jnp.logspace(math.log10(prec.pt_k_min), math.log10(prec.pt_k_max_cl), n_k)
 
 
+def _pt_output_memory_cap_bytes() -> int:
+    """Return the backend-specific cap for saved perturbation outputs."""
+    platform = jax.devices()[0].platform
+    if platform == "gpu":
+        return 6 * 1024**3
+    return 512 * 1024**2
+
+
+def _pt_auto_batch_mode_cap(*, platform: str, solve_kind: str) -> int:
+    """Return a backend-specific upper bound for auto-batched ``k`` solves.
+
+    The saved-state memory estimate is necessary but not sufficient for good
+    performance. On CPU, very large vmaps over stiff perturbation solves often
+    pay more in compile/runtime overhead than they recover in vectorization.
+    On GPU, the reduced-output ``mPk`` path benefits from larger batches than
+    the full source-function path.
+    """
+    if platform == "gpu":
+        return 256 if solve_kind == "mpk" else 128
+    return 8 if solve_kind == "mpk" else 4
+
+
+def _pt_saved_output_count(*, solve_kind: str) -> int:
+    """Return the number of saved arrays materialized per ``(k, tau)`` sample."""
+    if solve_kind == "mpk":
+        return 1
+    if solve_kind == "full":
+        return 12
+    raise ValueError(f"Unknown perturbation solve kind: {solve_kind}")
+
+
+def _resolve_pt_k_batch_size(
+    prec: PrecisionParams,
+    *,
+    n_k: int,
+    n_tau: int,
+    n_outputs: int,
+    solve_kind: str,
+) -> int:
+    """Resolve the effective ``k`` batch size for perturbation solves.
+
+    Semantics:
+    - ``pt_k_chunk_size > 0``: exact chunk size
+    - ``pt_k_chunk_size == 0``: auto-batched mode using saved-output estimates
+    - ``pt_k_chunk_size < 0``: explicit full-``vmap`` mode
+    """
+    chunk_size = prec.pt_k_chunk_size
+    if chunk_size < 0:
+        return n_k
+    if chunk_size > 0:
+        return min(chunk_size, n_k)
+
+    platform = jax.devices()[0].platform
+    bytes_per_mode = max(1, n_tau * n_outputs * 8)
+    auto_batch = _pt_output_memory_cap_bytes() // bytes_per_mode
+    auto_batch = min(auto_batch, _pt_auto_batch_mode_cap(platform=platform, solve_kind=solve_kind))
+    return max(1, min(n_k, auto_batch))
+
+
+def _solve_k_modes_batched(solve_single_k, k_grid, batch_size: int):
+    """Evaluate one-mode solvers over ``k`` with bounded peak memory."""
+    n_k = len(k_grid)
+    if batch_size >= n_k:
+        return jax.vmap(solve_single_k)(k_grid)
+    if batch_size == 1:
+        return jax.lax.map(solve_single_k, k_grid)
+
+    n_full = n_k // batch_size
+    n_tail = n_k % batch_size
+
+    def solve_chunk(k_chunk):
+        return jax.vmap(solve_single_k)(k_chunk)
+
+    if n_full > 0:
+        k_chunks = k_grid[: n_full * batch_size].reshape(n_full, batch_size)
+        head_results = jax.lax.map(solve_chunk, k_chunks)
+        head_results = jax.tree_util.tree_map(
+            lambda x: x.reshape((n_full * batch_size,) + x.shape[2:]),
+            head_results,
+        )
+    else:
+        head_results = None
+
+    if n_tail == 0:
+        return head_results
+
+    tail_results = jax.vmap(solve_single_k)(k_grid[n_full * batch_size :])
+    if head_results is None:
+        return tail_results
+    return jax.tree_util.tree_map(
+        lambda head, tail: jnp.concatenate([head, tail], axis=0),
+        head_results,
+        tail_results,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main solver
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnums=(1,))
 def perturbations_solve(
     params: CosmoParams,
     prec: PrecisionParams,
     bg: BackgroundResult,
     th: ThermoResult,
+    *,
+    pt_pid_pcoeff: float = 0.25,
+    pt_pid_icoeff: float = 0.80,
+    pt_pid_dcoeff: float = 0.0,
+    pt_pid_factormax: float = 20.0,
+    pt_pid_factormin: float = 0.3,
+) -> PerturbationResult:
+    """Public scalar perturbation solve wrapper with configurable PID gains.
+
+    The filtered norm variable set and k-dependent weights are fixed internal
+    controller policy following the DISCO-EB strategy. Source outputs are saved
+    directly during the Diffrax solve, and ``pt_k_chunk_size`` follows the
+    memory-managed semantics ``>0`` exact chunk, ``0`` auto-batched, ``<0``
+    explicit full-``vmap``.
+    """
+    pid_config = _resolve_scalar_pid_config(
+        pt_pid_pcoeff=pt_pid_pcoeff,
+        pt_pid_icoeff=pt_pid_icoeff,
+        pt_pid_dcoeff=pt_pid_dcoeff,
+        pt_pid_factormax=pt_pid_factormax,
+        pt_pid_factormin=pt_pid_factormin,
+    )
+    return _perturbations_solve_impl(params, prec, bg, th, pid_config)
+
+
+@functools.partial(jax.jit, static_argnums=(1, 4))
+def _perturbations_solve_impl(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+    th: ThermoResult,
+    pid_config: PerturbationPIDControllerConfig,
 ) -> PerturbationResult:
     """Solve the Einstein-Boltzmann system for all k-modes.
 
@@ -1248,9 +1756,19 @@ def perturbations_solve(
     # to disable the ncdm hierarchy.
     n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 else 0
     l_max_ncdm = prec.pt_l_max_ncdm
+    include_ncdm_fluid = prec.ncdm_fluid_approximation.lower() != "none"
 
-    idx = _build_indices(l_max_g, l_max_pol, l_max_ur, n_q_ncdm, l_max_ncdm)
+    idx = _build_indices(
+        l_max_g,
+        l_max_pol,
+        l_max_ur,
+        n_q_ncdm,
+        l_max_ncdm,
+        include_ncdm_fluid=include_ncdm_fluid,
+    )
     n_eq = idx['n_eq']
+    ncdmfa_mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
+    ncdmfa_trigger = prec.ncdm_fluid_trigger_tau_over_tau_k
 
     # Compute ncdm quadrature quantities
     if n_q_ncdm > 0:
@@ -1270,9 +1788,10 @@ def perturbations_solve(
     # Non-uniform: dense around recombination where visibility peaks, sparse elsewhere.
     # This is critical for resolving the narrow visibility function (~30 Mpc width)
     # while covering the full conformal time range for ISW.
-    # Initial time: early enough that all k-modes are super-horizon
-    # kτ_ini << 1 for all k. Choose τ_ini = 0.1 / k_max
-    tau_ini = 0.1 / prec.pt_k_max_cl
+    # Initial time: early enough that all k-modes are super-horizon.
+    # kτ_ini = 0.01 at k_max → IC truncation error O((kτ)²) < 0.01%
+    # (was 0.1/k_max giving kτ=0.1 → ~1% IC error at high k)
+    tau_ini = 0.01 / prec.pt_k_max_cl
 
     # τ-grid for saving source functions (must start >= tau_ini)
     tau_min = jnp.maximum(bg.tau_table[0] * 1.1, tau_ini * 1.01)
@@ -1288,7 +1807,23 @@ def perturbations_solve(
 
         # ODE args (includes ncdm quadrature info)
         ode_args = (k, bg, th, params, idx, l_max_g, l_max_pol, l_max_ur,
+                    ncdmfa_mode_code, ncdmfa_trigger,
                     q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
+
+        def save_sources(tau_i, y_i, args_unused):
+            return _extract_sources(
+                y_i,
+                k,
+                tau_i,
+                bg,
+                th,
+                idx,
+                q_ncdm=q_ncdm,
+                w_ncdm=w_ncdm,
+                M_ncdm=M_ncdm,
+                ncdmfa_mode_code=ncdmfa_mode_code,
+                ncdmfa_trigger=ncdmfa_trigger,
+            )
 
         # Solve
         sol = diffrax.diffeqsolve(
@@ -1299,48 +1834,32 @@ def perturbations_solve(
             dt0=tau_ini * 0.1,
             y0=y0,
             saveat=diffrax.SaveAt(ts=tau_grid),
-            stepsize_controller=diffrax.PIDController(
-                rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol,
+            stepsize_controller=_make_scalar_pid_controller(
+                prec=prec,
+                k=k,
+                idx=idx,
+                config=pid_config,
             ),
-            adjoint=diffrax.RecursiveCheckpointAdjoint(),
+            adjoint=_get_adjoint(prec.ode_adjoint),
             max_steps=prec.ode_max_steps,
             args=ode_args,
         )
 
-        # Extract source functions at each τ
         def extract_at_tau(i):
             y_i = sol.ys[i]
             tau_i = tau_grid[i]
-            return _extract_sources(y_i, k, tau_i, bg, th, idx,
-                                    q_ncdm=q_ncdm, w_ncdm=w_ncdm, M_ncdm=M_ncdm)
+            return save_sources(tau_i, y_i, None)
 
-        sources = jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
-        return sources  # tuple of 12 arrays, each shape (n_tau,)
+        return jax.vmap(extract_at_tau)(jnp.arange(prec.pt_tau_n_points))
 
-    # Vectorize over k-modes, with optional chunking for memory-limited GPUs
-    chunk_size = prec.pt_k_chunk_size
-    n_k = len(k_grid)
-    if chunk_size <= 0 or chunk_size >= n_k:
-        # Full vmap — fastest on GPUs with enough memory
-        all_sources = jax.vmap(solve_single_k)(k_grid)
-    else:
-        # Chunked vmap: process chunk_size k-modes at a time
-        # Pad k_grid to multiple of chunk_size
-        n_pad = (chunk_size - n_k % chunk_size) % chunk_size
-        k_padded = jnp.concatenate([k_grid, jnp.full(n_pad, k_grid[-1])])
-        k_chunks = k_padded.reshape(-1, chunk_size)
-
-        def solve_chunk(k_chunk):
-            return jax.vmap(solve_single_k)(k_chunk)
-
-        # Use lax.map for sequential execution of chunks (saves memory)
-        chunk_results = jax.lax.map(solve_chunk, k_chunks)
-        # chunk_results is a tuple of 12 arrays, each shape (n_chunks, chunk_size, n_tau)
-        # Reshape to (n_k_padded, n_tau) and trim
-        all_sources = jax.tree.map(
-            lambda x: x.reshape(-1, x.shape[-1])[:n_k], chunk_results
-        )
-    # all_sources is a tuple of 12 arrays, each shape (n_k, n_tau)
+    batch_size = _resolve_pt_k_batch_size(
+        prec,
+        n_k=n_k,
+        n_tau=prec.pt_tau_n_points,
+        n_outputs=_pt_saved_output_count(solve_kind="full"),
+        solve_kind="full",
+    )
+    all_sources = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
 
     return PerturbationResult(
         k_grid=k_grid,
@@ -1358,6 +1877,257 @@ def perturbations_solve(
         source_Doppler_nonIBP=all_sources[10],
         source_T0_noDopp=all_sources[11],
     )
+
+
+def perturbations_solve_mpk(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+    th: ThermoResult,
+    *,
+    pt_pid_pcoeff: float = 0.25,
+    pt_pid_icoeff: float = 0.80,
+    pt_pid_dcoeff: float = 0.0,
+    pt_pid_factormax: float = 20.0,
+    pt_pid_factormin: float = 0.3,
+) -> MatterPerturbationResult:
+    """Solve the reduced fixed-shape scalar perturbation system for ``mPk``.
+
+    This path stores only ``delta_m(k, tau)`` on a compact ``tau`` grid rather
+    than the full perturbation state history.
+    """
+    pid_config = _resolve_scalar_pid_config(
+        pt_pid_pcoeff=pt_pid_pcoeff,
+        pt_pid_icoeff=pt_pid_icoeff,
+        pt_pid_dcoeff=pt_pid_dcoeff,
+        pt_pid_factormax=pt_pid_factormax,
+        pt_pid_factormin=pt_pid_factormin,
+    )
+    return _perturbations_solve_mpk_impl(params, prec, bg, th, pid_config)
+
+
+def _perturbations_solve_mpk_impl(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+    th: ThermoResult,
+    pid_config: PerturbationPIDControllerConfig,
+) -> MatterPerturbationResult:
+    """Solve the reduced scalar system used by the public matter-power APIs."""
+    l_max_g = prec.pt_l_max_g
+    l_max_ur = prec.pt_l_max_ur
+    l_max_pol = prec.pt_l_max_pol_g
+
+    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 else 0
+    l_max_ncdm = prec.pt_l_max_ncdm
+    include_ncdm_fluid = prec.ncdm_fluid_approximation.lower() != "none"
+    idx = _build_indices(
+        l_max_g,
+        l_max_pol,
+        l_max_ur,
+        n_q_ncdm,
+        l_max_ncdm,
+        include_polarization=True,
+        include_ncdm_fluid=include_ncdm_fluid,
+    )
+    n_eq = idx["n_eq"]
+    ncdmfa_mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
+    ncdmfa_trigger = prec.ncdm_fluid_trigger_tau_over_tau_k
+
+    if n_q_ncdm > 0:
+        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
+    else:
+        q_ncdm = jnp.zeros(1)
+        w_ncdm = jnp.zeros(1)
+        M_ncdm = 0.0
+        dlnf0_ncdm = jnp.zeros(1)
+    args_ncdm = (q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
+
+    k_grid = _k_grid(prec)
+    n_k = len(k_grid)
+
+    tau_ini = 0.01 / prec.pt_k_max_cl
+    tau_min = jnp.maximum(bg.tau_table[0] * 1.1, tau_ini * 1.01)
+    tau_max = bg.conformal_age * 0.999
+    tau_star = th.tau_star
+    n_tau = _mpk_tau_n_points(prec)
+    tau_grid = _make_tau_grid(tau_min, tau_max, tau_star, n_tau)
+
+    def solve_single_k(k):
+        y0 = _adiabatic_ic(k, jnp.array(tau_ini), bg, params, idx, n_eq, args_ncdm=args_ncdm)
+        ode_args = (
+            k,
+            bg,
+            th,
+            params,
+            idx,
+            l_max_g,
+            l_max_pol,
+            l_max_ur,
+            ncdmfa_mode_code,
+            ncdmfa_trigger,
+            q_ncdm,
+            w_ncdm,
+            M_ncdm,
+            dlnf0_ncdm,
+        )
+
+        def save_delta_m(tau_i, y_i, args_unused):
+            return _extract_delta_m(
+                y_i,
+                k,
+                tau_i,
+                bg,
+                idx,
+                q_ncdm=q_ncdm,
+                w_ncdm=w_ncdm,
+                M_ncdm=M_ncdm,
+                ncdmfa_mode_code=ncdmfa_mode_code,
+                ncdmfa_trigger=ncdmfa_trigger,
+            )
+
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(_perturbation_rhs),
+            solver=diffrax.Kvaerno5(),
+            t0=tau_ini,
+            t1=tau_max,
+            dt0=tau_ini * 0.1,
+            y0=y0,
+            saveat=diffrax.SaveAt(ts=tau_grid),
+            stepsize_controller=_make_scalar_pid_controller_unfiltered(
+                prec=prec,
+                config=pid_config,
+            ),
+            adjoint=_get_adjoint(prec.ode_adjoint),
+            max_steps=prec.ode_max_steps,
+            args=ode_args,
+        )
+
+        def extract_at_tau(i):
+            y_i = sol.ys[i]
+            tau_i = tau_grid[i]
+            return save_delta_m(tau_i, y_i, None)
+
+        return jax.vmap(extract_at_tau)(jnp.arange(n_tau))
+
+    batch_size = _resolve_pt_k_batch_size(
+        prec,
+        n_k=n_k,
+        n_tau=n_tau,
+        n_outputs=_pt_saved_output_count(solve_kind="mpk"),
+        solve_kind="mpk",
+    )
+    all_delta_m = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
+
+    return MatterPerturbationResult(k_grid=k_grid, tau_grid=tau_grid, delta_m=all_delta_m)
+
+
+_perturbations_solve_mpk_impl = functools.partial(jax.jit, static_argnums=(1, 4))(
+    _perturbations_solve_mpk_impl
+)
+
+
+def _matter_delta_m_single_k_impl(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+    th: ThermoResult,
+    pid_config: PerturbationPIDControllerConfig,
+    k: float,
+):
+    """Return final-time ``delta_m(k)`` from the reduced ``mPk`` perturbation system."""
+    l_max_g = prec.pt_l_max_g
+    l_max_ur = prec.pt_l_max_ur
+    l_max_pol = prec.pt_l_max_pol_g
+
+    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 else 0
+    include_ncdm_fluid = prec.ncdm_fluid_approximation.lower() != "none"
+    idx = _build_indices(
+        l_max_g,
+        l_max_pol,
+        l_max_ur,
+        n_q_ncdm,
+        prec.pt_l_max_ncdm,
+        include_polarization=True,
+        include_ncdm_fluid=include_ncdm_fluid,
+    )
+    ncdmfa_mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
+    ncdmfa_trigger = prec.ncdm_fluid_trigger_tau_over_tau_k
+
+    if n_q_ncdm > 0:
+        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
+    else:
+        q_ncdm = jnp.zeros(1)
+        w_ncdm = jnp.zeros(1)
+        M_ncdm = 0.0
+        dlnf0_ncdm = jnp.zeros(1)
+
+    tau_ini = jnp.minimum(jnp.array(0.5), 0.01 / k)
+    # ``compute_pk()`` is a fixed-redshift observable evaluated at ``z=0``.
+    # The physical target is the final scale factor, not AD through the
+    # background-dependent terminal conformal time used by the ODE integrator.
+    # Freezing the solver boundary avoids spurious density-parameter gradients
+    # from the moving ``t1`` coordinate while keeping the primal evaluation at
+    # the correct late-time state for each parameter set.
+    tau_end = jax.lax.stop_gradient(bg.conformal_age * 0.999)
+    y0 = _adiabatic_ic(
+        k,
+        tau_ini,
+        bg,
+        params,
+        idx,
+        idx["n_eq"],
+        args_ncdm=(q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm),
+    )
+    ode_args = (
+        k,
+        bg,
+        th,
+        params,
+        idx,
+        l_max_g,
+        l_max_pol,
+        l_max_ur,
+        ncdmfa_mode_code,
+        ncdmfa_trigger,
+        q_ncdm,
+        w_ncdm,
+        M_ncdm,
+        dlnf0_ncdm,
+    )
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(_perturbation_rhs),
+        solver=diffrax.Kvaerno5(),
+        t0=tau_ini,
+        t1=tau_end,
+        dt0=tau_ini * 0.1,
+        y0=y0,
+        saveat=diffrax.SaveAt(t1=True),
+        stepsize_controller=_make_scalar_pid_controller_unfiltered(
+            prec=prec,
+            config=pid_config,
+        ),
+        adjoint=_get_adjoint(prec.ode_adjoint),
+        max_steps=prec.ode_max_steps,
+        args=ode_args,
+    )
+    return _extract_delta_m(
+        sol.ys[-1],
+        k,
+        tau_end,
+        bg,
+        idx,
+        q_ncdm=q_ncdm,
+        w_ncdm=w_ncdm,
+        M_ncdm=M_ncdm,
+        ncdmfa_mode_code=ncdmfa_mode_code,
+        ncdmfa_trigger=ncdmfa_trigger,
+    )
+
+
+_matter_delta_m_single_k_impl = functools.partial(jax.jit, static_argnums=(1, 4))(
+    _matter_delta_m_single_k_impl
+)
 
 
 # ===========================================================================
@@ -1784,7 +2554,7 @@ def tensor_perturbations_solve(
             stepsize_controller=diffrax.PIDController(
                 rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol,
             ),
-            adjoint=diffrax.RecursiveCheckpointAdjoint(),
+            adjoint=_get_adjoint(prec.ode_adjoint),
             max_steps=prec.ode_max_steps,
             args=ode_args,
         )

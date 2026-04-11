@@ -1,121 +1,79 @@
 """Tests linear-matter power-spectrum forward accuracy.
 
 Contract:
-- Forward ``P(k)`` predictions match the CLASS reference within the documented tolerance.
+- Public table-backed scalar ``P(k, z=0)`` predictions match the CLASS reference
+  to ``<=1%`` for ``k <= 1 Mpc^-1``.
 
 Scope:
-- Covers fiducial ``P(k)`` value accuracy and one multi-redshift growth-rate check.
-- Excludes ``P(k)`` gradient contracts owned by ``test_pk_gradients.py``.
+- Covers one cached public ``compute_pk_table()`` solve per precision mode plus
+  reuse of the stored perturbation table across redshifts.
+- Excludes direct single-mode spot checks and ``P(k)`` gradient contracts owned
+  by dedicated files.
 
 Notes:
-- These tests use one shared heavy perturbation solve per module.
+- These tests compare against CLASS on an explicit log-spaced probe grid and
+  rely on the default memory-managed perturbation batching policy.
 """
+
+import functools
 
 import jax
 jax.config.update("jax_enable_x64", True)
 
-import jax.numpy as jnp
+import clax
 import numpy as np
 import pytest
 
-from clax.background import background_solve
-from clax.params import CosmoParams, PrecisionParams
-from clax.perturbations import perturbations_solve
-from clax.thermodynamics import thermodynamics_solve
-from clax.transfer import compute_pk_from_perturbations
+from clax import CosmoParams
+
+from tests.pk_test_utils import (
+    PK_CONTRACT_PREC,
+    PK_FAST_PREC,
+    pk_reference_grid,
+    pk_reference_values,
+)
 
 
-PREC = PrecisionParams.medium_cl()
-
-K_FULL = np.array([0.001, 0.003, 0.01, 0.03, 0.05, 0.1, 0.2, 0.3])
-K_FAST = np.array([0.001, 0.01, 0.05, 0.1, 0.3])
-
-
-def _interp_loglog(k, k_arr, pk_arr):
-    """Interpolate ``P(k)`` in log-log space; expects positive inputs."""
-    return np.exp(np.interp(np.log(k), np.log(k_arr), np.log(pk_arr)))
-
-
-@pytest.fixture(scope="module")
-def pipeline():
-    """Run the fiducial forward pipeline once for this module."""
-    params = CosmoParams()
-    bg = background_solve(params, PREC)
-    th = thermodynamics_solve(params, PREC, bg)
-    pt = perturbations_solve(params, PREC, bg, th)
-    return params, bg, pt
+@functools.lru_cache(maxsize=2)
+def _pk_accuracy_result(fast_mode: bool):
+    """Build one cached table solve for the forward-accuracy tests."""
+    k_eval = pk_reference_grid(bool(fast_mode))
+    prec = PK_FAST_PREC if fast_mode else PK_CONTRACT_PREC
+    result = clax.compute_pk_table(CosmoParams(), prec, z=0.0, k_eval=k_eval)
+    return k_eval, result
 
 
 class TestPkAccuracy:
-    """Tests fiducial ``P(k)`` value accuracy."""
+    """Tests public table-backed scalar ``P(k)`` accuracy against CLASS arrays."""
 
     @pytest.mark.slow
-    def test_pk_matches_class(self, pipeline, lcdm_pk_ref, fast_mode):
-        """Fiducial ``P(k)`` matches CLASS; expects <1.5% max relative error on the probe grid."""
-        params, bg, pt = pipeline
-        k_probe = K_FAST if fast_mode else K_FULL
-
-        k_ref = lcdm_pk_ref["k"]
-        pk_ref = lcdm_pk_ref["pk_lin_z0"]
-        k_grid = np.array(pt.k_grid)
-        delta_m_z0 = np.array(pt.delta_m[:, -1])
-
-        A_s = float(jnp.exp(params.ln10A_s) / 1e10)
-        pk_clax = 2 * np.pi**2 / k_grid**3 * A_s * (k_grid / params.k_pivot) ** (params.n_s - 1) * delta_m_z0**2
-
-        rel_errs = []
-        valid_ks = []
-        for k in k_probe:
-            if not (k_grid[0] <= k <= k_grid[-1]):
-                continue
-            pk_us = np.exp(np.interp(np.log(k), np.log(k_grid), np.log(np.abs(pk_clax) + 1e-40)))
-            pk_class = _interp_loglog(k, k_ref, pk_ref)
-            rel_errs.append(abs(pk_us / pk_class - 1.0))
-            valid_ks.append(k)
-
-        rel_errs = np.array(rel_errs)
-        valid_ks = np.array(valid_ks)
-        max_err = float(np.max(rel_errs))
-        mean_err = float(np.mean(rel_errs))
-        worst_k = float(valid_ks[np.argmax(rel_errs)])
-
-        assert max_err < 0.015, (
-            f"P(k): max relative error {max_err:.2%} at k={worst_k:.3f} Mpc^-1; "
-            f"expected <1.5% (mean={mean_err:.2%}, n={len(valid_ks)})"
-        )
-
-
-class TestPkGrowthRate:
-    """Tests multi-redshift ``P(k)`` behavior."""
-
-    @pytest.mark.slow
-    def test_growth_rate_relative(self, pipeline, lcdm_pk_ref):
-        """``P(k,z=0.5)/P(k,z=0)`` matches CLASS; expects <1% max relative error."""
-        params, bg, pt = pipeline
-
-        k_ref = lcdm_pk_ref["k"]
-        pk_z0 = lcdm_pk_ref["pk_lin_z0"]
-        pk_z05 = lcdm_pk_ref["pk_z0.5"]
-
-        k_test = jnp.array([0.05, 0.1, 0.2])
-        A_s = float(jnp.exp(params.ln10A_s) / 1e10)
-
-        dm_z0 = np.array(compute_pk_from_perturbations(pt, bg, k_test, z=0.0))
-        dm_z05 = np.array(compute_pk_from_perturbations(pt, bg, k_test, z=0.5))
-
-        pk_clax_z0 = 2 * np.pi**2 / np.array(k_test) ** 3 * A_s * (np.array(k_test) / params.k_pivot) ** (params.n_s - 1) * dm_z0**2
-        pk_clax_z05 = 2 * np.pi**2 / np.array(k_test) ** 3 * A_s * (np.array(k_test) / params.k_pivot) ** (params.n_s - 1) * dm_z05**2
-
-        rel_errs = []
-        for i, k in enumerate(np.array(k_test)):
-            ratio_us = pk_clax_z05[i] / pk_clax_z0[i]
-            ratio_class = _interp_loglog(k, k_ref, pk_z05) / _interp_loglog(k, k_ref, pk_z0)
-            rel_errs.append(abs(ratio_us / ratio_class - 1.0))
-
-        rel_errs = np.array(rel_errs)
-        max_err = float(np.max(rel_errs))
-        worst_k = float(np.array(k_test)[np.argmax(rel_errs)])
+    def test_pk_matches_class(self, lcdm_pk_ref, fast_mode):
+        """Interpolated ``P(k, z=0)`` matches CLASS; expects <1% max relative error up to ``1 Mpc^-1``."""
+        k_eval, result = _pk_accuracy_result(bool(fast_mode))
+        pk_clax = np.asarray(result.pk_grid)
+        pk_class = pk_reference_values(lcdm_pk_ref, k_eval, key="pk_m_lin_z0")
+        rel_err = np.abs(pk_clax / pk_class - 1.0)
+        max_err = float(np.max(rel_err))
+        worst_idx = int(np.argmax(rel_err))
+        worst_k = float(k_eval[worst_idx])
 
         assert max_err < 0.01, (
-            f"P(z=0.5)/P(z=0): max relative error {max_err:.2%} at k={worst_k:.3f}; expected <1%"
+            f"P(k): relative error {max_err:.2%} at k={worst_k:.6g} Mpc^-1; "
+            f"clax={pk_clax[worst_idx]:.6e}, CLASS={pk_class[worst_idx]:.6e}, expected <1%"
+        )
+
+    @pytest.mark.slow
+    def test_pk_matches_class_at_z_half(self, lcdm_pk_ref, fast_mode):
+        """The cached perturbation table reproduces ``P(k, z=0.5)`` against CLASS."""
+        k_eval, result = _pk_accuracy_result(bool(fast_mode))
+        pk_clax = np.asarray(result.pk(k_eval, z=0.5))
+        pk_class = pk_reference_values(lcdm_pk_ref, k_eval, key="pk_m_z0.5")
+        rel_err = np.abs(pk_clax / pk_class - 1.0)
+        max_err = float(np.max(rel_err))
+        worst_idx = int(np.argmax(rel_err))
+        worst_k = float(k_eval[worst_idx])
+
+        assert max_err < 0.015, (
+            f"P(k, z=0.5): relative error {max_err:.2%} at k={worst_k:.6g} Mpc^-1; "
+            f"clax={pk_clax[worst_idx]:.6e}, CLASS={pk_class[worst_idx]:.6e}, expected <1.5%"
         )

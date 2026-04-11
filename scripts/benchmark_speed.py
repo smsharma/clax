@@ -86,6 +86,7 @@ def run_benchmark(preset_name):
     print(f"  k_per_decade={prec.pt_k_per_decade}, k_max={prec.pt_k_max_cl}, n_k={n_k}")
     print(f"  l_max_g={prec.pt_l_max_g}, tau_n={prec.pt_tau_n_points}, th_n={prec.th_n_points}")
     print(f"  ode_max_steps={prec.ode_max_steps}, hr_l_max={prec.hr_l_max}")
+    print("  perturbation PID: fixed DISCO-EB-style filtered scalar norm")
     print(f"  harmonic mode: {mode}")
     print()
 

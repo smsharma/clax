@@ -18,13 +18,15 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float
 
 from clax.background import BackgroundResult
 from clax.bessel import spherical_jl
 from clax.interpolation import CubicSpline
-from clax.params import PrecisionParams
-from clax.perturbations import PerturbationResult
+from clax.params import CosmoParams, PrecisionParams
+from clax.perturbations import MatterPerturbationResult, PerturbationResult
+from clax.primordial import primordial_scalar_pk
 
 
 # Placeholder: transfer functions will be computed from perturbation source functions
@@ -37,8 +39,37 @@ from clax.perturbations import PerturbationResult
 # For v1, we compute P(k) directly from perturbation output (δ_m at z=0)
 # and defer the full transfer function / C_l computation to later.
 
+
+def _validate_k_eval_support(
+    k_grid: Float[Array, "Nk"],
+    k_eval: Float[Array, "Nk_eval"],
+) -> None:
+    """Reject table queries outside the solved perturbation support.
+
+    The public table-backed ``P(k)`` APIs solve the perturbations only on
+    ``pt.k_grid`` and then interpolate in ``log k``. Silent extrapolation far
+    beyond that range produces misleading spectra, so require callers to stay
+    within the solved support explicitly.
+    """
+    k_grid_np = np.asarray(k_grid, dtype=float)
+    k_eval_np = np.asarray(k_eval, dtype=float)
+    k_min = float(k_grid_np[0])
+    k_max = float(k_grid_np[-1])
+    tol = 1.0e-12
+    below = k_eval_np < (1.0 - tol) * k_min
+    above = k_eval_np > (1.0 + tol) * k_max
+    if np.any(below) or np.any(above):
+        req_min = float(np.min(k_eval_np))
+        req_max = float(np.max(k_eval_np))
+        raise ValueError(
+            "k_eval must lie within the solved perturbation grid "
+            f"[{k_min:.6g}, {k_max:.6g}] Mpc^-1; got "
+            f"[{req_min:.6g}, {req_max:.6g}] Mpc^-1."
+        )
+
+
 def compute_pk_from_perturbations(
-    pt: PerturbationResult,
+    pt: PerturbationResult | MatterPerturbationResult,
     bg: BackgroundResult,
     k_eval: Float[Array, "Nk_eval"],
     z: float = 0.0,
@@ -58,6 +89,8 @@ def compute_pk_from_perturbations(
         delta_m(k) at the requested redshift, shape (Nk_eval,)
     """
     from clax.background import tau_of_z
+
+    _validate_k_eval_support(pt.k_grid, k_eval)
 
     tau_grid = pt.tau_grid  # shape (Ntau,)
     log_k_pt = jnp.log(pt.k_grid)
@@ -81,3 +114,31 @@ def compute_pk_from_perturbations(
     delta_m_eval = delta_m_spline.evaluate(log_k_eval)
 
     return delta_m_eval
+
+
+def compute_linear_matter_pk_from_perturbations(
+    pt: PerturbationResult | MatterPerturbationResult,
+    bg: BackgroundResult,
+    params: CosmoParams,
+    k_eval: Float[Array, "Nk_eval"],
+    z: float = 0.0,
+) -> Float[Array, "Nk_eval"]:
+    """Compute linear matter ``P(k, z)`` from a perturbation-table solve.
+
+    Reuses the perturbation-table interpolation for ``delta_m(k, z)`` and
+    applies the primordial normalization at the requested ``k`` values.
+
+    Args:
+        pt: perturbation results containing ``delta_m(k, tau)``
+        bg: background results for ``tau(z)`` conversion
+        params: cosmological parameters for the primordial spectrum
+        k_eval: wavenumbers in ``Mpc^-1``
+        z: redshift at which to evaluate the spectrum
+
+    Returns:
+        Linear matter power spectrum ``P(k, z)`` in ``Mpc^3``
+    """
+    k_eval = jnp.asarray(k_eval)
+    delta_m = compute_pk_from_perturbations(pt, bg, k_eval, z=z)
+    primordial = primordial_scalar_pk(k_eval, params)
+    return 2.0 * jnp.pi**2 / k_eval**3 * primordial * delta_m**2

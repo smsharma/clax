@@ -131,6 +131,8 @@ class PrecisionParams:
     ncdm_bg_q_size: int = 30        # background integration q-points (CLASS default: 11)
     ncdm_q_max: float = 15.0        # max comoving momentum q
     ncdm_bg_n_points: int = 512     # points for pre-tabulation grid
+    ncdm_fluid_approximation: str = "class"  # mb, hu, class, none (CLASS default: class)
+    ncdm_fluid_trigger_tau_over_tau_k: float = 31.0  # CLASS default late-time switch
 
     # Thermodynamics
     th_z_max: float = 5e4           # max redshift for recombination
@@ -170,7 +172,8 @@ class PrecisionParams:
     ode_adjoint: str = "recursive_checkpoint"  # or "direct"
 
     # Memory management
-    pt_k_chunk_size: int = 0  # k-modes per chunk (0 = full vmap, no chunking)
+    # >0 exact chunk size, 0 backend-aware auto-batching, <0 force full vmap.
+    pt_k_chunk_size: int = 0
 
     @staticmethod
     def fast_cl():
