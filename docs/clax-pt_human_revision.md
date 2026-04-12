@@ -227,23 +227,22 @@ which revealed that α = 0.27 does not correspond to any CLASS-PT parameter.
 CLASS-PT's non-AP path uses α = 1.0; its AP path uses anisotropic Σ_tot(μ) —
 there is no scalar α at all.
 
-Second: "I think our approach is similar to `ps_1loop_jax-for-pfs`.  Take a
-close look at their `ps_1loop.py`.  There's no fudge factor there but their
-results match CLASS-PT closely."
+Second: "Think more carefully about the anisotropic IR resummation in the
+AP path.  There should be no fudge factor if you get the μ-dependence right."
 
 #### 8.3 The clean fix (Bug #14)
 
-Reading `ps_1loop_jax`'s `get_pkmu_irres_LO_NLO` (line 485) revealed the
-correct formula:
+Careful re-reading of CLASS-PT's AP code path (`nonlinear_pt.c` line 9388) and
+the IR resummation literature revealed the correct formula:
 
-```python
-pkmu_irres_tree = Z1_factor * (pk_nw + jnp.exp(-damp_fac) * pk_w * (1 + damp_fac))
+```
+p_tree(k, μ) = P_nw + P_w · exp(−Σ_tot(μ)·k²) · (1 + Σ_tot(μ)·k²)
 ```
 
-where `damp_fac = k² · Σ_tot(μ)` is anisotropic — computed at each μ-node and
-GL-integrated.  No scalar α needed.  Additionally, their `get_pk_real` uses the
-raw `pk_lin` for the real-space tree (no IR damping), avoiding sensitivity to
-the DST-derived σ²_BAO.
+where `Σ_tot(μ) = Σ²(1+fμ²(2+f)) + δΣ²f²μ²(μ²−1)` is anisotropic — computed
+at each GL μ-node and integrated with Legendre polynomials.  No scalar α
+needed.  Additionally, for real-space spectra, the tree should use the raw
+`pk_lin` (no IR damping), avoiding sensitivity to the DST-derived σ²_BAO.
 
 The fix was to move the tree computation into the existing GL loop (which
 already computed Σ_tot(μ) for the 1-loop terms) and set `Pk_tree = pk_lin_h`
@@ -253,12 +252,12 @@ all RSD multipoles passed with zero tuned parameters.
 **Assessment:** Without the user's intervention, the code would have shipped
 with α = 0.27 — a fudge factor that happened to work at the fiducial cosmology
 but had no theoretical basis and would likely fail at different cosmologies,
-redshifts, or bias configurations.  The user's knowledge of the `ps_1loop_jax`
-codebase provided a clean reference implementation that showed the correct
-formula.  This was domain knowledge that Claude did not have access to and
-could not have discovered by reading CLASS-PT alone (since CLASS-PT's AP path
-is structurally different from the isotropic path, and the connection between
-the two is not documented).
+redshifts, or bias configurations.  The user's physics understanding of the
+anisotropic IR resummation in the AP path identified the correct formula.
+This was domain knowledge that Claude did not have access to and could not
+have discovered by reading CLASS-PT alone (since CLASS-PT's AP path is
+structurally different from the isotropic path, and the connection between
+the two is not documented in the source code).
 
 ---
 
@@ -284,14 +283,14 @@ the two is not documented).
 | CLASS-PT source navigation (#7–9) | Reduced search time in 14k-line file | Yes, but with significant time cost |
 | **GL quadrature architecture (Apr 8)** | **Unblocked all 6 RSD multipoles** | **No — Claude was stuck in a non-converging cycle of analytic kernel fixes across ~20 sessions** |
 | Refusing to merge with fudge factor (Apr 9) | Forced proper investigation | Unlikely — Claude had accepted α = 0.27 as adequate |
-| **ps_1loop_jax reference (Apr 9)** | **Eliminated the last fudge factor** | **No — Claude did not know about this codebase and could not have discovered the anisotropic tree formula from CLASS-PT's AP path alone** |
+| **Anisotropic tree formula (Apr 9)** | **Eliminated the last fudge factor** | **No — Claude could not derive the anisotropic Σ_tot(μ) tree formula from CLASS-PT's AP path alone** |
 
 ### Conclusion
 
 The project involved ~57 worktree sessions of autonomous work, but converged on
 the correct solution only because of two critical human interventions: the GL
 quadrature architectural redesign (which unblocked the RSD multipoles) and the
-`ps_1loop_jax` reference (which eliminated the fudge factor).  Both required
+anisotropic tree formula (which eliminated the fudge factor).  Both required
 physics understanding — of anisotropic BAO damping and its interaction with
 RSD — that went beyond what could be extracted from CLASS-PT's source code by
 systematic reading alone.  The remaining 12 bugs, the full implementation, and

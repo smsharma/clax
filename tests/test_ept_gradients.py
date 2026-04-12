@@ -26,6 +26,7 @@ from scipy.interpolate import CubicSpline
 
 from clax.ept import (
     compute_ept, ept_kgrid, EPTPrecisionParams, pk_mm_real,
+    pk_gg_real, pk_mm_l0, pk_gg_l2,
     _ir_resummation_numpy,
 )
 
@@ -307,3 +308,176 @@ def test_grad_with_counterterm(ept_setup, request):
         f"Too many non-finite gradient entries with cs0={cs0}"
     )
     assert np.any(np.abs(g_finite) > 0), "Gradient is all zeros with cs0 != 0"
+
+
+# ---------------------------------------------------------------------------
+# Helper: scalar objective for galaxy spectra
+# ---------------------------------------------------------------------------
+
+def _make_f_gg_real(k_ept_jax, h, fz, ir_precomputed, prec):
+    """Return f(b1) = sum(pk_gg_real(b1, b2=0, bG2=0, bGamma3=0, Pshot=0))."""
+    def f(b1, pk_lin):
+        ept_out = compute_ept(
+            pk_lin, k_ept_jax, h=h, f=fz,
+            prec=prec, _ir_precomputed=ir_precomputed,
+        )
+        return jnp.sum(pk_gg_real(ept_out, b1, b2=0.0, bG2=0.0, bGamma3=0.0,
+                                  cs=0.0, cs0=0.0, Pshot=0.0))
+    return f
+
+
+def _make_f_mm_l0(k_ept_jax, h, fz, ir_precomputed, prec):
+    """Return f(pk_lin) = sum(pk_mm_l0(...)) -- tests the RSD path."""
+    def f(pk_lin):
+        ept_out = compute_ept(
+            pk_lin, k_ept_jax, h=h, f=fz,
+            prec=prec, _ir_precomputed=ir_precomputed,
+        )
+        return jnp.sum(pk_mm_l0(ept_out, cs0=0.0))
+    return f
+
+
+def _make_f_gg_l2(k_ept_jax, h, fz, ir_precomputed, prec):
+    """Return f(b1, pk_lin) = sum(pk_gg_l2(...)) -- galaxy RSD path."""
+    def f(b1, pk_lin):
+        ept_out = compute_ept(
+            pk_lin, k_ept_jax, h=h, f=fz,
+            prec=prec, _ir_precomputed=ir_precomputed,
+        )
+        return jnp.sum(pk_gg_l2(ept_out, b1, b2=0.0, bG2=0.0, bGamma3=0.0,
+                                cs2=0.0, b4=0.0))
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Test 6: AD vs FD for d(sum(pk_gg_real))/d(b1)
+# ---------------------------------------------------------------------------
+
+def test_grad_pk_gg_real_wrt_b1(ept_setup):
+    """AD gradient of pk_gg_real w.r.t. b1 must match finite differences.
+
+    At b1=2.0 (b2=bG2=bGamma3=0, Pshot=0), pk_gg_real = b1^2 (Ptree+Ploop).
+    Gradient w.r.t. b1 = 2*b1*(Ptree+Ploop), so well-defined.
+    """
+    setup = ept_setup
+    f = _make_f_gg_real(
+        setup["k_ept_jax"], setup["h"], setup["fz"],
+        setup["ir_precomputed"], setup["prec"],
+    )
+    pk_lin = setup["pk_lin_ept"]
+    b1_val = 2.0
+
+    # AD gradient w.r.t. b1 (first positional argument)
+    g_ad = float(jax.grad(f, argnums=0)(b1_val, pk_lin))
+
+    # Central finite difference
+    eps = 1e-4
+    fp = float(f(b1_val + eps, pk_lin))
+    fm = float(f(b1_val - eps, pk_lin))
+    g_fd = (fp - fm) / (2.0 * eps)
+
+    rel_err = abs(g_ad - g_fd) / (abs(g_fd) + 1e-30)
+    print(f"\nd(sum(pk_gg_real))/d(b1): AD={g_ad:.6e}, FD={g_fd:.6e}, "
+          f"rel_err={rel_err:.4e}")
+
+    assert rel_err < 0.01, (
+        f"AD vs FD disagree for d(pk_gg_real)/d(b1): "
+        f"AD={g_ad:.6e}, FD={g_fd:.6e}, rel_err={rel_err:.2%}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: AD vs FD for d(sum(pk_mm_l0))/d(pk_lin) -- RSD path
+# ---------------------------------------------------------------------------
+
+def test_grad_pk_mm_l0_wrt_pk_lin(ept_setup, request):
+    """AD gradient of pk_mm_l0 w.r.t. pk_lin must match finite differences.
+
+    This tests the RSD multipole path (tree + 1-loop vv/vd/dd decomposition).
+    With --fast: checks every 16th k-mode.
+    """
+    setup = ept_setup
+    f = _make_f_mm_l0(
+        setup["k_ept_jax"], setup["h"], setup["fz"],
+        setup["ir_precomputed"], setup["prec"],
+    )
+    pk_lin = setup["pk_lin_ept"]
+    nk = pk_lin.shape[0]
+
+    fast_mode = request.config.getoption("--fast", default=False)
+    if fast_mode:
+        indices = np.arange(0, nk, 16)
+    else:
+        indices = np.arange(0, nk, 4)
+    print(f"\npk_mm_l0 gradient: testing {len(indices)}/{nk} k-modes")
+
+    # AD gradient (full)
+    g_ad = jax.grad(f)(pk_lin)
+
+    # Finite-difference at selected indices
+    eps = 1e-4 * float(jnp.mean(pk_lin))
+    g_fd = np.zeros(len(indices))
+    for j, i in enumerate(indices):
+        e_i = jnp.zeros(nk).at[i].set(1.0)
+        fp = f(pk_lin + eps * e_i)
+        fm = f(pk_lin - eps * e_i)
+        g_fd[j] = float((fp - fm) / (2.0 * eps))
+
+    g_ad_sel = np.array(g_ad[indices])
+
+    # Relative error on significant modes
+    abs_err = np.abs(g_ad_sel - g_fd)
+    rel_err = abs_err / (np.abs(g_fd) + 1e-10 * np.max(np.abs(g_fd)))
+    significant = np.abs(g_fd) > 1e-12 * np.max(np.abs(g_fd))
+    n_significant = significant.sum()
+
+    if n_significant == 0:
+        pytest.skip("No significant gradient values found")
+
+    rel_err_sig = rel_err[significant]
+    max_rel_err = rel_err_sig.max()
+    pass_rate = (rel_err_sig < 0.05).mean()
+
+    print(f"  {n_significant} significant modes, max rel err={max_rel_err:.4f}, "
+          f"pass rate (<5%)={pass_rate:.1%}")
+
+    assert pass_rate > 0.80, (
+        f"pk_mm_l0 gradient: only {pass_rate:.1%} of modes pass <5% rel err "
+        f"(max={max_rel_err:.4f}). Expected >80%."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: AD vs FD for d(sum(pk_gg_l2))/d(b1) -- galaxy RSD path
+# ---------------------------------------------------------------------------
+
+def test_grad_pk_gg_l2_wrt_b1(ept_setup):
+    """AD gradient of pk_gg_l2 w.r.t. b1 must match finite differences.
+
+    Tests the galaxy bias + RSD quadrupole path. Uses central FD at b1=2.0.
+    """
+    setup = ept_setup
+    f = _make_f_gg_l2(
+        setup["k_ept_jax"], setup["h"], setup["fz"],
+        setup["ir_precomputed"], setup["prec"],
+    )
+    pk_lin = setup["pk_lin_ept"]
+    b1_val = 2.0
+
+    # AD gradient w.r.t. b1 (first argument)
+    g_ad = float(jax.grad(f, argnums=0)(b1_val, pk_lin))
+
+    # Central finite difference
+    eps = 1e-4
+    fp = float(f(b1_val + eps, pk_lin))
+    fm = float(f(b1_val - eps, pk_lin))
+    g_fd = (fp - fm) / (2.0 * eps)
+
+    rel_err = abs(g_ad - g_fd) / (abs(g_fd) + 1e-30)
+    print(f"\nd(sum(pk_gg_l2))/d(b1): AD={g_ad:.6e}, FD={g_fd:.6e}, "
+          f"rel_err={rel_err:.4e}")
+
+    assert rel_err < 0.05, (
+        f"AD vs FD disagree for d(pk_gg_l2)/d(b1): "
+        f"AD={g_ad:.6e}, FD={g_fd:.6e}, rel_err={rel_err:.2%}"
+    )

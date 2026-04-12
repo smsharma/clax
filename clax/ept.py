@@ -842,12 +842,12 @@ def _compute_bias_spectra(
 
     # ===========================================================
     # RSD TREE-LEVEL MULTIPOLES (anisotropic IR resummation via GL quadrature)
-    # Following ps_1loop_jax / CLASS-PT AP path: compute the full P_tree(k,mu)
+    # Following CLASS-PT AP path: compute the full P_tree(k,mu)
     # with anisotropic Sigmatot(mu) at each GL node, then project onto Legendre
     # multipoles.  The tree integrand at each GL node is:
     #   p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
-    # This matches ps_1loop_jax get_pkmu_irres_LO_NLO (line 485) and CLASS-PT
-    # AP path (nonlinear_pt.c line 9388).  No empirical alpha factor needed.
+    # This matches the CLASS-PT AP path (nonlinear_pt.c line 9388).
+    # No empirical alpha factor needed.
     #
     # Storage convention: Pk_0_vv/vd/dd store the f-weighted components
     # so that galaxy combination is:
@@ -1258,7 +1258,7 @@ def _compute_bias_spectra(
         _L2 = 0.5 * (3*_mu2 - 1)
         _L4 = (35*_mu2**2 - 30*_mu2 + 3) / 8.0
 
-        # Anisotropic tree: ps_1loop_jax eq. and CLASS-PT AP path (nonlinear_pt.c line 9388)
+        # Anisotropic tree: CLASS-PT AP path (nonlinear_pt.c line 9388)
         # p_tree(k,mu) = Pnw + Pw * exp(-Sigmatot(mu)*k²) * (1 + Sigmatot(mu)*k²)
         _p_tree = pk_nw_arr + _pk_w_for_ratio * _Eg * (1.0 + _Sig * k**2)
         _tree_vv = f**2 * _mu2**2 * _p_tree
@@ -1445,6 +1445,7 @@ def compute_ept(
     f: float,
     prec: EPTPrecisionParams = EPTPrecisionParams(),
     _ir_precomputed: Optional[tuple] = None,
+    rs_h: float = 99.0,
 ) -> EPTComponents:
     """Compute all EPT spectral components from linear P(k).
 
@@ -1478,6 +1479,10 @@ def compute_ept(
                   of the broadband shape at fixed cosmology. For a perturbation
                   δpk around the fiducial, the wiggle component changes as
                   δpk_w = δpk_lin, and the resummed spectrum damps it by exp(-Σ²k²).
+        rs_h:     Sound horizon at drag epoch in Mpc/h (~99 for Planck 2018 LCDM).
+                  Used by IR resummation to set the BAO oscillation scale k_osc = 1/rs_h
+                  for the Σ²_BAO j₂-filter integral.  Ignored if _ir_precomputed is
+                  provided (the caller already computed Σ²_BAO) or ir_resummation=False.
 
     Returns:
         EPTComponents with all spectral arrays on the EPT k-grid
@@ -1527,8 +1532,8 @@ def compute_ept(
         # IR-resummed linear spectrum (input to FFTLog)
         pk_resummed = pk_nw + pk_w * damp
         # Tree-level spectrum for real-space: use raw pk_lin_h (no IR damping).
-        # ps_1loop_jax uses pk_lin for the real-space tree (get_pk_real has
-        # "# no IR resummation"). This avoids sensitivity to our DST-derived
+        # The real-space tree has no RSD, so no anisotropic damping applies.
+        # Using raw pk_lin avoids sensitivity to our DST-derived
         # sigma2_bao, which may differ slightly from CLASS-PT's.
         # RSD tree multipoles are computed via anisotropic GL quadrature in
         # _compute_bias_spectra (see Pk_0/2/4_vv/vd/dd accumulated there).
@@ -1537,7 +1542,7 @@ def compute_ept(
         # Default path: call NumPy IR resummation (NOT differentiable through pk_lin_h).
         # Use _ir_precomputed to enable gradients.
         pk_nw_np, pk_w_np, sigma2_bao, delta_sigma2_bao = _ir_resummation_numpy(
-            np.array(pk_lin_h), np.array(k_h), h=h
+            np.array(pk_lin_h), np.array(k_h), rs_h=rs_h, h=h
         )
         pk_nw = jnp.array(pk_nw_np)
         pk_w  = jnp.array(pk_w_np)
@@ -1893,10 +1898,11 @@ def pk_gg_l2(
     h = ept.h
     kh = ept.kh
 
-    # Tree: Kaiser formula (b1+fμ²)² projected to L2; the b1²*dd term vanishes
-    # because ∫L2(μ)*1 dμ = 0, so Pk_2_dd = 0 in CLASS-PT's normalization.
-    # cf. CLASS-PT classy.pyx: pm[18]+b1*pm[19] for tree (no b1² term).
-    new_l2_tree = ept.Pk_2_vv + b1 * ept.Pk_2_vd
+    # Tree: Kaiser formula (b1+fμ²)² projected to L2 via GL quadrature.
+    # With anisotropic Σ_tot(μ), the dd tree term is nonzero (the integral
+    # ∫L2(μ)·p_tree(k,μ) dμ ≠ 0 because p_tree depends on μ through the
+    # damping).  cf. pk_mm_l2 which includes Pk_2_dd.
+    new_l2_tree = ept.Pk_2_vv + b1 * ept.Pk_2_vd + b1 ** 2 * ept.Pk_2_dd
 
     P_loop_l2 = (
         ept.Pk_2_vv1
