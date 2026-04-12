@@ -21,7 +21,6 @@ Notes:
 
 from __future__ import annotations
 
-import functools
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
@@ -151,7 +150,7 @@ PK_TABLE_GRAD_K_TABLE = np.array([
 PK_TABLE_GRAD_VECTOR_WEIGHTS = np.array([0.1, 0.2, 0.3, 0.4])
 PK_TABLE_GRAD_K_PROBE = 5.0e-2
 PK_TABLE_GRAD_FAST_PARAMS = ("ln10A_s", "n_s")
-PK_TABLE_GRAD_FULL_PARAMS = ("h",)
+PK_TABLE_GRAD_FULL_PARAMS = ("h", "omega_b", "omega_cdm")
 
 
 PK_GRAD_PARAM_STEPS = {
@@ -290,7 +289,7 @@ def class_perturbation_components(bg, ref_pert: dict[str, np.ndarray], tau_sampl
     }
 
 
-def solve_matched_perturbation_components(
+def _solve_single_mode_ode(
     params: CosmoParams,
     prec: PrecisionParams,
     bg,
@@ -298,13 +297,16 @@ def solve_matched_perturbation_components(
     k: float,
     tau_samples: np.ndarray,
     tau_ini_mode: str = "direct",
-) -> dict[str, np.ndarray]:
-    """Solve one mode and return clax component perturbations at the requested ``tau`` values."""
+):
+    """Shared ODE setup and solve for matched perturbation tests.
+
+    Returns:
+        (y_samples, idx, q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger)
+    """
     from clax.perturbations import (
         _adiabatic_ic,
         _build_indices,
         _ncdm_fluid_mode_code,
-        _ncdm_observables_from_state,
         _ncdm_quadrature,
         _perturbation_rhs,
     )
@@ -339,29 +341,14 @@ def solve_matched_perturbation_components(
         raise ValueError(f"Unknown tau_ini_mode {tau_ini_mode!r}")
 
     y0 = _adiabatic_ic(
-        k,
-        jnp.asarray(tau_ini),
-        bg,
-        params,
-        idx,
-        idx["n_eq"],
+        k, jnp.asarray(tau_ini), bg, params, idx, idx["n_eq"],
         args_ncdm=(q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm),
     )
     ode_args = (
-        k,
-        bg,
-        th,
-        params,
-        idx,
-        prec.pt_l_max_g,
-        prec.pt_l_max_pol_g,
-        prec.pt_l_max_ur,
-        ncdmfa_mode_code,
-        ncdmfa_trigger,
-        q_ncdm,
-        w_ncdm,
-        M_ncdm,
-        dlnf0_ncdm,
+        k, bg, th, params, idx,
+        prec.pt_l_max_g, prec.pt_l_max_pol_g, prec.pt_l_max_ur,
+        ncdmfa_mode_code, ncdmfa_trigger,
+        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm,
     )
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(_perturbation_rhs),
@@ -376,8 +363,24 @@ def solve_matched_perturbation_components(
         max_steps=prec.ode_max_steps,
         args=ode_args,
     )
+    return np.asarray(sol.ys), idx, q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger
 
-    y_samples = np.asarray(sol.ys)
+
+def solve_matched_perturbation_components(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg,
+    th,
+    k: float,
+    tau_samples: np.ndarray,
+    tau_ini_mode: str = "direct",
+) -> dict[str, np.ndarray]:
+    """Solve one mode and return clax component perturbations at the requested ``tau`` values."""
+    from clax.perturbations import _ncdm_observables_from_state
+
+    y_samples, idx, q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger = (
+        _solve_single_mode_ode(params, prec, bg, th, k, tau_samples, tau_ini_mode))
+
     delta_cdm = np.asarray(y_samples[:, idx["delta_cdm"]])
     delta_b = np.asarray(y_samples[:, idx["delta_b"]])
     rho_b, rho_cdm, rho_ncdm = _background_densities_at_tau(bg, tau_samples)
@@ -387,16 +390,8 @@ def solve_matched_perturbation_components(
     shear_ncdm = []
     for tau_i, y_i in zip(np.asarray(tau_samples), y_samples, strict=True):
         delta_i, theta_i, shear_i, _ = _ncdm_observables_from_state(
-            jnp.asarray(y_i),
-            jnp.asarray(tau_i),
-            k,
-            bg,
-            idx,
-            q_ncdm,
-            w_ncdm,
-            M_ncdm,
-            ncdmfa_mode_code,
-            ncdmfa_trigger,
+            jnp.asarray(y_i), jnp.asarray(tau_i), k, bg, idx,
+            q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger,
         )
         delta_ncdm.append(float(delta_i))
         theta_ncdm.append(float(theta_i))
@@ -429,83 +424,8 @@ def solve_matched_perturbation_states(
     tau_ini_mode: str = "direct",
 ) -> dict[str, object]:
     """Solve one mode and return saved states plus the ncdm projection metadata."""
-    from clax.perturbations import (
-        _adiabatic_ic,
-        _build_indices,
-        _make_scalar_pid_controller,
-        _ncdm_fluid_mode_code,
-        _ncdm_quadrature,
-        _perturbation_rhs,
-        _resolve_scalar_pid_config,
-    )
-
-    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 else 0
-    include_ncdm_fluid = prec.ncdm_fluid_approximation.lower() != "none"
-    idx = _build_indices(
-        prec.pt_l_max_g,
-        prec.pt_l_max_pol_g,
-        prec.pt_l_max_ur,
-        n_q_ncdm,
-        prec.pt_l_max_ncdm,
-        include_ncdm_fluid=include_ncdm_fluid,
-    )
-
-    if n_q_ncdm > 0:
-        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
-    else:
-        q_ncdm = jnp.zeros(1)
-        w_ncdm = jnp.zeros(1)
-        M_ncdm = 0.0
-        dlnf0_ncdm = jnp.zeros(1)
-
-    ncdmfa_mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
-    ncdmfa_trigger = prec.ncdm_fluid_trigger_tau_over_tau_k
-
-    if tau_ini_mode == "direct":
-        tau_ini = direct_tau_ini(k)
-    elif tau_ini_mode == "batch":
-        tau_ini = batch_like_tau_ini(prec)
-    else:
-        raise ValueError(f"Unknown tau_ini_mode {tau_ini_mode!r}")
-
-    y0 = _adiabatic_ic(
-        k,
-        jnp.asarray(tau_ini),
-        bg,
-        params,
-        idx,
-        idx["n_eq"],
-        args_ncdm=(q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm),
-    )
-    ode_args = (
-        k,
-        bg,
-        th,
-        params,
-        idx,
-        prec.pt_l_max_g,
-        prec.pt_l_max_pol_g,
-        prec.pt_l_max_ur,
-        ncdmfa_mode_code,
-        ncdmfa_trigger,
-        q_ncdm,
-        w_ncdm,
-        M_ncdm,
-        dlnf0_ncdm,
-    )
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(_perturbation_rhs),
-        solver=diffrax.Kvaerno5(),
-        t0=tau_ini,
-        t1=float(np.asarray(tau_samples)[-1]),
-        dt0=tau_ini * 0.1,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=jnp.asarray(tau_samples)),
-        stepsize_controller=diffrax.PIDController(rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol),
-        adjoint=diffrax.DirectAdjoint(),
-        max_steps=prec.ode_max_steps,
-        args=ode_args,
-    )
+    y_samples, idx, q_ncdm, w_ncdm, M_ncdm, ncdmfa_mode_code, ncdmfa_trigger = (
+        _solve_single_mode_ode(params, prec, bg, th, k, tau_samples, tau_ini_mode))
 
     return {
         "idx": idx,
@@ -514,7 +434,7 @@ def solve_matched_perturbation_states(
         "M_ncdm": M_ncdm,
         "ncdmfa_mode_code": ncdmfa_mode_code,
         "ncdmfa_trigger": ncdmfa_trigger,
-        "y_samples": np.asarray(sol.ys),
+        "y_samples": y_samples,
     }
 
 
@@ -531,21 +451,6 @@ def compute_pk_scalar_public_table(
     return result.pk(k_probe, z=z)
 
 
-def compute_pk_weighted_sum_public_table(
-    params: CosmoParams,
-    prec: PrecisionParams,
-    *,
-    k_table=PK_TABLE_GRAD_K_TABLE,
-    weights=PK_TABLE_GRAD_VECTOR_WEIGHTS,
-    z: float = 0.0,
-) -> jnp.ndarray:
-    """Return a scalar multi-``k`` objective from one reusable public PK table solve."""
-    k_table = jnp.asarray(k_table)
-    weights = jnp.asarray(weights)
-    result = clax.compute_pk_table(params, prec, z=z, k_eval=k_table)
-    return jnp.sum(weights * result.pk_grid)
-
-
 def compute_pk_array_direct(
     params: CosmoParams,
     prec: PrecisionParams,
@@ -555,131 +460,6 @@ def compute_pk_array_direct(
     k_eval = np.atleast_1d(np.asarray(k_eval, dtype=float))
     outputs = [clax.compute_pk(params, prec, float(k)) for k in k_eval]
     return jnp.asarray(outputs)
-
-
-def _pk_from_final_state_local(y_f, params: CosmoParams, prec: PrecisionParams, bg, idx, q_ncdm, w_ncdm, M_ncdm, k):
-    """Convert one final perturbation state into scalar linear ``P(k)``."""
-    from clax.perturbations import _ncdm_fluid_mode_code, _ncdm_observables_from_state
-
-    rho_b = bg.rho_b_of_loga.evaluate(jnp.array(0.0))
-    rho_cdm = bg.rho_cdm_of_loga.evaluate(jnp.array(0.0))
-    rho_ncdm = bg.rho_ncdm_of_loga.evaluate(jnp.array(0.0))
-
-    if idx["n_q_ncdm"] > 0 and params.N_ncdm > 0:
-        mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
-        delta_ncdm, _, _, _ = _ncdm_observables_from_state(
-            y_f,
-            bg.conformal_age * 0.999,
-            k,
-            bg,
-            idx,
-            q_ncdm,
-            w_ncdm,
-            M_ncdm,
-            mode_code,
-            prec.ncdm_fluid_trigger_tau_over_tau_k,
-        )
-        delta_m = (
-            rho_b * y_f[idx["delta_b"]]
-            + rho_cdm * y_f[idx["delta_cdm"]]
-            + rho_ncdm * delta_ncdm
-        ) / (rho_b + rho_cdm + rho_ncdm)
-    else:
-        delta_m = (
-            rho_b * y_f[idx["delta_b"]] + rho_cdm * y_f[idx["delta_cdm"]]
-        ) / (rho_b + rho_cdm)
-
-    A_s = jnp.exp(params.ln10A_s) / 1e10
-    return 2.0 * jnp.pi**2 / k**3 * A_s * (k / params.k_pivot) ** (params.n_s - 1) * delta_m**2
-
-
-@functools.partial(jax.jit, static_argnums=(1,))
-def _compute_pk_scalar_direct_local(params: CosmoParams, prec: PrecisionParams, k: float) -> jnp.ndarray:
-    """Compute one direct scalar ``P(k)`` from a local one-mode perturbation solve.
-
-    This path is intentionally simpler than the optimized public ``compute_pk()``
-    implementation. Gradient contracts use it to isolate perturbation-level AD
-    from the public table-backed API, which is tested separately.
-    """
-    from clax.ode import _get_adjoint
-    from clax.perturbations import (
-        _adiabatic_ic,
-        _build_indices,
-        _ncdm_fluid_mode_code,
-        _ncdm_quadrature,
-        _perturbation_rhs,
-    )
-
-    bg = background_solve(params, prec)
-    th = thermodynamics_solve(params, prec, bg)
-
-    n_q_ncdm = prec.ncdm_q_size if params.N_ncdm > 0 else 0
-    include_ncdm_fluid = prec.ncdm_fluid_approximation.lower() != "none"
-    idx = _build_indices(
-        prec.pt_l_max_g,
-        prec.pt_l_max_pol_g,
-        prec.pt_l_max_ur,
-        n_q_ncdm,
-        prec.pt_l_max_ncdm,
-        include_ncdm_fluid=include_ncdm_fluid,
-    )
-
-    if n_q_ncdm > 0:
-        q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = _ncdm_quadrature(params, prec)
-    else:
-        q_ncdm = jnp.zeros(1)
-        w_ncdm = jnp.zeros(1)
-        M_ncdm = 0.0
-        dlnf0_ncdm = jnp.zeros(1)
-
-    ncdmfa_mode_code = _ncdm_fluid_mode_code(prec.ncdm_fluid_approximation)
-    ncdmfa_trigger = prec.ncdm_fluid_trigger_tau_over_tau_k
-
-    tau_ini = jnp.minimum(jnp.array(0.5), 0.01 / k)
-    tau_end = bg.conformal_age * 0.999
-    y0 = _adiabatic_ic(
-        k,
-        tau_ini,
-        bg,
-        params,
-        idx,
-        idx["n_eq"],
-        args_ncdm=(q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm),
-    )
-    ode_args = (
-        k,
-        bg,
-        th,
-        params,
-        idx,
-        prec.pt_l_max_g,
-        prec.pt_l_max_pol_g,
-        prec.pt_l_max_ur,
-        ncdmfa_mode_code,
-        ncdmfa_trigger,
-        q_ncdm,
-        w_ncdm,
-        M_ncdm,
-        dlnf0_ncdm,
-    )
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(_perturbation_rhs),
-        solver=diffrax.Kvaerno5(),
-        t0=tau_ini,
-        t1=tau_end,
-        dt0=tau_ini * 0.1,
-        y0=y0,
-        saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=diffrax.PIDController(
-            rtol=prec.pt_ode_rtol,
-            atol=prec.pt_ode_atol,
-        ),
-        adjoint=_get_adjoint(prec.ode_adjoint),
-        max_steps=prec.ode_max_steps,
-        args=ode_args,
-    )
-
-    return _pk_from_final_state_local(sol.ys[-1], params, prec, bg, idx, q_ncdm, w_ncdm, M_ncdm, k)
 
 
 def compute_pk_scalar_direct(params: CosmoParams, prec: PrecisionParams, k: float) -> jnp.ndarray:

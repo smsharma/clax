@@ -146,13 +146,10 @@ class TestPkPublicTableGradients:
 
     @pytest.mark.slow
     def test_public_table_partials_match_fd_full(self, fast_mode):
-        """Public table/interpolator ``dP/dh`` remains finite and non-zero in full mode."""
+        """Public table ``dP/dtheta_i`` for density-sector params (h, omega_b, omega_cdm) match finite differences."""
         if fast_mode:
             pytest.skip("covered by fast-mode probe")
-        grad_tree = jax.grad(lambda p: compute_pk_scalar_public_table(p, PK_TABLE_GRAD_FULL_PREC, PK_TABLE_GRAD_K_PROBE))(FIDUCIAL_PARAMS)
-        grad_h = float(grad_tree.h)
-        assert np.isfinite(grad_h), "Public table dP/dh: expected a finite gradient"
-        assert abs(grad_h) > 0.0, "Public table dP/dh: expected a non-zero gradient"
+        self._assert_param_gradients(PK_TABLE_GRAD_FULL_PREC, PK_TABLE_GRAD_FULL_PARAMS)
 
     def _assert_param_gradients(self, prec, param_names) -> None:
         """Compare one public table-API AD gradient against scalar finite differences."""
