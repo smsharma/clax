@@ -221,7 +221,7 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 ## References
 
 - **CLASS v3.3.4**: Blas, Lesgourgues & Tram (2011). [arXiv:1104.2933](https://arxiv.org/abs/1104.2933)
-- **DISCO-EB**: Hahn, Melchior & Tessore (2024). Differentiable Boltzmann solver in JAX. [arXiv:2410.02998](https://arxiv.org/abs/2410.02998)
+- **DISCO-DJ**: Hahn, List & Porqueres (2023). Differentiable Einstein-Boltzmann solver in JAX. [arXiv:2311.03291](https://arxiv.org/abs/2311.03291)
 - **Bolt.jl**: Li, Sullivan & Millea (2023). Differentiable Boltzmann solver in Julia. [Zenodo: 10.5281/zenodo.10065126](https://zenodo.org/records/10065126)
 - Seljak & Zaldarriaga (1996). Line-of-sight integration approach. [arXiv:astro-ph/9603033](https://arxiv.org/abs/astro-ph/9603033)
 - Ma & Bertschinger (1995). Cosmological perturbation theory. [arXiv:astro-ph/9506072](https://arxiv.org/abs/astro-ph/9506072)
