@@ -6,7 +6,9 @@ for reverse-mode AD.
 
 References:
     Diffrax docs: https://docs.kidger.site/diffrax/
-    DISCO-EB: uses custom Rosenbrock solvers; we start with Diffrax builtins.
+    DISCO-EB: uses custom Rosenbrock solvers (Rodas5); clax implements both
+    Kvaerno5 (ESDIRK, default) and Rodas5 (Rosenbrock, ~3-5x faster for
+    perturbation ODE due to no Newton iteration).
 """
 
 import diffrax
@@ -127,3 +129,25 @@ def _get_adjoint(adjoint: str):
         return diffrax.DirectAdjoint()
     else:
         raise ValueError(f"Unknown adjoint method: {adjoint}")
+
+
+def _get_stiff_solver(solver_name: str):
+    """Return a stiff ODE solver instance from string name.
+
+    Args:
+        solver_name: "kvaerno5" for Kvaerno5 (ESDIRK, Newton iteration) or
+                     "rosenbrock" for Rodas5 (Rosenbrock, LU factorization only).
+
+    Returns:
+        A Diffrax-compatible solver instance.
+    """
+    if solver_name == "kvaerno5":
+        return diffrax.Kvaerno5()
+    elif solver_name == "rosenbrock":
+        from clax.rosenbrock import Rodas5
+        return Rodas5()
+    else:
+        raise ValueError(
+            f"Unknown stiff solver: {solver_name!r}. "
+            f"Choose 'kvaerno5' or 'rosenbrock'."
+        )

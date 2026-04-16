@@ -41,7 +41,7 @@ from jaxtyping import Array, Float
 from clax import constants as const
 from clax.background import BackgroundResult
 from clax.interpolation import CubicSpline
-from clax.ode import _get_adjoint
+from clax.ode import _get_adjoint, _get_stiff_solver
 from clax.params import CosmoParams, PrecisionParams
 from clax.thermodynamics import ThermoResult
 
@@ -1940,7 +1940,7 @@ def _perturbations_solve_impl(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_perturbation_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=tau_max,
             dt0=tau_ini * 0.1,
@@ -2043,7 +2043,7 @@ def _perturbations_solve_mpk_impl(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_perturbation_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=tau_max,
             dt0=tau_ini * 0.1,
@@ -2104,7 +2104,7 @@ def _matter_delta_m_single_k_impl(
                 q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(_perturbation_rhs),
-        solver=diffrax.Kvaerno5(),
+        solver=_get_stiff_solver(prec.pt_ode_solver),
         t0=tau_ini,
         t1=tau_end,
         dt0=tau_ini * 0.1,
@@ -2545,7 +2545,7 @@ def tensor_perturbations_solve(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_tensor_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=bg.conformal_age * 0.999,
             dt0=tau_ini * 0.1,
