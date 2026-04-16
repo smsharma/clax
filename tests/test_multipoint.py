@@ -25,7 +25,15 @@ from clax.background import background_solve
 # Reference data paths
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
-# Shared precision settings (low-res for speed)
+# Shared precision settings (low-res for speed).
+#
+# ncdm_fluid_approximation="none" keeps the full Boltzmann hierarchy
+# throughout rather than switching to a fluid closure at late times.
+# The fluid switch (modes "class", "mb", "hu") has numerical convergence
+# issues for massive neutrino cosmologies at mid-range k (~0.05 Mpc^-1)
+# with the current Kvaerno5 solver: the tangent at the switch point
+# causes the step controller to shrink the step indefinitely.
+# Using "none" is slower but numerically robust.
 PREC = PrecisionParams(
     bg_n_points=200, ncdm_bg_n_points=100, bg_tol=1e-8,
     th_n_points=5000, th_z_max=5e3,
@@ -33,6 +41,7 @@ PREC = PrecisionParams(
     pt_k_max_cl=0.3,
     pt_ode_rtol=1e-3, pt_ode_atol=1e-6,
     ode_max_steps=262144,
+    ncdm_fluid_approximation="none",
 )
 
 
