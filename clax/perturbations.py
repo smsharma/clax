@@ -256,6 +256,12 @@ def _build_indices(
         idx['ncdm_fluid_shear'] = i; i += 1
     idx['ncdm_fluid_end'] = i
 
+    # Dark energy fluid perturbations (CPL w0-wa models).
+    # Always allocated (2 extra variables) — zeroed when w0=-1, wa=0 (LCDM).
+    # cf. CLASS perturbations.c:3940-3946 (standard fluid mode)
+    idx['delta_fld'] = i; i += 1
+    idx['theta_fld'] = i; i += 1
+
     idx['n_eq'] = i
     return idx
 
@@ -620,6 +626,31 @@ def _adiabatic_ic(k, tau_ini, bg, params, idx, n_eq, args_ncdm=None):
 
     # Polarization starts at 0 (correct for adiabatic IC)
 
+    # Dark energy fluid perturbations (CPL w0-wa).
+    # cf. CLASS perturbations.c:5462-5469 (adiabatic IC for fld)
+    # δ_fld = -(kτ)²/4 * (1+w)(4 - 3*cs2) / (4 - 6w + 3*cs2) * curvature_ini
+    # θ_fld = -k*(kτ)³/4 * cs2 / (4 - 6w + 3*cs2) * curvature_ini
+    w_fld_ini = params.w0 + params.wa * (1.0 - a_ini)
+    cs2_fld = params.cs2_fld
+    has_fld = (params.w0 != -1.0) | (params.wa != 0.0)
+    denom_fld = 4.0 - 6.0 * w_fld_ini + 3.0 * cs2_fld
+    # Protect against division by zero (denom ≈ 10+3cs2 for w≈-1)
+    safe_denom_fld = jnp.where(jnp.abs(denom_fld) > 1e-10, denom_fld, 1.0)
+    delta_fld_ini = jnp.where(
+        has_fld,
+        -ktau_two / 4.0 * (1.0 + w_fld_ini) * (4.0 - 3.0 * cs2_fld)
+        / safe_denom_fld * curvature_ini * s2_squared,
+        0.0,
+    )
+    theta_fld_ini = jnp.where(
+        has_fld,
+        -k * ktau_three / 4.0 * cs2_fld
+        / safe_denom_fld * curvature_ini * s2_squared,
+        0.0,
+    )
+    y0 = y0.at[idx['delta_fld']].set(delta_fld_ini)
+    y0 = y0.at[idx['theta_fld']].set(theta_fld_ini)
+
     return y0
 
 
@@ -789,6 +820,11 @@ def _perturbation_rhs(tau, y, args):
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm, p_ncdm, pseudo_p_ncdm, w_ncdm, ca2_ncdm = _ncdm_background_quantities(bg, loga)
+    rho_de = bg.rho_de_of_loga.evaluate(loga)
+
+    # Dark energy equation of state (CPL)
+    w_fld = params.w0 + params.wa * (1.0 - a)
+    cs2_fld = params.cs2_fld
 
     # Thermodynamic quantities
     kappa_dot = th.kappa_dot_of_loga.evaluate(loga)
@@ -847,6 +883,10 @@ def _perturbation_rhs(tau, y, args):
 
     Pi = F_g[2] + G_g_0 + G_g_2
 
+    # === Dark energy fluid perturbations ===
+    delta_fld = y[idx['delta_fld']]
+    theta_fld = y[idx['theta_fld']]
+
     # === TCA CRITERION (shared helper, dual criteria matching CLASS) ===
     is_tca, tau_c = _compute_tca_criterion(kappa_dot, a_prime_over_a, k)
 
@@ -871,8 +911,10 @@ def _perturbation_rhs(tau, y, args):
 
     # Raw delta_rho and h_prime (used to compute RSA values)
     # ncdm uses integrated moments from full Ψ_l(q) hierarchy
+    # cf. CLASS perturbations.c:7184, 7261: delta_rho includes fld contribution
     delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
-                     + rho_ur * delta_ur + rho_ncdm * delta_ncdm)
+                     + rho_ur * delta_ur + rho_ncdm * delta_ncdm
+                     + rho_de * delta_fld)
     h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
 
     # RSA photon values (synchronous gauge, rsa_MD_with_reio)
@@ -905,16 +947,20 @@ def _perturbation_rhs(tau, y, args):
     theta_ur_ein = jnp.where(is_rsa, rsa_theta_ur, theta_ur)
 
     # Total density perturbation δρ with RSA substitution.
-    # CLASS applies RSA to photons and ur, but not to ncdm.
+    # CLASS applies RSA to photons and ur, but not to ncdm or fld.
+    # cf. CLASS perturbations.c:7184, 7261: δρ_fld = ρ_fld * δ_fld
     delta_ncdm_ein = delta_ncdm
     theta_ncdm_ein = theta_ncdm
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
-                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein)
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein
+                 + rho_de * delta_fld)
 
     # Total (ρ+p)θ with RSA + ncdm hierarchy
+    # cf. CLASS perturbations.c:7185, 7262: (ρ+p)θ_fld = (1+w)ρ_fld * θ_fld
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
-                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein)
+                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein
+                        + (1.0 + w_fld) * rho_de * theta_fld)
 
     # h' from 00 Einstein CONSTRAINT (NOT evolved!)
     # cf. CLASS line 6612: h' = (k2*eta + 1.5*a2*delta_rho) / (0.5*a'/a)
@@ -926,8 +972,18 @@ def _perturbation_rhs(tau, y, args):
 
     # Total pressure perturbation δp with RSA substitution.
     # Keep exact ncdm pressure perturbations even when photon/ur RSA is active.
+    # cf. CLASS perturbations.c:7188, 7263: δp_fld = cs2*δρ_fld + (cs2-ca2)*3ℋ(ρ+p)θ/k²
     delta_p_ncdm_ein = rho_ncdm * delta_p_over_rho_ncdm
-    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 + delta_p_ncdm_ein
+    # Adiabatic sound speed: c_a² = w - (dw/dlna)/(3(1+w))
+    # dw/dlna = a * dw/da = -a * wa
+    # cf. CLASS perturbations.c:9370
+    one_plus_w_fld = 1.0 + w_fld
+    safe_one_plus_w = jnp.where(jnp.abs(one_plus_w_fld) > 1e-10, one_plus_w_fld, 1.0)
+    ca2_fld = w_fld + a * params.wa / (3.0 * safe_one_plus_w)
+    delta_p_fld = (cs2_fld * rho_de * delta_fld
+                   + (cs2_fld - ca2_fld) * 3.0 * a_prime_over_a
+                   * one_plus_w_fld * rho_de * theta_fld / k2)
+    delta_p = rho_g * delta_g_ein / 3.0 + rho_ur * delta_ur_ein / 3.0 + delta_p_ncdm_ein + delta_p_fld
 
     # α = (h' + 6η') / (2k²) -- gauge variable
     alpha = (h_prime + 6.0 * eta_prime) / (2.0 * k2)
@@ -1282,6 +1338,23 @@ def _perturbation_rhs(tau, y, args):
     dy = dy.at[idx['delta_b']].set(delta_b_prime)
     dy = dy.at[idx['theta_b']].set(theta_b_prime)
 
+    # === DARK ENERGY FLUID PERTURBATIONS ===
+    # cf. CLASS perturbations.c:9375-9385 (standard fluid equations, synchronous gauge)
+    # δ'_fld = -(1+w)(θ_fld + h'/2) - 3(cs2-w)ℋ δ_fld - 9(1+w)(cs2-ca2)ℋ² θ_fld/k²
+    # θ'_fld = -(1-3cs2)ℋ θ_fld + cs2 k²/(1+w) δ_fld
+    delta_fld_prime = (
+        -one_plus_w_fld * (theta_fld + metric_continuity)
+        - 3.0 * (cs2_fld - w_fld) * a_prime_over_a * delta_fld
+        - 9.0 * one_plus_w_fld * (cs2_fld - ca2_fld)
+        * a_prime_over_a * a_prime_over_a * theta_fld / k2
+    )
+    theta_fld_prime = (
+        -(1.0 - 3.0 * cs2_fld) * a_prime_over_a * theta_fld
+        + cs2_fld * k2 / safe_one_plus_w * delta_fld
+    )
+    dy = dy.at[idx['delta_fld']].set(delta_fld_prime)
+    dy = dy.at[idx['theta_fld']].set(theta_fld_prime)
+
     return dy
 
 
@@ -1289,7 +1362,7 @@ def _perturbation_rhs(tau, y, args):
 # Source function extraction
 # ---------------------------------------------------------------------------
 
-def _extract_sources(y, k, tau, bg, th, idx,
+def _extract_sources(y, k, tau, bg, th, idx, params,
                      q_ncdm=None, w_ncdm=None, M_ncdm=0.0,
                      ncdmfa_mode_code: int = 3,
                      ncdmfa_trigger: float = 31.0):
@@ -1344,6 +1417,12 @@ def _extract_sources(y, k, tau, bg, th, idx,
     rho_cdm = bg.rho_cdm_of_loga.evaluate(loga)
     rho_ur = bg.rho_ur_of_loga.evaluate(loga)
     rho_ncdm, p_ncdm, _, _, _ = _ncdm_background_quantities(bg, loga)
+    rho_de = bg.rho_de_of_loga.evaluate(loga)
+    w_fld = params.w0 + params.wa * (1.0 - a)
+
+    # Dark energy fluid perturbation variables
+    delta_fld = y[idx['delta_fld']]
+    theta_fld = y[idx['theta_fld']]
 
     # Massive neutrino integrated moments from Ψ_l(q) hierarchy
     n_q = idx['n_q_ncdm']
@@ -1366,9 +1445,10 @@ def _extract_sources(y, k, tau, bg, th, idx,
     is_rsa = (tau_k > 45.0) & (kd_over_aH < 5.0)
 
     # First compute raw h' (needed for RSA algebraic values)
-    # ncdm: use integrated moments from hierarchy
+    # ncdm: use integrated moments from hierarchy; includes fld
     delta_rho_raw = (rho_g * delta_g + rho_b * delta_b + rho_cdm * delta_cdm
-                     + rho_ur * F_ur_0 + rho_ncdm * delta_ncdm_src)
+                     + rho_ur * F_ur_0 + rho_ncdm * delta_ncdm_src
+                     + rho_de * delta_fld)
     h_prime_raw = (k2 * eta + 1.5 * a2 * delta_rho_raw) / (0.5 * a_prime_over_a)
 
     # RSA photon/neutrino values (cf. CLASS perturbations.c:10417-10447)
@@ -1399,11 +1479,13 @@ def _extract_sources(y, k, tau, bg, th, idx,
     delta_ncdm_ein_src = delta_ncdm_src
     theta_ncdm_ein_src = theta_ncdm_src
     delta_rho = (rho_g * delta_g_ein + rho_b * delta_b + rho_cdm * delta_cdm
-                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein_src)
+                 + rho_ur * delta_ur_ein + rho_ncdm * delta_ncdm_ein_src
+                 + rho_de * delta_fld)
 
     rho_plus_p_theta = (4.0/3.0 * rho_g * theta_g_ein + rho_b * theta_b
                         + 4.0/3.0 * rho_ur * theta_ur_ein
-                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein_src)
+                        + (rho_ncdm + p_ncdm) * theta_ncdm_ein_src
+                        + (1.0 + w_fld) * rho_de * theta_fld)
 
     # h' from 00 Einstein CONSTRAINT (now with RSA-corrected densities)
     # cf. CLASS perturbations.c:6612
@@ -1850,7 +1932,7 @@ def _perturbations_solve_impl(
 
         def save_sources(tau_i, y_i, args_unused):
             return _extract_sources(
-                y_i, k, tau_i, bg, th, idx,
+                y_i, k, tau_i, bg, th, idx, params,
                 q_ncdm=q_ncdm, w_ncdm=w_ncdm, M_ncdm=M_ncdm,
                 ncdmfa_mode_code=ncdmfa_mode_code,
                 ncdmfa_trigger=ncdmfa_trigger,

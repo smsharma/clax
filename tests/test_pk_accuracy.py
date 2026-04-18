@@ -104,12 +104,11 @@ class TestPkMultiCosmology:
     @pytest.mark.slow
     @pytest.mark.parametrize("cosmo_key", list(MULTIPOINT_COSMOLOGIES.keys()))
     def test_pk_multi_cosmology(self, cosmo_key, fast_mode):
-        """P(k, z=0) at non-fiducial cosmology matches CLASS.
+        """P(k, z=0) at non-fiducial cosmology matches CLASS to <3%.
 
-        Most cosmologies pass within 3%. The w0wa fluid dark energy model
-        has a ~3.5% systematic normalization offset (k-independent) due to
-        subtle differences in fluid perturbation treatment vs CLASS — this
-        manifests as a constant ratio across all k, not a shape mismatch.
+        All cosmologies including w0-wa dark energy pass within 3% now that
+        standard fluid dark energy perturbations (δ_fld, θ_fld) are included
+        in the Einstein equations.
         """
         pk_path = os.path.join(REFERENCE_DIR, cosmo_key, "pk.npz")
         if not os.path.exists(pk_path):
@@ -137,9 +136,7 @@ class TestPkMultiCosmology:
         worst_idx = int(np.argmax(rel_err))
         worst_k = float(k_probe[worst_idx])
 
-        # Looser tolerance for w0wa — normalization offset is a known
-        # systematic from fluid perturbation treatment differences.
-        threshold = 0.05 if cosmo_key == "w0wa_m09_01" else 0.03
+        threshold = 0.03
 
         assert max_err < threshold, (
             f"P(k) {cosmo_key}: max relative error {max_err:.2%} at k={worst_k:.4g} Mpc^-1; "
