@@ -174,3 +174,28 @@ class TestRosenbrockPk:
         assert pt.delta_m.shape[0] > 0
         assert jnp.all(jnp.isfinite(pt.delta_m))
         print(f"Rosenbrock mPk solve: {pt.delta_m.shape[0]} k-modes, all finite")
+
+    @pytest.mark.slow
+    def test_rosenbrock_batched_mpk_produces_finite(self, bg_th):
+        """Rodas5Batched mPk solve produces finite results."""
+        from clax.perturbations import perturbations_solve_mpk
+        params, prec_base, bg, th = bg_th
+
+        prec = PrecisionParams(
+            th_n_points=prec_base.th_n_points,
+            pt_k_per_decade=5,
+            pt_k_max_cl=0.1,
+            pt_l_max_g=17,
+            pt_l_max_pol_g=17,
+            pt_l_max_ur=17,
+            ncdm_q_size=0,
+            pt_tau_n_points=500,
+            pt_ode_rtol=1e-3,
+            pt_ode_atol=1e-4,
+            ode_max_steps=2048,
+            pt_ode_solver="rosenbrock_batched",
+        )
+        pt = perturbations_solve_mpk(params, prec, bg, th)
+        assert pt.delta_m.shape[0] > 0
+        assert jnp.all(jnp.isfinite(pt.delta_m))
+        print(f"Rodas5Batched mPk solve: {pt.delta_m.shape[0]} k-modes, all finite")

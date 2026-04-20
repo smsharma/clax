@@ -146,6 +146,9 @@ def _get_stiff_solver(solver_name: str):
     elif solver_name == "rosenbrock":
         from clax.rosenbrock import Rodas5
         return Rodas5()
+    elif solver_name == "rosenbrock_batched":
+        from clax.rosenbrock import Rodas5Batched
+        return Rodas5Batched()
     else:
         raise ValueError(
             f"Unknown stiff solver: {solver_name!r}. "

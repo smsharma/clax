@@ -27,7 +27,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jla
-from diffrax import AbstractAdaptiveSolver, AbstractTerm, RESULTS
+from diffrax import AbstractAdaptiveSolver, AbstractTerm, ODETerm, RESULTS
 from diffrax._local_interpolation import LocalLinearInterpolation
 
 
@@ -317,3 +317,164 @@ class GRKT4(AbstractAdaptiveSolver):
 
         dense_info = dict(y0=y0, y1=y1)
         return y1, y_error, dense_info, solver_state, RESULTS.successful
+
+
+class Rodas5Batched(AbstractAdaptiveSolver):
+    """Batched Rodas5 for solving multiple k-modes with shared time-stepping.
+
+    y0 has shape ``(batch_size, n_eq)``.  All modes in the batch share the
+    same adaptive step size, controlled by a single scalar error norm across
+    the batch.  Internally vmaps the Jacobian, LU factorisation and
+    back-substitution over the batch dimension.
+
+    Args convention for ``diffeqsolve``::
+
+        args = (f_single, batched_per_mode_data)
+
+    where ``f_single(t, y, per_mode_datum)`` is the single-mode RHS used
+    for ``jax.jacfwd``, and ``batched_per_mode_data`` (e.g. an array of
+    k-values with shape ``(batch_size,)``) is forwarded to ``terms.vf``
+    for batched function evaluations.
+
+    cf. DISCO-EB ``Rodas5Batched`` (ode_integrators_stiff.py:846-1011)
+    """
+
+    term_structure = ODETerm
+    interpolation_cls = LocalLinearInterpolation
+
+    def order(self, terms):
+        return 5
+
+    def error_order(self, terms):
+        return 4
+
+    def init(self, terms, t0, t1, y0, args):
+        return None
+
+    def func(self, terms, t0, y0, args):
+        return terms.vf(t0, y0, args)
+
+    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
+        del solver_state, made_jump
+
+        f, _args = args
+
+        n = y0[0].shape[0]  # state dimension from first batch element
+        dt = terms.contr(t0, t1)
+
+        # Pre-compute scaled coupling coefficients
+        dtC21 = _R5_C21 / dt
+        dtC31 = _R5_C31 / dt
+        dtC32 = _R5_C32 / dt
+        dtC41 = _R5_C41 / dt
+        dtC42 = _R5_C42 / dt
+        dtC43 = _R5_C43 / dt
+        dtC51 = _R5_C51 / dt
+        dtC52 = _R5_C52 / dt
+        dtC53 = _R5_C53 / dt
+        dtC54 = _R5_C54 / dt
+        dtC61 = _R5_C61 / dt
+        dtC62 = _R5_C62 / dt
+        dtC63 = _R5_C63 / dt
+        dtC64 = _R5_C64 / dt
+        dtC65 = _R5_C65 / dt
+        dtC71 = _R5_C71 / dt
+        dtC72 = _R5_C72 / dt
+        dtC73 = _R5_C73 / dt
+        dtC74 = _R5_C74 / dt
+        dtC75 = _R5_C75 / dt
+        dtC76 = _R5_C76 / dt
+        dtC81 = _R5_C81 / dt
+        dtC82 = _R5_C82 / dt
+        dtC83 = _R5_C83 / dt
+        dtC84 = _R5_C84 / dt
+        dtC85 = _R5_C85 / dt
+        dtC86 = _R5_C86 / dt
+        dtC87 = _R5_C87 / dt
+
+        dtd1 = dt * _R5_D1
+        dtd2 = dt * _R5_D2
+        dtd3 = dt * _R5_D3
+        dtd4 = dt * _R5_D4
+        dtd5 = dt * _R5_D5
+        dtgamma = dt * _R5_GAMMA
+
+        I = jnp.eye(n)
+
+        # Batched Jacobian and time derivative via forward-mode AD
+        dt_f = jax.jacfwd(f, 0)
+        jac_f = jax.jacfwd(f, 1)
+
+        dt_f_batched = jax.vmap(dt_f, in_axes=(None, 0, 0))
+        jac_f_batched = jax.vmap(jac_f, in_axes=(None, 0, 0))
+
+        lu_batched = jax.vmap(
+            lambda a: jla.lu_factor(I / dtgamma - a))
+
+        dT = dt_f_batched(t0, y0, _args)           # (batch, n)
+        jac_blocks = jac_f_batched(t0, y0, _args)   # (batch, n, n)
+
+        lu_and_piv = lu_batched(jac_blocks)
+
+        lu_solve_batched = jax.vmap(jla.lu_solve, (0, 0))
+
+        # -- 8 Rosenbrock stages (transformed W-formulation) --
+        # Stage 1
+        dy1 = terms.vf(t=t0, y=y0, args=_args)
+        rhs = dy1 + dtd1 * dT
+        k1 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 2
+        u = y0 + _R5_A21 * k1
+        du = terms.vf(t=t0 + _R5_C2 * dt, y=u, args=_args)
+        rhs = du + dtd2 * dT + dtC21 * k1
+        k2 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 3
+        u = y0 + _R5_A31 * k1 + _R5_A32 * k2
+        du = terms.vf(t=t0 + _R5_C3 * dt, y=u, args=_args)
+        rhs = du + dtd3 * dT + (dtC31 * k1 + dtC32 * k2)
+        k3 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 4
+        u = y0 + _R5_A41 * k1 + _R5_A42 * k2 + _R5_A43 * k3
+        du = terms.vf(t=t0 + _R5_C4 * dt, y=u, args=_args)
+        rhs = du + dtd4 * dT + (dtC41 * k1 + dtC42 * k2 + dtC43 * k3)
+        k4 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 5
+        u = y0 + _R5_A51 * k1 + _R5_A52 * k2 + _R5_A53 * k3 + _R5_A54 * k4
+        du = terms.vf(t=t0 + _R5_C5 * dt, y=u, args=_args)
+        rhs = du + dtd5 * dT + (dtC51 * k1 + dtC52 * k2
+                                + dtC53 * k3 + dtC54 * k4)
+        k5 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 6 (at t0 + dt)
+        u = (y0 + _R5_A61 * k1 + _R5_A62 * k2 + _R5_A63 * k3
+             + _R5_A64 * k4 + _R5_A65 * k5)
+        du = terms.vf(t=t0 + dt, y=u, args=_args)
+        rhs = du + (dtC61 * k1 + dtC62 * k2 + dtC63 * k3
+                    + dtC64 * k4 + dtC65 * k5)
+        k6 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 7 (accumulating)
+        u = u + k6
+        du = terms.vf(t=t0 + dt, y=u, args=_args)
+        rhs = du + (dtC71 * k1 + dtC72 * k2 + dtC73 * k3
+                    + dtC74 * k4 + dtC75 * k5 + dtC76 * k6)
+        k7 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Stage 8 (error estimate stage)
+        u = u + k7
+        du = terms.vf(t=t0 + dt, y=u, args=_args)
+        rhs = du + (dtC81 * k1 + dtC82 * k2 + dtC83 * k3
+                    + dtC84 * k4 + dtC85 * k5 + dtC86 * k6
+                    + dtC87 * k7)
+        k8 = lu_solve_batched(lu_and_piv, rhs)
+
+        # Solution and error estimate
+        y1 = u + k8
+        y_error = k8  # embedded error: (batch_size, n_eq)
+
+        dense_info = dict(y0=y0, y1=y1)
+        return y1, y_error, dense_info, None, RESULTS.successful

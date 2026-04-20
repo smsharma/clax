@@ -167,6 +167,57 @@ def _make_scalar_pid_controller(
     )
 
 
+def _scalar_pid_filtered_rms_norm_batched(
+    x,
+    filter_indices: jnp.ndarray,
+    filter_weights_batch: jnp.ndarray,
+):
+    """Batched filtered RMS norm — single scalar from ``(batch_size, n_eq)`` error.
+
+    Selects filtered variables per mode, applies k-dependent weights, then
+    flattens everything into one vector and returns its RMS.  This ensures
+    the shared step size is controlled by the worst-case error across the
+    batch.
+
+    cf. DISCO-EB ``rms_norm_filtered_batched``
+    """
+    # x is (batch_size, n_eq) — select and weight per mode
+    xs_weighted = jax.vmap(
+        lambda x_single, w: x_single[filter_indices] * w,
+        (0, 0),
+    )(x, filter_weights_batch)  # (batch_size, n_filter)
+    return _rms_norm_safe(xs_weighted.ravel())
+
+
+def _make_scalar_pid_controller_batched(
+    *,
+    prec: PrecisionParams,
+    k_batch,
+    idx,
+    config: PerturbationPIDControllerConfig,
+):
+    """Construct PID controller for the batched Rosenbrock solver.
+
+    Pre-computes per-mode k-dependent filter weights and returns a
+    controller whose norm collapses the ``(batch_size, n_eq)`` error
+    estimate to a single scalar.
+    """
+    filter_indices = _scalar_pid_filtered_variable_indices(idx)
+    filter_weights_batch = jax.vmap(_scalar_pid_filtered_variable_weights)(k_batch)
+    return diffrax.PIDController(
+        rtol=prec.pt_ode_rtol,
+        atol=prec.pt_ode_atol,
+        norm=lambda err: _scalar_pid_filtered_rms_norm_batched(
+            err, filter_indices, filter_weights_batch,
+        ),
+        pcoeff=config.pcoeff,
+        icoeff=config.icoeff,
+        dcoeff=config.dcoeff,
+        factormax=config.factormax,
+        factormin=config.factormin,
+    )
+
+
 def _make_scalar_pid_controller_unfiltered(
     *,
     prec: PrecisionParams,
@@ -2011,6 +2062,94 @@ def perturbations_solve_mpk(
     return _perturbations_solve_mpk_impl(params, prec, bg, th, pid_config)
 
 
+def _solve_mpk_batched_rosenbrock(
+    k_grid, batch_size, tau_ini, tau_max, tau_grid, n_tau, n_eq,
+    bg, th, params, prec, idx, pid_config, args_ncdm,
+    l_max_g, l_max_pol, l_max_ur,
+    ncdmfa_mode_code, ncdmfa_trigger,
+):
+    """Solve the mPk perturbation system using ``Rodas5Batched``.
+
+    Each chunk of ``batch_size`` k-modes is solved in a single
+    ``diffeqsolve`` call with shared time-stepping.
+    """
+    from clax.rosenbrock import Rodas5Batched
+
+    q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = args_ncdm
+    n_k = len(k_grid)
+
+    # Shared args captured in closure — only k varies per mode.
+    shared_args = (bg, th, params, idx, l_max_g, l_max_pol, l_max_ur,
+                   ncdmfa_mode_code, ncdmfa_trigger,
+                   q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
+
+    def f_single(t, y, k_scalar):
+        """Single-mode RHS for Jacobian computation by Rodas5Batched."""
+        return _perturbation_rhs(t, y, (k_scalar,) + shared_args)
+
+    def vf_batched(t, y_batch, args):
+        """Batched vector field: vmaps f_single over the batch dimension.
+
+        During diffrax's compatibility check ``args = (f, k_batch)``; during
+        actual solve ``args = k_batch`` (just the per-mode data).
+        cf. DISCO-EB perturbations.py:842-863
+        """
+        if isinstance(args, tuple) and len(args) == 2:
+            return jax.tree_util.tree_map(jnp.zeros_like, y_batch)
+        return jax.vmap(f_single, in_axes=(None, 0, 0))(t, y_batch, args)
+
+    def solve_batch(k_batch):
+        """Solve one batch of k-modes with shared stepping."""
+        y0_batch = jax.vmap(
+            lambda ki: _adiabatic_ic(ki, jnp.array(tau_ini), bg, params, idx, n_eq,
+                                     args_ncdm=args_ncdm)
+        )(k_batch)
+
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vf_batched),
+            solver=Rodas5Batched(),
+            t0=tau_ini,
+            t1=tau_max,
+            dt0=tau_ini * 0.1,
+            y0=y0_batch,
+            saveat=diffrax.SaveAt(ts=tau_grid),
+            stepsize_controller=_make_scalar_pid_controller_batched(
+                prec=prec, k_batch=k_batch, idx=idx, config=pid_config,
+            ),
+            adjoint=diffrax.DirectAdjoint(),
+            max_steps=prec.ode_max_steps,
+            args=(f_single, k_batch),
+        )
+        # sol.ys: (n_tau, batch_size, n_eq)
+        # Extract delta_m for each (tau, k) pair.
+        def extract_at_tau(i):
+            return jax.vmap(
+                lambda y_single, ki: _extract_delta_m(
+                    y_single, ki, tau_grid[i], bg, idx,
+                    q_ncdm=q_ncdm, w_ncdm=w_ncdm, M_ncdm=M_ncdm,
+                    ncdmfa_mode_code=ncdmfa_mode_code,
+                    ncdmfa_trigger=ncdmfa_trigger,
+                ),
+                in_axes=(0, 0),
+            )(sol.ys[i], k_batch)
+
+        return jax.vmap(extract_at_tau)(jnp.arange(n_tau))  # (n_tau, batch_size)
+
+    # Pad to full chunks to avoid recompilation for the tail.
+    n_tail = n_k % batch_size
+    pad_size = (batch_size - n_tail) if n_tail > 0 else 0
+    k_padded = jnp.concatenate([k_grid, jnp.full(pad_size, k_grid[-1])])
+    k_chunks = k_padded.reshape(-1, batch_size)  # (n_chunks, batch_size)
+
+    # solve_batch returns (n_tau, batch_size);
+    # lax.map stacks to (n_chunks, n_tau, batch_size).
+    all_delta_m = jax.lax.map(solve_batch, k_chunks)
+    # Reshape to (n_k, n_tau) matching the unbatched path.
+    all_delta_m = jnp.transpose(all_delta_m, (0, 2, 1))   # (n_chunks, batch_size, n_tau)
+    all_delta_m = all_delta_m.reshape(-1, n_tau)[:n_k]     # (n_k, n_tau)
+    return all_delta_m
+
+
 def _perturbations_solve_mpk_impl(
     params: CosmoParams,
     prec: PrecisionParams,
@@ -2049,8 +2188,8 @@ def _perturbations_solve_mpk_impl(
             dt0=tau_ini * 0.1,
             y0=y0,
             saveat=diffrax.SaveAt(ts=tau_grid),
-            stepsize_controller=_make_scalar_pid_controller_unfiltered(
-                prec=prec, config=pid_config,
+            stepsize_controller=_make_scalar_pid_controller(
+                prec=prec, k=k, idx=idx, config=pid_config,
             ),
             adjoint=_get_adjoint(prec.ode_adjoint),
             max_steps=prec.ode_max_steps,
@@ -2067,7 +2206,16 @@ def _perturbations_solve_mpk_impl(
         n_outputs=_pt_saved_output_count(solve_kind="mpk"),
         solve_kind="mpk",
     )
-    all_delta_m = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
+
+    if prec.pt_ode_solver == "rosenbrock_batched":
+        all_delta_m = _solve_mpk_batched_rosenbrock(
+            k_grid, batch_size, tau_ini, tau_max, tau_grid, n_tau, n_eq,
+            bg, th, params, prec, idx, pid_config, args_ncdm,
+            l_max_g, l_max_pol, l_max_ur,
+            ncdmfa_mode_code, ncdmfa_trigger,
+        )
+    else:
+        all_delta_m = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
 
     return MatterPerturbationResult(k_grid=k_grid, tau_grid=tau_grid, delta_m=all_delta_m)
 
@@ -2110,8 +2258,8 @@ def _matter_delta_m_single_k_impl(
         dt0=tau_ini * 0.1,
         y0=y0,
         saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=_make_scalar_pid_controller_unfiltered(
-            prec=prec, config=pid_config,
+        stepsize_controller=_make_scalar_pid_controller(
+            prec=prec, k=k, idx=idx, config=pid_config,
         ),
         adjoint=_get_adjoint(prec.ode_adjoint),
         max_steps=prec.ode_max_steps,

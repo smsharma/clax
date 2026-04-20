@@ -12,7 +12,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from clax.rosenbrock import Rodas5, GRKT4
+from clax.rosenbrock import Rodas5, GRKT4, Rodas5Batched
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +275,135 @@ class TestSaveAt:
         rel_err = abs(y_half[0] / exact - 1)
         assert rel_err < 0.01, \
             f"Rodas5 dense interpolation at t=0.5: rel err {rel_err:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# Rodas5Batched tests
+# ---------------------------------------------------------------------------
+
+class TestRodas5Batched:
+    """Tests for the batched Rodas5 solver (shared time-stepping across a batch)."""
+
+    def test_order(self):
+        solver = Rodas5Batched()
+        term = diffrax.ODETerm(lambda t, y, args: y)
+        assert solver.order(term) == 5
+        assert solver.error_order(term) == 4
+
+    def test_batch_of_exponential_decays(self):
+        """Batch of 4 decays with different rates — each converges independently."""
+        rates = jnp.array([0.5, 1.0, 2.0, 3.0])
+        batch_size = len(rates)
+        n_eq = 1
+
+        def f_single(t, y, rate):
+            return -rate * y
+
+        def vf_batched(t, y_batch, args):
+            if isinstance(args, tuple) and len(args) == 2:
+                return jax.tree_util.tree_map(jnp.zeros_like, y_batch)
+            return jax.vmap(f_single, in_axes=(None, 0, 0))(t, y_batch, args)
+
+        y0 = jnp.ones((batch_size, n_eq))
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vf_batched),
+            Rodas5Batched(),
+            t0=0.0, t1=1.0, dt0=0.01,
+            y0=y0,
+            stepsize_controller=diffrax.PIDController(rtol=1e-6, atol=1e-8),
+            max_steps=5000,
+            saveat=diffrax.SaveAt(t1=True),
+            args=(f_single, rates),
+        )
+        y_final = sol.ys[0]  # (batch_size, n_eq)
+        exact = jnp.exp(-rates * 1.0)
+        for i in range(batch_size):
+            rel_err = abs(y_final[i, 0] / exact[i] - 1)
+            assert rel_err < 1e-4, (
+                f"Rodas5Batched decay[{i}] (rate={rates[i]}): "
+                f"rel err {rel_err:.3e}"
+            )
+
+    def test_matches_unbatched_rodas5(self):
+        """Batched results match vmap of single Rodas5 on stiff 2D system."""
+        A = jnp.array([[-1.0, 2.0], [0.0, -1000.0]])
+        scales = jnp.array([1.0, 2.0, 0.5])
+        batch_size = len(scales)
+        n_eq = 2
+
+        # Single-mode solve with unbatched Rodas5
+        def f_single(t, y, scale):
+            return scale * (A @ y)
+
+        def solve_single(scale):
+            f = lambda t, y, args: scale * (A @ y)
+            y0 = jnp.array([1.0, 1.0])
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(f), Rodas5(),
+                t0=0.0, t1=0.05, dt0=1e-4, y0=y0,
+                stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-12),
+                max_steps=10000,
+                saveat=diffrax.SaveAt(t1=True),
+            )
+            return sol.ys[0]
+
+        y_ref = jax.vmap(solve_single)(scales)  # (batch_size, n_eq)
+
+        # Batched solve
+        def vf_batched(t, y_batch, args):
+            if isinstance(args, tuple) and len(args) == 2:
+                return jax.tree_util.tree_map(jnp.zeros_like, y_batch)
+            return jax.vmap(f_single, in_axes=(None, 0, 0))(t, y_batch, args)
+
+        y0_batch = jnp.tile(jnp.array([1.0, 1.0]), (batch_size, 1))
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vf_batched),
+            Rodas5Batched(),
+            t0=0.0, t1=0.05, dt0=1e-4,
+            y0=y0_batch,
+            stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-12),
+            max_steps=10000,
+            saveat=diffrax.SaveAt(t1=True),
+            args=(f_single, scales),
+        )
+        y_batched = sol.ys[0]
+
+        diff = jnp.max(jnp.abs(y_batched - y_ref))
+        assert diff < 1e-4, (
+            f"Rodas5Batched vs vmap(Rodas5): max diff {diff:.3e}"
+        )
+
+    def test_saveat_ts(self):
+        """Batched solver saves at intermediate times correctly."""
+        rates = jnp.array([1.0, 3.0])
+        batch_size = len(rates)
+
+        def f_single(t, y, rate):
+            return -rate * y
+
+        def vf_batched(t, y_batch, args):
+            if isinstance(args, tuple) and len(args) == 2:
+                return jax.tree_util.tree_map(jnp.zeros_like, y_batch)
+            return jax.vmap(f_single, in_axes=(None, 0, 0))(t, y_batch, args)
+
+        ts = jnp.linspace(0.0, 1.0, 11)
+        y0 = jnp.ones((batch_size, 1))
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vf_batched),
+            Rodas5Batched(),
+            t0=0.0, t1=1.0, dt0=0.01,
+            y0=y0,
+            stepsize_controller=diffrax.PIDController(rtol=1e-6, atol=1e-8),
+            max_steps=5000,
+            saveat=diffrax.SaveAt(ts=ts),
+            args=(f_single, rates),
+        )
+        # sol.ys shape: (n_ts, batch_size, 1)
+        assert sol.ys.shape == (11, 2, 1)
+        # Check final time for each mode
+        for i in range(batch_size):
+            exact = jnp.exp(-rates[i] * 1.0)
+            rel_err = abs(sol.ys[-1, i, 0] / exact - 1)
+            assert rel_err < 1e-5, (
+                f"Rodas5Batched saveat mode {i}: rel err {rel_err:.3e}"
+            )
