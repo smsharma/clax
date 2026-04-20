@@ -28,21 +28,87 @@ FIDUCIAL_PARAMS = {
     'm_ncdm': 0.06,
     'T_ncdm': 0.71611,
     # Output
-    'output': 'tCl pCl lCl mPk',
+    'output': 'tCl pCl lCl mPk dTk vTk',
     'lensing': 'yes',
     'l_max_scalars': 2500,
     'P_k_max_1/Mpc': 50.0,
     'z_max_pk': 3.0,
     # High precision
     'tol_background_integration': 1e-12,
-    'tol_ncdm': 1e-10,
 }
+
+
+def _background_value_at_z(bg, z, key):
+    """Return a background-table quantity interpolated to redshift ``z``."""
+    z_bg = np.asarray(bg['z'])[::-1]
+    value_bg = np.asarray(bg[key])[::-1]
+    return float(np.interp(z, z_bg, value_bg))
+
+
+def _equality_redshift_and_tau(bg):
+    """Return ``(z_eq, tau_eq)`` from the background matter-radiation crossing."""
+    z_bg = np.asarray(bg['z'])[::-1]
+    tau_bg = np.asarray(bg['conf. time [Mpc]'])[::-1]
+    rho_ncdm = np.asarray(bg['(.)rho_ncdm[0]'])[::-1]
+    p_ncdm = np.asarray(bg['(.)p_ncdm[0]'])[::-1]
+    rho_m = np.asarray(bg['(.)rho_b'] + bg['(.)rho_cdm'])[::-1] + (rho_ncdm - 3.0 * p_ncdm)
+    rho_r = np.asarray(bg['(.)rho_g'] + bg['(.)rho_ur'])[::-1] + 3.0 * p_ncdm
+    ratio = rho_m / rho_r
+    idx = int(np.argmin(np.abs(np.log(ratio))))
+
+    if 0 < idx < len(z_bg) - 1:
+        if ratio[idx] >= 1.0:
+            left, right = idx, idx + 1
+        else:
+            left, right = idx - 1, idx
+        z_eq = float(np.interp(1.0, [ratio[right], ratio[left]], [z_bg[right], z_bg[left]]))
+    else:
+        z_eq = float(z_bg[idx])
+
+    tau_eq = float(np.interp(z_eq, z_bg, tau_bg))
+    return z_eq, tau_eq
+
+
+def _visibility_peak_quantities(cosmo, bg, th):
+    """Return ``(z_star, tau_star, rs_star, da_star)`` from the visibility peak."""
+    z_th = np.asarray(th['z'])[::-1]
+    g_th = np.asarray(th['g [Mpc^-1]'])[::-1]
+    z_star = float(z_th[int(np.argmax(g_th))])
+    tau_star = _background_value_at_z(bg, z_star, 'conf. time [Mpc]')
+    rs_star = _background_value_at_z(bg, z_star, 'comov.snd.hrz.')
+    da_star = float(cosmo.angular_distance(z_star))
+    return z_star, tau_star, rs_star, da_star
+
+
+def _compute_pk_components(cosmo, k_eval, z):
+    """Return CLASS linear total-matter and cb-only spectra at redshift ``z``.
+
+    ``pk_lin`` from CLASS is treated as the total-matter ``P_m`` reference.
+    ``P_cb`` is derived from transfer functions as ``P_m * (delta_cb / delta_m)^2``
+    using CLASS background density weights at the same redshift.
+    """
+    pk_m = np.array([cosmo.pk_lin(k, z) for k in k_eval])
+    transfer = cosmo.get_transfer(z)
+    bg = cosmo.get_background()
+
+    k_transfer = np.asarray(transfer['k (h/Mpc)']) * cosmo.h()
+    rho_b = _background_value_at_z(bg, z, '(.)rho_b')
+    rho_cdm = _background_value_at_z(bg, z, '(.)rho_cdm')
+
+    delta_b = np.asarray(transfer['d_b'])
+    delta_cdm = np.asarray(transfer['d_cdm'])
+    delta_tot = np.asarray(transfer['d_tot'])
+    delta_cb = (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
+    cb_to_m_ratio = (delta_cb / delta_tot) ** 2
+    pk_cb = pk_m * np.interp(np.log(k_eval), np.log(k_transfer), cb_to_m_ratio)
+    return pk_m, pk_cb
 
 
 def generate_background(cosmo, outdir):
     """Extract and save background quantities."""
     # Get full background table
     bg = cosmo.get_background()
+    th = cosmo.get_thermodynamics()
 
     # Extract key quantities at specific z values
     z_test = np.concatenate([
@@ -54,19 +120,31 @@ def generate_background(cosmo, outdir):
     H_z = np.array([cosmo.Hubble(z) for z in z_test])
     DA_z = np.array([cosmo.angular_distance(z) for z in z_test])
     DL_z = np.array([cosmo.luminosity_distance(z) for z in z_test])
-    Dchi_z = np.array([cosmo.comoving_distance(z) for z in z_test])
+    Dchi_z = (1.0 + z_test) * DA_z
     D_z = np.array([cosmo.scale_independent_growth_factor(z) for z in z_test])
     f_z = np.array([cosmo.scale_independent_growth_factor_f(z) for z in z_test])
 
-    # Derived parameters
-    derived = cosmo.get_current_derived_parameters([
-        'z_eq', 'tau_eq', 'z_rec', 'tau_rec', 'rs_rec',
-        'z_star', 'tau_star', 'rs_star', 'da_star',
+    # Derived parameters supported directly by this classy build
+    derived = {}
+    for name in [
+        'z_rec', 'tau_rec', 'rs_rec',
         'z_d', 'tau_d', 'rs_d',
         'age', 'conformal_age',
         'z_reio', 'tau_reio',
         'Neff',
-    ])
+    ]:
+        derived[name] = float(cosmo.get_current_derived_parameters([name])[name])
+
+    z_eq, tau_eq = _equality_redshift_and_tau(bg)
+    z_star, tau_star, rs_star, da_star = _visibility_peak_quantities(cosmo, bg, th)
+    derived.update({
+        'z_eq': z_eq,
+        'tau_eq': tau_eq,
+        'z_star': z_star,
+        'tau_star': tau_star,
+        'rs_star': rs_star,
+        'da_star': da_star,
+    })
 
     np.savez(
         os.path.join(outdir, 'background.npz'),
@@ -90,20 +168,29 @@ def generate_background(cosmo, outdir):
         json.dump({k: float(v) for k, v in derived.items()}, f, indent=2)
 
     # Also save key scalars
+    H0 = float(cosmo.Hubble(0))
+    H0_sq = H0 * H0
+    rho_b_0 = _background_value_at_z(bg, 0.0, '(.)rho_b')
+    rho_cdm_0 = _background_value_at_z(bg, 0.0, '(.)rho_cdm')
+    rho_ncdm_0 = _background_value_at_z(bg, 0.0, '(.)rho_ncdm[0]')
+    rho_g_0 = _background_value_at_z(bg, 0.0, '(.)rho_g')
+    rho_ur_0 = _background_value_at_z(bg, 0.0, '(.)rho_ur')
+    rho_lambda_0 = _background_value_at_z(bg, 0.0, '(.)rho_lambda')
+
     scalars = {
-        'H0': float(cosmo.Hubble(0)),
+        'H0': H0,
         'h': float(cosmo.h()),
-        'Omega_b': float(cosmo.Omega_b()),
-        'Omega_cdm': float(cosmo.Omega_cdm()),
-        'Omega_m': float(cosmo.Omega_m()),
-        'Omega_r': float(cosmo.Omega_r()),
-        'Omega_Lambda': float(cosmo.Omega_Lambda()),
-        'Omega_nu': float(cosmo.Omega_nu()),
-        'Omega_g': float(cosmo.Omega_g()),
+        'Omega_b': rho_b_0 / H0_sq,
+        'Omega_cdm': rho_cdm_0 / H0_sq,
+        'Omega_m': (rho_b_0 + rho_cdm_0 + rho_ncdm_0) / H0_sq,
+        'Omega_r': (rho_g_0 + rho_ur_0) / H0_sq,
+        'Omega_Lambda': rho_lambda_0 / H0_sq,
+        'Omega_nu': rho_ncdm_0 / H0_sq,
+        'Omega_g': rho_g_0 / H0_sq,
         'T_cmb': float(cosmo.T_cmb()),
-        'Neff': float(cosmo.Neff()),
-        'age_Gyr': float(cosmo.age()),
-        'z_eq': float(cosmo.z_eq()),
+        'Neff': float(derived['Neff']),
+        'age_Gyr': float(derived['age']),
+        'z_eq': float(derived['z_eq']),
         'conformal_age': float(derived['conformal_age']),
     }
     with open(os.path.join(outdir, 'scalars.json'), 'w') as f:
@@ -142,7 +229,7 @@ def generate_thermodynamics(cosmo, outdir):
 
 
 def generate_spectra(cosmo, outdir):
-    """Extract and save C_l spectra and P(k)."""
+    """Extract and save C_l spectra, ``P_m(k)``, and ``P_cb(k)``."""
     # Unlensed C_l
     cl_raw = cosmo.raw_cl(2500)
     # Lensed C_l
@@ -170,23 +257,29 @@ def generate_spectra(cosmo, outdir):
 
     # P(k)
     k_test = np.logspace(-4, np.log10(50), 500)
-    pk_lin = np.array([cosmo.pk_lin(k, 0) for k in k_test])
 
     # P(k) at multiple redshifts
     z_pk = [0.0, 0.5, 1.0, 2.0]
-    pk_z = {}
+    pk_payload = {}
     for z in z_pk:
-        pk_z[f'pk_z{z}'] = np.array([cosmo.pk_lin(k, z) for k in k_test])
+        pk_m, pk_cb = _compute_pk_components(cosmo, k_test, z)
+        suffix = f'z{z}'
+        pk_payload[f'pk_m_{suffix}'] = pk_m
+        pk_payload[f'pk_cb_{suffix}'] = pk_cb
+        pk_payload[f'pk_{suffix}'] = pk_m
+        if z == 0.0:
+            pk_payload['pk_m_lin_z0'] = pk_m
+            pk_payload['pk_cb_lin_z0'] = pk_cb
+            pk_payload['pk_lin_z0'] = pk_m
 
     np.savez(
         os.path.join(outdir, 'pk.npz'),
         k=k_test,
-        pk_lin_z0=pk_lin,
-        **pk_z,
+        **pk_payload,
     )
 
     print(f"  C_l: l=2..2500, types: TT,EE,TE,BB,PP,TP")
-    print(f"  P(k): {len(k_test)} k-points, z={z_pk}")
+    print(f"  P(k): {len(k_test)} k-points, z={z_pk} (stored as P_m and P_cb)")
 
 
 def generate_perturbations(cosmo, outdir, params):
@@ -194,6 +287,10 @@ def generate_perturbations(cosmo, outdir, params):
 
     Uses CLASS k_output_values to get time-series of perturbation variables.
     This enables direct comparison of source function components against clax.
+
+    For this perturbation-layer reference we disable the CLASS ncdm fluid
+    approximation so the stored `delta_ncdm`, `theta_ncdm`, and `shear_ncdm`
+    are apples-to-apples with clax's approximation-free hierarchy.
     """
     # Need a separate CLASS run with k_output_values
     from classy import Class
@@ -203,9 +300,14 @@ def generate_perturbations(cosmo, outdir, params):
     cosmo2 = Class()
     params2 = dict(params)
     params2['k_output_values'] = ','.join(f'{k:.4f}' for k in k_output)
+    params2['ncdm_fluid_approximation'] = 3  # ncdmfa_none
+    params2['l_max_ncdm'] = 17
     # Need perturbation output
     if 'output' in params2:
-        params2['output'] = params2['output'] + ' dTk vTk'
+        if 'dTk' not in params2['output']:
+            params2['output'] = params2['output'] + ' dTk'
+        if 'vTk' not in params2['output']:
+            params2['output'] = params2['output'] + ' vTk'
     cosmo2.set(params2)
 
     try:
@@ -262,28 +364,7 @@ def generate_model(params, name, outdir_base):
 
 def main():
     outdir = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
-    os.makedirs(outdir, exist_ok=True)
-
-    # Fiducial LCDM
     generate_model(FIDUCIAL_PARAMS, 'lcdm_fiducial', outdir)
-
-    # Massive neutrinos (higher mass)
-    params_mnu = dict(FIDUCIAL_PARAMS)
-    params_mnu['m_ncdm'] = 0.15
-    generate_model(params_mnu, 'massive_nu_015', outdir)
-
-    # w0wa dark energy
-    params_w0wa = dict(FIDUCIAL_PARAMS)
-    params_w0wa['Omega_fld'] = 0.685
-    params_w0wa['w0_fld'] = -0.9
-    params_w0wa['wa_fld'] = 0.1
-    params_w0wa['Omega_Lambda'] = 0
-    # CLASS requires Omega_Lambda=0 when using fluid DE
-    # But can't specify both -- need to let CLASS infer
-    del params_w0wa['Omega_Lambda']
-    generate_model(params_w0wa, 'w0wa_m09_01', outdir)
-
-    print("\nAll reference data generated successfully!")
 
 
 if __name__ == '__main__':

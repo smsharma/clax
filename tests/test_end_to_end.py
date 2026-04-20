@@ -1,144 +1,166 @@
-"""End-to-end tests for the full clax pipeline.
+"""Tests public API smoke behavior.
 
-Tests the compute() and compute_pk() functions, including gradient tests
-that differentiate through background → thermodynamics → perturbations.
+Contract:
+- Top-level public entrypoints execute and return structurally sane outputs.
+
+Scope:
+- Covers lightweight smoke checks for ``clax.compute()`` and ``clax.compute_pk()``.
+- Excludes reference-data accuracy and gradient contracts owned by dedicated files.
+
+Notes:
+- These tests are intentionally cheap and do not own physics-accuracy guarantees.
 """
 
 import jax
 jax.config.update("jax_enable_x64", True)
 
-import jax.numpy as jnp
-import numpy as np
-import pytest
+from dataclasses import replace as dataclass_replace
 
 import clax
+import pytest
 from clax import CosmoParams, PrecisionParams
+from clax.perturbations import MatterPerturbationResult
 
 
 # Low-res precision for speed
 PREC_FAST = PrecisionParams(
-    bg_n_points=200, ncdm_bg_n_points=100, bg_tol=1e-8,
-    th_n_points=5000, th_z_max=5e3,
-    pt_l_max_g=17, pt_l_max_pol_g=17, pt_l_max_ur=17,
-    pt_k_max_cl=0.3,
-    pt_ode_rtol=1e-3, pt_ode_atol=1e-6,
-    ode_max_steps=262144,
+    bg_n_points=100,
+    ncdm_bg_n_points=64,
+    bg_tol=1e-8,
+    th_n_points=1200,
+    th_z_max=5e3,
+    pt_k_min=1e-3,
+    pt_k_max_cl=0.1,
+    pt_k_max_pk=0.2,
+    pt_k_per_decade=8,
+    pt_l_max_g=6,
+    pt_l_max_pol_g=6,
+    pt_l_max_ur=6,
+    pt_l_max_ncdm=6,
+    pt_tau_n_points=96,
+    pt_ode_rtol=1e-2,
+    pt_ode_atol=1e-5,
+    ode_max_steps=8192,
 )
 
 
 class TestCompute:
-    """Test the top-level compute() function."""
+    """Tests ``clax.compute()`` smoke behavior."""
 
     def test_compute_returns_result(self):
-        """compute() should return a ComputeResult with bg and th."""
+        """``compute()`` returns the expected result object; expects bg and th fields."""
         result = clax.compute(CosmoParams(), PREC_FAST)
         assert hasattr(result, 'bg')
         assert hasattr(result, 'th')
         assert float(result.bg.H0) > 0
 
-    def test_compute_H0(self, lcdm_scalars):
-        """H0 from compute() should match CLASS."""
+    def test_compute_returns_finite_scalars(self):
+        """``compute()`` returns finite scalar outputs; expects finite H0 and z_star."""
         result = clax.compute(CosmoParams(), PREC_FAST)
-        ref = lcdm_scalars['H0']
-        rel = abs(float(result.bg.H0) - ref) / ref
-        assert rel < 1e-4, f"H0 rel err: {rel:.2e}"
-
-    def test_compute_z_star(self, lcdm_derived):
-        """z_star from compute() should match CLASS to < 1%."""
-        result = clax.compute(CosmoParams(), PREC_FAST)
-        ref = lcdm_derived['z_star']
-        rel = abs(float(result.th.z_star) - ref) / ref
-        assert rel < 0.01, f"z_star: got {float(result.th.z_star):.1f}, CLASS {ref:.1f}"
+        assert jax.numpy.isfinite(result.bg.H0), "H0: found non-finite value; expected finite output"
+        assert jax.numpy.isfinite(result.th.z_star), "z_star: found non-finite value; expected finite output"
 
 
 class TestComputePk:
-    """Test the compute_pk() function."""
+    """Tests ``clax.compute_pk()`` smoke behavior."""
 
     def test_pk_positive(self):
-        """P(k) should be positive."""
+        """``compute_pk()`` returns a positive value; expects ``P(k=0.05) > 0``."""
         pk = clax.compute_pk(CosmoParams(), PREC_FAST, k=0.05)
         assert float(pk) > 0, f"P(k=0.05) = {float(pk)}"
 
-    def test_pk_low_k(self, lcdm_pk_ref):
-        """P(k=0.001) should match CLASS to < 5%."""
-        pk = float(clax.compute_pk(CosmoParams(), PREC_FAST, k=0.001))
-        idx_ref = np.argmin(np.abs(lcdm_pk_ref['k'] - 0.001))
-        pk_class = lcdm_pk_ref['pk_lin_z0'][idx_ref]
-        ratio = pk / pk_class
-        assert abs(ratio - 1) < 0.05, f"P(k=0.001): ratio={ratio:.4f}"
-
-
-class TestGradients:
-    """Test AD gradients through the full pipeline."""
-
-    def test_grad_H0_wrt_h(self):
-        """d(H0)/d(h) should be non-zero and match FD."""
-        def H0_fn(h):
-            result = clax.compute(CosmoParams(h=h), PREC_FAST)
-            return result.bg.H0
-
-        h0 = 0.6736
-        grad_ad = float(jax.grad(H0_fn)(h0))
-        eps = 1e-5
-        grad_fd = float((H0_fn(h0 + eps) - H0_fn(h0 - eps)) / (2 * eps))
-        rel = abs(grad_ad - grad_fd) / abs(grad_fd)
-        assert rel < 0.01, f"dH0/dh: AD={grad_ad:.4e} FD={grad_fd:.4e} err={rel:.2%}"
-
-    def test_grad_conf_age_wrt_omega_cdm(self):
-        """d(conf_age)/d(omega_cdm) should match FD."""
-        def age_fn(omega_cdm):
-            result = clax.compute(CosmoParams(omega_cdm=omega_cdm), PREC_FAST)
-            return result.bg.conformal_age
-
-        oc0 = 0.12
-        grad_ad = float(jax.grad(age_fn)(oc0))
-        eps = 1e-5
-        grad_fd = float((age_fn(oc0 + eps) - age_fn(oc0 - eps)) / (2 * eps))
-        rel = abs(grad_ad - grad_fd) / abs(grad_fd)
-        assert rel < 0.01, f"d(age)/d(ocdm): AD={grad_ad:.4e} FD={grad_fd:.4e} err={rel:.2%}"
-
-    @pytest.mark.slow
-    def test_grad_pk_wrt_omega_cdm(self):
-        """d(P(k))/d(omega_cdm) through full Boltzmann pipeline should match FD."""
-        def pk_fn(omega_cdm):
-            return clax.compute_pk(CosmoParams(omega_cdm=omega_cdm), PREC_FAST, k=0.05)
-
-        oc0 = 0.12
-        grad_ad = float(jax.grad(pk_fn)(oc0))
-        eps = 1e-4
-        grad_fd = float((pk_fn(oc0 + eps) - pk_fn(oc0 - eps)) / (2 * eps))
-        rel = abs(grad_ad - grad_fd) / abs(grad_fd)
-        assert rel < 0.05, (
-            f"d(P(k))/d(omega_cdm): AD={grad_ad:.4e} FD={grad_fd:.4e} err={rel:.2%}"
+    def test_pk_positive_with_pid_overrides(self):
+        """``compute_pk()`` accepts scalar PID gain overrides and stays finite/positive."""
+        pk = clax.compute_pk(
+            CosmoParams(),
+            PREC_FAST,
+            k=0.05,
+            pt_pid_pcoeff=0.2,
+            pt_pid_icoeff=0.7,
+            pt_pid_factormax=10.0,
+            pt_pid_factormin=0.5,
         )
+        assert jax.numpy.isfinite(pk), "P(k=0.05): found non-finite value with PID overrides"
+        assert float(pk) > 0, f"P(k=0.05) = {float(pk)}"
 
-    @pytest.mark.slow
-    def test_grad_pk_wrt_omega_b(self):
-        """d(P(k))/d(omega_b) through full Boltzmann pipeline should match FD."""
-        def pk_fn(omega_b):
-            return clax.compute_pk(CosmoParams(omega_b=omega_b), PREC_FAST, k=0.05)
+    def test_pk_table_returns_positive_grid(self):
+        """``compute_pk_table()`` returns a positive reusable ``P(k)`` table."""
+        result = clax.compute_pk_table(CosmoParams(), PREC_FAST, k_eval=jax.numpy.geomspace(1e-3, 0.1, 4))
+        assert result.k_grid.shape == result.pk_grid.shape
+        assert jax.numpy.all(result.pk_grid > 0), f"Non-positive values found in {result.pk_grid}"
 
-        ob0 = 0.02237
-        grad_ad = float(jax.grad(pk_fn)(ob0))
-        eps = 1e-5
-        grad_fd = float((pk_fn(ob0 + eps) - pk_fn(ob0 - eps)) / (2 * eps))
-        rel = abs(grad_ad - grad_fd) / abs(grad_fd)
-        assert rel < 0.05, (
-            f"d(P(k))/d(omega_b): AD={grad_ad:.4e} FD={grad_fd:.4e} err={rel:.2%}"
+    def test_pk_table_uses_reduced_mpk_perturbation_payload(self):
+        """Public PK tables should keep only the reduced matter-power perturbation payload."""
+        result = clax.compute_pk_table(CosmoParams(), PREC_FAST, k_eval=jax.numpy.geomspace(1e-3, 0.1, 4))
+        assert isinstance(result.pt, MatterPerturbationResult)
+        assert hasattr(result.pt, "delta_m")
+        assert not hasattr(result.pt, "source_T0")
+
+    def test_pk_table_accepts_pid_overrides(self):
+        """``compute_pk_table()`` accepts scalar PID gain overrides and returns finite positive values."""
+        result = clax.compute_pk_table(
+            CosmoParams(),
+            PREC_FAST,
+            k_eval=jax.numpy.geomspace(1e-3, 0.1, 4),
+            pt_pid_pcoeff=0.2,
+            pt_pid_icoeff=0.7,
+            pt_pid_factormax=10.0,
+            pt_pid_factormin=0.5,
         )
+        assert jax.numpy.all(jax.numpy.isfinite(result.pk_grid)), "P(k) table: found non-finite values with PID overrides"
+        assert jax.numpy.all(result.pk_grid > 0), f"Non-positive values found in {result.pk_grid}"
 
-    @pytest.mark.slow
-    def test_grad_pk_wrt_n_s(self):
-        """d(P(k))/d(n_s) through full Boltzmann pipeline should match FD."""
-        # Use k != k_pivot so n_s has a non-zero effect through the primordial spectrum
-        def pk_fn(n_s):
-            return clax.compute_pk(CosmoParams(n_s=n_s), PREC_FAST, k=0.01)
+    def test_pk_table_auto_batch_matches_full_vmap(self):
+        """Auto-batched and explicit full-``vmap`` table solves should agree on the returned ``P(k)`` grid."""
+        k_eval = jax.numpy.geomspace(1e-3, 0.1, 4)
+        auto_result = clax.compute_pk_table(CosmoParams(), dataclass_replace(PREC_FAST, pt_k_chunk_size=0), k_eval=k_eval)
+        full_result = clax.compute_pk_table(CosmoParams(), dataclass_replace(PREC_FAST, pt_k_chunk_size=-1), k_eval=k_eval)
+        rel_diff = jax.numpy.max(jax.numpy.abs(auto_result.pk_grid / full_result.pk_grid - 1.0))
+        assert float(rel_diff) < 1e-3, f"Auto/full-vmap table mismatch {float(rel_diff):.3e}"
 
-        ns0 = 0.9649
-        grad_ad = float(jax.grad(pk_fn)(ns0))
-        eps = 1e-4
-        grad_fd = float((pk_fn(ns0 + eps) - pk_fn(ns0 - eps)) / (2 * eps))
-        rel = abs(grad_ad - grad_fd) / (abs(grad_fd) + 1e-30)
-        assert rel < 0.05, (
-            f"d(P(k=0.01))/d(n_s): AD={grad_ad:.4e} FD={grad_fd:.4e} err={rel:.2%}"
-        )
+    def test_pk_table_multi_k_gradient_smoke(self):
+        """One public-table solve should support finite non-zero multi-``k`` reverse-mode gradients."""
+        k_eval = jax.numpy.array([1.5e-2, 3.0e-2, 9.0e-2, 1.8e-1])
+        weights = jax.numpy.array([0.1, 0.2, 0.3, 0.4])
+
+        def objective(params):
+            result = clax.compute_pk_table(params, PREC_FAST, k_eval=k_eval)
+            return jax.numpy.sum(weights * result.pk_grid)
+
+        grad_tree = jax.grad(objective)(CosmoParams())
+        assert jax.numpy.isfinite(grad_tree.h), f"Expected finite d(sum P)/dh, got {grad_tree.h}"
+        assert float(jax.numpy.abs(grad_tree.h)) > 0.0, "Expected non-zero d(sum P)/dh"
+
+    def test_pid_filter_selection_kwargs_are_removed_from_public_api(self):
+        """Removed PID filter-selection kwargs should raise ``TypeError`` on public PK entrypoints."""
+        with pytest.raises(TypeError):
+            clax.compute_pk(CosmoParams(), PREC_FAST, k=0.05, pt_pid_filter_indices=("eta",))
+        with pytest.raises(TypeError):
+            clax.compute_pk_table(
+                CosmoParams(),
+                PREC_FAST,
+                k_eval=jax.numpy.geomspace(1e-3, 0.1, 4),
+                pt_pid_filter_weights_mode="unity",
+            )
+        with pytest.raises(TypeError):
+            clax.compute_pk_interpolator(CosmoParams(), PREC_FAST, pt_pid_filter_indices=("eta",))
+
+    def test_pk_interpolator_scalar_query(self):
+        """``compute_pk_interpolator()`` supports scalar re-evaluation on the stored table."""
+        result = clax.compute_pk_interpolator(CosmoParams(), PREC_FAST)
+        pk = result.pk(0.05)
+        assert float(pk) > 0, f"P(k=0.05) = {float(pk)}"
+
+    def test_pk_interpolator_rejects_out_of_range_query(self):
+        """Table-backed ``P(k)`` queries should not silently extrapolate beyond the solved k-grid."""
+        result = clax.compute_pk_interpolator(CosmoParams(), PREC_FAST)
+        with pytest.raises(ValueError, match="solved perturbation grid"):
+            result.pk(0.2)
+
+    def test_pk_positive_across_ncdm_fluid_modes(self):
+        """``compute_pk()`` stays finite and positive for all CLASS-style ``ncdmfa`` modes."""
+        for mode in ("mb", "hu", "class", "none"):
+            prec = dataclass_replace(PREC_FAST, ncdm_fluid_approximation=mode)
+            pk = clax.compute_pk(CosmoParams(), prec, k=0.05)
+            assert jax.numpy.isfinite(pk), f"P(k=0.05) non-finite for mode={mode!r}"
+            assert float(pk) > 0, f"P(k=0.05) = {float(pk)} for mode={mode!r}"

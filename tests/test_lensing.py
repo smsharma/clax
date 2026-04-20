@@ -1,4 +1,15 @@
-"""Test lensing module: C_l^phiphi and lensed C_l^TT/EE/TE/BB against CLASS reference."""
+"""Tests lensing-layer forward behavior.
+
+Contract:
+- Lensing helpers and lensed spectra are finite, positive where required, and consistent with CLASS-derived references.
+
+Scope:
+- Covers ``C_l^pp`` positivity plus lensed TT/EE/TE/BB behavior using CLASS unlensed inputs.
+- Excludes unlensed scalar-spectrum contracts owned by ``test_harmonic.py``.
+
+Notes:
+- The lensed-spectrum checks isolate the lensing algorithm by feeding CLASS unlensed spectra.
+"""
 
 import os
 
@@ -37,17 +48,11 @@ def _load_cls_ref():
     return dict(np.load(path, allow_pickle=True))
 
 
-def _load_cls_lensed_ref():
-    """Load lensed C_l reference data directly."""
-    path = os.path.join(REFERENCE_DIR, 'lcdm_fiducial', 'cls_lensed.npz')
-    return dict(np.load(path, allow_pickle=True))
-
-
 class TestCLpp:
-    """Test lensing potential C_l^phiphi against CLASS reference data."""
+    """Tests lensing-potential spectrum behavior."""
 
     def test_cl_pp_positive(self, pipeline):
-        """C_l^pp should be positive for l >= 2."""
+        """``C_l^pp`` is positive on the probe grid; expects positive values for ``l >= 2``."""
         params, bg, _, pt = pipeline
         l_values = [2, 10, 50, 100, 200]
         cl_pp = compute_cl_pp(pt, params, bg, l_values)
@@ -56,40 +61,13 @@ class TestCLpp:
             print(f"C_l^pp(l={l}) = {val:.4e}")
             assert val > 0, f"C_l^pp(l={l}) = {val:.4e} is not positive"
 
-    def test_cl_pp_vs_class(self, pipeline, lcdm_cls_ref):
-        """Compare C_l^pp at l=10, 50, 100, 200 vs CLASS reference.
-
-        Reports computed/reference ratios for diagnostics. The lensing potential
-        computation may have normalization issues; this test documents the
-        current accuracy level.
-        """
-        params, bg, _, pt = pipeline
-        l_values = [10, 50, 100, 200]
-        cl_pp = compute_cl_pp(pt, params, bg, l_values)
-
-        pp_ref = lcdm_cls_ref['pp']
-        for i, l in enumerate(l_values):
-            cl_us = float(cl_pp[i])
-            cl_class = float(pp_ref[l])
-            ratio = cl_us / cl_class
-            print(f"C_l^pp(l={l}): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
-            # Lensing potential: use very loose tolerance as normalization may need tuning
-            # This test primarily documents the current accuracy for diagnostics
-            assert abs(ratio - 1) < 1e5, (
-                f"C_l^pp(l={l}): ratio={ratio:.4f}, wildly off"
-            )
-
 
 class TestLensedTT:
-    """Test lensed C_l^TT using the correlation function lensing algorithm.
-
-    Uses CLASS reference unlensed TT and C_l^pp as input to test the
-    lensing algorithm in isolation (avoids needing to compute C_l at every l).
-    """
+    """Tests lensed TT-spectrum behavior."""
 
     @pytest.fixture(scope="class")
     def lensed_tt(self):
-        """Compute lensed TT from CLASS reference unlensed TT and pp."""
+        """Compute lensed TT from CLASS reference unlensed inputs."""
         cls_ref = _load_cls_ref()
         cl_tt_unlensed = jnp.array(cls_ref['tt'])
         cl_pp = jnp.array(cls_ref['pp'])
@@ -98,15 +76,11 @@ class TestLensedTT:
         return np.array(cl_lensed)
 
     def test_lens_cl_tt_shape(self, lensed_tt):
-        """Lensed array should have shape (l_max+1,)."""
+        """Lensed TT has the expected shape; expects ``(2501,)``."""
         assert lensed_tt.shape == (2501,), f"Expected shape (2501,), got {lensed_tt.shape}"
 
     def test_lens_cl_tt_vs_class(self, lensed_tt, lcdm_cls_lensed_ref):
-        """Compare lensed C_l^TT at select l values against CLASS reference.
-
-        Since we feed exact CLASS unlensed TT and pp, the lensing algorithm
-        should reproduce CLASS lensed TT to good accuracy.
-        """
+        """Lensed TT matches CLASS; expects <0.5% relative error on the probe grid."""
         tt_ref = lcdm_cls_lensed_ref['tt']
         test_ells = [10, 50, 100, 200, 500, 1000, 1500, 2000]
 
@@ -124,13 +98,13 @@ class TestLensedTT:
             )
 
     def test_lens_cl_tt_positive(self, lensed_tt):
-        """Lensed C_l^TT should be positive for l >= 2."""
+        """Lensed TT is positive on the probe grid; expects positive values for ``l >= 2``."""
         for l in [10, 100, 500, 1000, 2000]:
             val = float(lensed_tt[l])
             assert val > 0, f"Lensed C_l^TT(l={l}) = {val:.4e} is not positive"
 
     def test_lens_cl_tt_lensing_effect(self, lensed_tt, lcdm_cls_lensed_ref):
-        """Lensing should smooth acoustic peaks: check it changes the spectrum."""
+        """Lensing changes TT relative to the unlensed input; expects a non-zero effect."""
         cls_ref = _load_cls_ref()
         tt_unlensed = cls_ref['tt']
         for l in [100, 500, 1000]:
@@ -142,14 +116,11 @@ class TestLensedTT:
 
 
 class TestLensCls:
-    """Test full lens_cls (TT+EE+TE+BB) against CLASS lensed reference.
-
-    Uses CLASS unlensed C_l and C_l^pp as input to isolate the lensing algorithm.
-    """
+    """Tests full lensed-spectrum behavior."""
 
     @pytest.fixture(scope="class")
     def lensed_all(self):
-        """Compute all lensed spectra from CLASS reference inputs."""
+        """Compute all lensed spectra from CLASS reference unlensed inputs."""
         cls_ref = _load_cls_ref()
         cl_tt = jnp.array(cls_ref['tt'])
         cl_ee = jnp.array(cls_ref['ee'])
@@ -163,13 +134,13 @@ class TestLensCls:
         }
 
     def test_lens_cls_shapes(self, lensed_all):
-        """All lensed arrays should have shape (2501,)."""
+        """All lensed spectra have the expected shape; expects ``(2501,)`` arrays."""
         for key in ['tt', 'ee', 'te', 'bb']:
             assert lensed_all[key].shape == (2501,), \
                 f"Lensed {key} shape {lensed_all[key].shape}, expected (2501,)"
 
     def test_lensed_tt_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed TT should match CLASS to <0.2% at l=10-1500."""
+        """Lensed TT matches CLASS; expects <0.2% relative error on the probe grid."""
         tt_ref = lcdm_cls_lensed_ref['tt']
         for l in [10, 100, 500, 1000, 1500]:
             err = abs(lensed_all['tt'][l] - tt_ref[l]) / abs(tt_ref[l])
@@ -177,7 +148,7 @@ class TestLensCls:
             assert err < 0.002, f"Lensed TT l={l}: err={err:.4%} exceeds 0.2%"
 
     def test_lensed_ee_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed EE should match CLASS to <0.2% at l=10-1500."""
+        """Lensed EE matches CLASS; expects <0.2% relative error on the probe grid."""
         ee_ref = lcdm_cls_lensed_ref['ee']
         for l in [10, 100, 500, 1000, 1500]:
             err = abs(lensed_all['ee'][l] - ee_ref[l]) / abs(ee_ref[l])
@@ -185,24 +156,36 @@ class TestLensCls:
             assert err < 0.002, f"Lensed EE l={l}: err={err:.4%} exceeds 0.2%"
 
     def test_lensed_te_accuracy(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed TE should match CLASS to <1% at l=10-1500."""
+        """Lensed TE matches CLASS; expects <1% relative error on probe grid.
+
+        Skip l values near TE zero crossings (where |TE|/sqrt(TT*EE) < 0.02)
+        since relative error is meaningless near zeros. At l=1500 in LCDM,
+        TE ≈ -2e-19 (a zero crossing), so we skip that and probe l=1300 instead.
+        """
+        import numpy as np
         te_ref = lcdm_cls_lensed_ref['te']
-        for l in [10, 100, 500, 1000, 1500]:
+        tt_ref = lcdm_cls_lensed_ref['tt']
+        ee_ref = lcdm_cls_lensed_ref['ee']
+        for l in [10, 100, 500, 1000, 1300]:
             if abs(te_ref[l]) < 1e-30:
                 continue
+            # Skip near-zero crossings where relative error is ill-defined
+            corr = abs(te_ref[l]) / np.sqrt(tt_ref[l] * ee_ref[l])
+            if corr < 0.02:
+                continue
             err = abs(lensed_all['te'][l] - te_ref[l]) / abs(te_ref[l])
-            print(f"Lensed TE l={l}: err={err:.4%}")
+            print(f"Lensed TE l={l}: err={err:.4%} (|TE|/sqrt(TT*EE)={corr:.3f})")
             assert err < 0.01, f"Lensed TE l={l}: err={err:.2%} exceeds 1%"
 
     def test_lensed_bb_positive(self, lensed_all):
-        """Lensed BB should be positive (generated from E-mode lensing)."""
+        """Lensed BB is positive on the probe grid; expects positive values."""
         for l in [10, 100, 500, 1000]:
             val = float(lensed_all['bb'][l])
             print(f"Lensed BB l={l}: {val:.4e}")
             assert val > 0, f"Lensed BB(l={l}) = {val:.4e} not positive"
 
     def test_lensed_bb_vs_class(self, lensed_all, lcdm_cls_lensed_ref):
-        """Lensed BB should match CLASS to <5% at l=50-500."""
+        """Lensed BB matches CLASS; expects <5% relative error on the probe grid."""
         bb_ref = lcdm_cls_lensed_ref['bb']
         for l in [50, 100, 200, 500]:
             ratio = lensed_all['bb'][l] / bb_ref[l]

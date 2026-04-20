@@ -1,4 +1,12 @@
-"""Test differentiable cubic spline interpolation."""
+"""Tests cubic-spline interpolation behavior.
+
+Contract:
+- ``CubicSpline`` evaluates accurately, differentiates locally, and behaves as a JAX pytree.
+
+Scope:
+- Covers interpolation accuracy, derivative accuracy, pytree behavior, and local AD support.
+- Excludes higher-level physics-layer usage of splines.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -9,7 +17,7 @@ from clax.interpolation import CubicSpline
 
 
 def test_spline_sin():
-    """Spline of sin(x) should match to high accuracy."""
+    """Spline evaluation matches ``sin(x)``; expects <1e-5 absolute error."""
     x = jnp.linspace(0, 2 * jnp.pi, 100)
     y = jnp.sin(x)
     spl = CubicSpline(x, y)
@@ -23,7 +31,7 @@ def test_spline_sin():
 
 
 def test_spline_derivative_cos():
-    """Derivative of spline(sin) should be cos."""
+    """Spline derivatives match ``cos(x)``; expects <1e-3 absolute error."""
     x = jnp.linspace(0, 2 * jnp.pi, 200)
     y = jnp.sin(x)
     spl = CubicSpline(x, y)
@@ -37,7 +45,7 @@ def test_spline_derivative_cos():
 
 
 def test_spline_exp():
-    """Spline of exp(x) on sparse grid."""
+    """Spline evaluation matches ``exp(x)`` on a sparse grid; expects <5e-4 max relative error."""
     x = jnp.linspace(0, 5, 50)
     y = jnp.exp(x)
     spl = CubicSpline(x, y)
@@ -52,7 +60,7 @@ def test_spline_exp():
 
 
 def test_spline_pytree():
-    """CubicSpline should work as a JAX pytree (flatten/unflatten)."""
+    """``CubicSpline`` is a valid pytree; expects flatten/unflatten to preserve evaluation."""
     x = jnp.linspace(0, 1, 10)
     y = x ** 2
     spl = CubicSpline(x, y)
@@ -66,7 +74,7 @@ def test_spline_pytree():
 
 
 def test_spline_grad():
-    """Gradients should flow through spline evaluation."""
+    """Gradients flow through spline evaluation; expects finite non-zero gradients."""
     x = jnp.linspace(0, 1, 20)
 
     def f(y_knots):

@@ -67,6 +67,7 @@ class BackgroundResult:
     rho_ur_of_loga: CubicSpline       # ultra-relativistic density
     rho_ncdm_of_loga: CubicSpline     # massive neutrino density
     p_ncdm_of_loga: CubicSpline       # massive neutrino pressure
+    pseudo_p_ncdm_of_loga: CubicSpline  # ncdm pseudo-pressure for CLASS fluid closure
     w_ncdm_of_loga: CubicSpline       # ncdm equation of state w = p/rho
     ca2_ncdm_of_loga: CubicSpline     # ncdm adiabatic sound speed squared
     rho_de_of_loga: CubicSpline       # dark energy density
@@ -96,6 +97,7 @@ class BackgroundResult:
             self.H_of_loga, self.rho_g_of_loga, self.rho_b_of_loga,
             self.rho_cdm_of_loga, self.rho_ur_of_loga,
             self.rho_ncdm_of_loga, self.p_ncdm_of_loga,
+            self.pseudo_p_ncdm_of_loga,
             self.w_ncdm_of_loga, self.ca2_ncdm_of_loga,
             self.rho_de_of_loga, self.rho_lambda_of_loga,
             self.rs_of_loga, self.D_of_loga, self.f_of_loga,
@@ -623,6 +625,7 @@ def background_solve(
         rtol=prec.bg_tol,
         atol=prec.bg_tol * 1e-3,
         max_steps=262144,  # background spans 32 decades in a, needs many steps
+        adjoint=prec.ode_adjoint,
     )
 
     # --- Extract solution ---
@@ -669,6 +672,7 @@ def background_solve(
     ca2_ncdm_grid = w_ncdm_grid / (3.0 * (1.0 + w_ncdm_grid)) * (
         5.0 - pseudo_p_ncdm_grid / jnp.maximum(P_ncdm_at_grid, 1e-100))
     w_ncdm_of_loga = CubicSpline(loga_grid, w_ncdm_grid)
+    pseudo_p_ncdm_of_loga = CubicSpline(loga_grid, pseudo_p_ncdm_grid)
     ca2_ncdm_of_loga = CubicSpline(loga_grid, ca2_ncdm_grid)
     rho_de_of_loga = CubicSpline(loga_grid, rho_de_grid)
     rho_lambda_of_loga = CubicSpline(loga_grid, rho_lambda_grid)
@@ -720,6 +724,7 @@ def background_solve(
         rho_ur_of_loga=rho_ur_of_loga,
         rho_ncdm_of_loga=rho_ncdm_of_loga,
         p_ncdm_of_loga=p_ncdm_of_loga,
+        pseudo_p_ncdm_of_loga=pseudo_p_ncdm_of_loga,
         w_ncdm_of_loga=w_ncdm_of_loga,
         ca2_ncdm_of_loga=ca2_ncdm_of_loga,
         rho_de_of_loga=rho_de_of_loga,

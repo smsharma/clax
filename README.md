@@ -102,12 +102,27 @@ result = clax.compute(CosmoParams(h=0.6736, omega_b=0.02237))
 print(result.bg.H0)            # Hubble constant [Mpc^-1] (CLASS internal units)
 print(result.bg.conformal_age) # conformal age in Mpc
 
-# Matter power spectrum at a single k
+# Practical dense-spectrum / reusable-table workflow: solve once on an
+# internal k-grid, then interpolate P(k) to the requested points.
+pk_table = clax.compute_pk_table(CosmoParams(), k_eval=[1e-3, 5e-2, 1.0])
+print(pk_table.pk_grid)
+print(pk_table.pk(0.05))
+
+# Exact single-k diagnostic / spot-check path
 pk = clax.compute_pk(CosmoParams(), k=0.05)
 
-# Gradient of P(k) w.r.t. a cosmological parameter
+# Local gradient at one k-mode
 grad = jax.grad(lambda p: clax.compute_pk(p, k=0.05))(CosmoParams())
 print(grad.omega_cdm)  # dP(k)/d(omega_cdm)
+
+# Practical multi-k gradient workflow: differentiate one reusable table solve
+# instead of many repeated exact single-k solves.
+grad_table = jax.grad(
+    lambda p: jax.numpy.sum(
+        clax.compute_pk_table(p, k_eval=[1.5e-2, 3.0e-2, 9.0e-2, 2.5e-1]).pk_grid
+    )
+)(CosmoParams())
+print(grad_table.h)  # d(sum_i P(k_i))/dh
 
 # Angular power spectra (C_l) -- science quality
 from clax.perturbations import perturbations_solve
@@ -154,12 +169,64 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 - `CosmoParams` fields are JAX-traced for automatic differentiation. `PrecisionParams` fields are static (control array shapes, not traced).
 - Full Boltzmann hierarchy with smooth RSA damping post-recombination. Full ncdm Psi_l(q) phase-space hierarchy (5 q-bins x 18 multipoles). TCA (tight-coupling approximation) with CLASS-matching dual criteria for numerical stability.
 - Perturbation ODE solved with Kvaerno5 (implicit, stiff-capable) via Diffrax.
-- `vmap` over k-modes for GPU parallelism.
+- `compute_pk_table()` / `compute_pk_interpolator()` are the practical
+  dense-spectrum and reusable-table `P(k)` APIs, especially on GPU; exact
+  `compute_pk()` remains the single-mode reference path.
+- Practical reverse-mode `P(k)` objectives should usually differentiate one
+  table-backed multi-`k` solve, not many repeated exact `compute_pk()` calls.
+- Backend-aware batching over k-modes for GPU/CPU perturbation solves.
 - `RecursiveCheckpointAdjoint` for memory-efficient reverse-mode AD through the ODE solve.
 - Synchronous gauge throughout (matching CLASS default).
 - RECFAST recombination matching CLASS `wrap_recfast.c` (Peebles C with fudge, Gaussian K correction, Heun stepping).
 - Source-interpolated C_l integration: source functions S(k,tau) interpolated to fine k-grid (10000 points) before line-of-sight integration, resolving the oscillatory T_l(k) transfer function robustly.
 - JIT-compiled: all solve functions + per-l harmonic functions cached for 2x speedup on repeated calls.
+
+### Choosing an adjoint mode
+
+`PrecisionParams.ode_adjoint` controls Diffrax reverse-mode AD through the ODE solves.
+clax currently supports:
+
+- `"recursive_checkpoint"`: production default and recommended choice
+- `"direct"`: optional alternate reverse pass for diagnostics or environment-specific benchmarking
+
+Use `"recursive_checkpoint"` by default on both CPU and GPU. That includes:
+
+- laptop / local CPU development
+- gating gradient tests
+- production `P(k)` / `C_l` gradient workflows on GPU
+
+Use `"direct"` only after validating it on the exact environment and problem size you
+care about. It is most appropriate for:
+
+- reduced or short ODE solves where memory is easy to bound
+- adjoint debugging, where you want to compare reverse-pass implementations
+- target-specific benchmarking after AD-vs-FD checks pass
+
+Do not assume a CPU validation transfers to GPU, or vice versa. In particular, the
+single-mode perturbation solve's `DirectAdjoint` path has shown unstable density-parameter
+gradients on a CPU/macOS checkout even when the forward solve and thermodynamics AD were healthy.
+
+Before switching from the default, validate on the target setup:
+
+- compare AD vs central finite differences on representative `P(k)` probes
+- include density parameters (`h`, `omega_b`, `omega_cdm`) plus amplitude/tilt probes
+- check runtime and memory, not just gradient agreement
+- keep `recursive_checkpoint` as the reference for gating tests unless the alternate mode is revalidated
+
+Example:
+
+```python
+from dataclasses import replace
+from clax import CosmoParams, PrecisionParams, compute_pk
+
+params = CosmoParams()
+prec = PrecisionParams()  # defaults to ode_adjoint="recursive_checkpoint"
+pk = compute_pk(params, prec, k=0.05)
+
+# Optional diagnostic / benchmark mode; validate before trusting it.
+prec_direct = replace(prec, ode_adjoint="direct")
+pk_direct = compute_pk(params, prec_direct, k=0.05)
+```
 
 ### Source modules
 
@@ -221,8 +288,8 @@ Default parameters correspond to Planck 2018 best-fit LCDM:
 ## References
 
 - **CLASS v3.3.4**: Blas, Lesgourgues & Tram (2011). [arXiv:1104.2933](https://arxiv.org/abs/1104.2933)
-- **DISCO-EB**: Hahn, Melchior & Tessore (2024). Differentiable Boltzmann solver in JAX. [arXiv:2410.02998](https://arxiv.org/abs/2410.02998)
-- **SymBoltz.jl**: Li & Millea (2024). Symbolic Boltzmann solver in Julia. [arXiv:2411.18620](https://arxiv.org/abs/2411.18620)
+- **DISCO-DJ**: Hahn, List & Porqueres (2023). Differentiable Einstein-Boltzmann solver in JAX. [arXiv:2311.03291](https://arxiv.org/abs/2311.03291)
+- **Bolt.jl**: Li, Sullivan & Millea (2023). Differentiable Boltzmann solver in Julia. [Zenodo: 10.5281/zenodo.10065126](https://zenodo.org/records/10065126)
 - Seljak & Zaldarriaga (1996). Line-of-sight integration approach. [arXiv:astro-ph/9603033](https://arxiv.org/abs/astro-ph/9603033)
 - Ma & Bertschinger (1995). Cosmological perturbation theory. [arXiv:astro-ph/9506072](https://arxiv.org/abs/astro-ph/9506072)
 

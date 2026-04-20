@@ -4,7 +4,8 @@
 For multi-cosmology validation: omega_b ±20%, omega_cdm ±20%, h ±10%,
 n_s ±5%, tau_reio ±30%.
 
-Generates unlensed + lensed C_l and P(k) at each point.
+Generates unlensed + lensed C_l plus explicit total-matter ``P_m`` and
+cb-only ``P_cb`` spectra at each point.
 """
 import os
 import numpy as np
@@ -21,12 +22,12 @@ FIDUCIAL = {
     'N_ncdm': 1,
     'm_ncdm': 0.06,
     'T_ncdm': 0.71611,
-    'output': 'tCl pCl lCl mPk',
+    'output': 'tCl pCl lCl mPk dTk vTk',
     'lensing': 'yes',
     'l_max_scalars': 2500,
     'P_k_max_1/Mpc': 50.0,
+    'z_max_pk': 3.0,
     'tol_background_integration': 1e-12,
-    'tol_ncdm': 1e-10,
 }
 
 # Parameter variations
@@ -42,6 +43,32 @@ VARIATIONS = {
     'tau_high': {'tau_reio': 0.0544 * 1.30},
     'tau_low':  {'tau_reio': 0.0544 * 0.70},
 }
+
+
+def _background_density_at_z(bg, z, key):
+    """Return a background density interpolated to redshift ``z``."""
+    z_bg = np.asarray(bg['z'])[::-1]
+    rho_bg = np.asarray(bg[key])[::-1]
+    return float(np.interp(z, z_bg, rho_bg))
+
+
+def _compute_pk_components(cosmo, k_eval, z):
+    """Return CLASS linear total-matter and cb-only spectra at redshift ``z``."""
+    pk_m = np.array([cosmo.pk_lin(k, z) for k in k_eval])
+    transfer = cosmo.get_transfer(z)
+    bg = cosmo.get_background()
+
+    k_transfer = np.asarray(transfer['k (h/Mpc)']) * cosmo.h()
+    rho_b = _background_density_at_z(bg, z, '(.)rho_b')
+    rho_cdm = _background_density_at_z(bg, z, '(.)rho_cdm')
+
+    delta_b = np.asarray(transfer['d_b'])
+    delta_cdm = np.asarray(transfer['d_cdm'])
+    delta_tot = np.asarray(transfer['d_tot'])
+    delta_cb = (rho_b * delta_b + rho_cdm * delta_cdm) / (rho_b + rho_cdm)
+    cb_to_m_ratio = (delta_cb / delta_tot) ** 2
+    pk_cb = pk_m * np.interp(np.log(k_eval), np.log(k_transfer), cb_to_m_ratio)
+    return pk_m, pk_cb
 
 
 def generate_point(params, name, outdir):
@@ -61,7 +88,7 @@ def generate_point(params, name, outdir):
     cl_lens = cosmo.lensed_cl(2500)
     # P(k)
     k_test = np.logspace(-4, np.log10(50), 500)
-    pk_lin = np.array([cosmo.pk_lin(k, 0) for k in k_test])
+    pk_m, pk_cb = _compute_pk_components(cosmo, k_test, z=0.0)
 
     np.savez(
         os.path.join(dirname, 'cls.npz'),
@@ -76,7 +103,10 @@ def generate_point(params, name, outdir):
     )
     np.savez(
         os.path.join(dirname, 'pk.npz'),
-        k=k_test, pk_lin_z0=pk_lin,
+        k=k_test,
+        pk_m_lin_z0=pk_m,
+        pk_cb_lin_z0=pk_cb,
+        pk_lin_z0=pk_m,
     )
 
     # Save parameter values
@@ -95,13 +125,13 @@ def generate_point(params, name, outdir):
 def main():
     outdir = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
-    print("Generating multi-cosmology reference data...")
+    print('Generating multi-cosmology reference data...')
     for name, overrides in VARIATIONS.items():
         params = dict(FIDUCIAL)
         params.update(overrides)
         generate_point(params, name, outdir)
 
-    print("\nAll multi-cosmology reference data generated!")
+    print('\nAll multi-cosmology reference data generated!')
 
 
 if __name__ == '__main__':

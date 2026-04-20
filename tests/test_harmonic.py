@@ -1,10 +1,14 @@
-"""Test harmonic (C_l) module: C_l^TT, C_l^EE, C_l^TE against CLASS reference data.
+"""Tests scalar harmonic-layer forward behavior.
 
-Current accuracy (fast_cl preset, l_max=25, k_max=0.15):
-- C_l^TT: l=100 ratio~1.24 (24% off), SW plateau ~30% off (IBP 1/k^2 sensitivity)
-- C_l^EE: l=100 ratio~1.49 (49% off), l=200 ratio~0.64 (36% off)
-- C_l^TE: l=100 ratio~1.44 (44% off)
-- High l (>200) limited by hierarchy truncation at l_max=25
+Contract:
+- Scalar ``C_l`` computations are finite, sign-correct, and approximately consistent with CLASS.
+
+Scope:
+- Covers low and mid-``l`` TT/EE/TE forward checks.
+- Excludes high-``l`` helper/API behavior owned by ``test_high_l.py``.
+
+Notes:
+- These tests use the ``fast_cl`` preset and therefore own approximate, not science-grade, tolerances.
 """
 
 import jax
@@ -35,10 +39,10 @@ def pipeline():
 
 
 class TestClTT:
-    """Test C_l^TT against CLASS reference data."""
+    """Tests scalar TT-spectrum behavior."""
 
     def test_cl_tt_l100(self, pipeline, lcdm_cls_ref):
-        """C_l^TT at l=100 -- within 30% (first acoustic peak region)."""
+        """``C_l^TT`` at ``l=100`` matches CLASS; expects <30% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_tt(pt, params, bg, [100])
         cl_us = float(cl[0])
@@ -48,7 +52,7 @@ class TestClTT:
         assert abs(ratio - 1) < 0.30, f"C_l^TT(l=100): ratio={ratio:.4f}, expected within 30%"
 
     def test_cl_tt_l50(self, pipeline, lcdm_cls_ref):
-        """C_l^TT at l=50 -- within 50% (limited by IBP sensitivity)."""
+        """``C_l^TT`` at ``l=50`` matches CLASS; expects <50% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_tt(pt, params, bg, [50])
         cl_us = float(cl[0])
@@ -58,7 +62,7 @@ class TestClTT:
         assert abs(ratio - 1) < 0.50, f"C_l^TT(l=50): ratio={ratio:.4f}, expected within 50%"
 
     def test_cl_tt_l10(self, pipeline, lcdm_cls_ref):
-        """C_l^TT at l=10 (SW plateau) -- within 50%."""
+        """``C_l^TT`` at ``l=10`` matches CLASS; expects <50% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_tt(pt, params, bg, [10])
         cl_us = float(cl[0])
@@ -68,7 +72,7 @@ class TestClTT:
         assert abs(ratio - 1) < 0.50, f"C_l^TT(l=10): ratio={ratio:.4f}, expected within 50%"
 
     def test_cl_tt_positive(self, pipeline):
-        """C_l^TT should be positive at all tested multipoles."""
+        """``C_l^TT`` is positive on the probe grid; expects positive values."""
         params, bg, _, pt = pipeline
         cl = compute_cl_tt(pt, params, bg, [10, 50, 100])
         for i, l in enumerate([10, 50, 100]):
@@ -76,29 +80,24 @@ class TestClTT:
 
 
 class TestClEE:
-    """Test C_l^EE against CLASS reference data.
-
-    After fixing source_E normalization (bug #17: was g*Pi/(4k^2), now 3*g*Pi/16):
-    - l=100: within ~50% (limited by l_max=25, k_max=0.15)
-    - l=200: within ~50% (hierarchy truncation effects)
-    """
+    """Tests scalar EE-spectrum behavior."""
 
     def test_cl_ee_positive(self, pipeline):
-        """C_l^EE should be positive (it's an auto-power spectrum)."""
+        """``C_l^EE`` is positive on the probe grid; expects positive values."""
         params, bg, _, pt = pipeline
         cl = compute_cl_ee(pt, params, bg, [100, 200])
         for i, l in enumerate([100, 200]):
             assert float(cl[i]) > 0, f"C_l^EE(l={l}) = {float(cl[i]):.4e} is not positive"
 
     def test_cl_ee_finite(self, pipeline):
-        """C_l^EE should be finite."""
+        """``C_l^EE`` is finite on the probe grid; expects no NaN or Inf values."""
         params, bg, _, pt = pipeline
         cl = compute_cl_ee(pt, params, bg, [100, 200])
         for i, l in enumerate([100, 200]):
             assert np.isfinite(float(cl[i])), f"C_l^EE(l={l}) is not finite"
 
     def test_cl_ee_l100_accuracy(self, pipeline, lcdm_cls_ref):
-        """C_l^EE at l=100 -- within 50%."""
+        """``C_l^EE`` at ``l=100`` matches CLASS; expects <60% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_ee(pt, params, bg, [100])
         cl_us = float(cl[0])
@@ -108,7 +107,7 @@ class TestClEE:
         assert abs(ratio - 1) < 0.60, f"C_l^EE(l=100): ratio={ratio:.4f}"
 
     def test_cl_ee_l200_accuracy(self, pipeline, lcdm_cls_ref):
-        """C_l^EE at l=200 -- within 50% (limited by hierarchy truncation)."""
+        """``C_l^EE`` at ``l=200`` matches CLASS; expects <60% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_ee(pt, params, bg, [200])
         cl_us = float(cl[0])
@@ -117,29 +116,11 @@ class TestClEE:
         print(f"C_l^EE(l=200): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.60, f"C_l^EE(l=200): ratio={ratio:.4f}"
 
-    def test_cl_ee_diagnostic(self, pipeline, lcdm_cls_ref):
-        """Print diagnostic summary of C_l^EE."""
-        params, bg, _, pt = pipeline
-        l_test = [100, 200]
-        cl = compute_cl_ee(pt, params, bg, l_test)
-        print("\n--- C_l^EE diagnostic summary ---")
-        for i, l in enumerate(l_test):
-            cl_us = float(cl[i])
-            cl_class = float(lcdm_cls_ref['ee'][l])
-            ratio = cl_us / cl_class
-            print(f"  l={l:4d}: ratio={ratio:.4f}  (clax={cl_us:.4e}, CLASS={cl_class:.4e})")
-        print("---------------------------------")
-
-
 class TestClTE:
-    """Test C_l^TE against CLASS reference data.
-
-    After fixing source_E normalization:
-    - l=100: within ~50% (consistent with TT and EE accuracy)
-    """
+    """Tests scalar TE-spectrum behavior."""
 
     def test_cl_te_sign(self, pipeline, lcdm_cls_ref):
-        """C_l^TE sign should match CLASS at l=100, 200."""
+        """``C_l^TE`` sign matches CLASS; expects matching signs on the probe grid."""
         params, bg, _, pt = pipeline
         cl = compute_cl_te(pt, params, bg, [100, 200])
         for i, l in enumerate([100, 200]):
@@ -150,14 +131,14 @@ class TestClTE:
             assert sign_match, f"C_l^TE(l={l}): sign mismatch"
 
     def test_cl_te_finite(self, pipeline):
-        """C_l^TE should be finite at all tested multipoles."""
+        """``C_l^TE`` is finite on the probe grid; expects no NaN or Inf values."""
         params, bg, _, pt = pipeline
         cl = compute_cl_te(pt, params, bg, [100, 200])
         for i, l in enumerate([100, 200]):
             assert np.isfinite(float(cl[i])), f"C_l^TE(l={l}) is not finite"
 
     def test_cl_te_l100_accuracy(self, pipeline, lcdm_cls_ref):
-        """C_l^TE at l=100 -- within 50%."""
+        """``C_l^TE`` at ``l=100`` matches CLASS; expects <60% relative error."""
         params, bg, _, pt = pipeline
         cl = compute_cl_te(pt, params, bg, [100])
         cl_us = float(cl[0])
@@ -165,16 +146,3 @@ class TestClTE:
         ratio = cl_us / cl_class
         print(f"C_l^TE(l=100): clax={cl_us:.4e}, CLASS={cl_class:.4e}, ratio={ratio:.4f}")
         assert abs(ratio - 1) < 0.60, f"C_l^TE(l=100): ratio={ratio:.4f}"
-
-    def test_cl_te_diagnostic(self, pipeline, lcdm_cls_ref):
-        """Print diagnostic summary of C_l^TE."""
-        params, bg, _, pt = pipeline
-        l_test = [100, 200]
-        cl = compute_cl_te(pt, params, bg, l_test)
-        print("\n--- C_l^TE diagnostic summary ---")
-        for i, l in enumerate(l_test):
-            cl_us = float(cl[i])
-            cl_class = float(lcdm_cls_ref['te'][l])
-            ratio = cl_us / cl_class
-            print(f"  l={l:4d}: ratio={ratio:.4f}  (clax={cl_us:.4e}, CLASS={cl_class:.4e})")
-        print("---------------------------------")

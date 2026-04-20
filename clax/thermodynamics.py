@@ -134,6 +134,7 @@ class ThermoResult:
     xe_of_loga: CubicSpline
     Tb_of_loga: CubicSpline
     kappa_dot_of_loga: CubicSpline
+    dkappa_dot_dloga_of_loga: CubicSpline
     exp_m_kappa_of_loga: CubicSpline
     g_of_loga: CubicSpline
     g_prime_of_loga: CubicSpline  # dg/dτ, computed analytically
@@ -147,7 +148,8 @@ class ThermoResult:
     def tree_flatten(self):
         return [
             self.xe_of_loga, self.Tb_of_loga,
-            self.kappa_dot_of_loga, self.exp_m_kappa_of_loga,
+            self.kappa_dot_of_loga, self.dkappa_dot_dloga_of_loga,
+            self.exp_m_kappa_of_loga,
             self.g_of_loga, self.g_prime_of_loga, self.cs2_of_loga,
             self.z_star, self.z_rec, self.tau_star, self.rs_star, self.z_reio,
         ], None
@@ -425,6 +427,48 @@ def _reionization_xe(z, z_reio, Y_He, xe_before=0.0):
     return xe_reio
 
 
+@jax.custom_jvp
+def _solve_hydrogen_saha(rhs, xHeII_contrib):
+    """Solve the hydrogen Saha quadratic for ``x_HII``.
+
+    The primal uses the stable positive-root form of
+
+        x_HII^2 + (xHeII_contrib + rhs) * x_HII - rhs = 0.
+
+    The JVP follows from implicit differentiation of this polynomial rather
+    than differentiating the closed-form root expression directly, which is
+    numerically fragile in the fully ionized Saha regime.
+    """
+    discriminant = jnp.sqrt((rhs + xHeII_contrib) ** 2 + 4.0 * rhs)
+    return 2.0 * rhs / (rhs + xHeII_contrib + discriminant)
+
+
+@_solve_hydrogen_saha.defjvp
+def _solve_hydrogen_saha_jvp(primals, tangents):
+    rhs, xHeII_contrib = primals
+    drhs, dxHeII_contrib = tangents
+    xHII = _solve_hydrogen_saha(rhs, xHeII_contrib)
+    dF_dx = jnp.maximum(2.0 * xHII + xHeII_contrib + rhs, 1e-30)
+    xHII_tangent = ((1.0 - xHII) * drhs - xHII * dxHeII_contrib) / dF_dx
+    return xHII, xHII_tangent
+
+
+def _first_derivative_table(x, y):
+    """Return a differentiable first-derivative table on a monotonic grid.
+
+    Uses centered differences in the interior and one-sided differences at the
+    boundaries. On the dense thermodynamics grid this is sufficiently accurate
+    for the opacity-derivative quantities consumed by perturbations while
+    avoiding the unstable parameter-AD of differentiating the cubic-spline
+    coefficients directly.
+    """
+    dydx = jnp.empty_like(y)
+    dydx = dydx.at[0].set((y[1] - y[0]) / (x[1] - x[0]))
+    dydx = dydx.at[-1].set((y[-1] - y[-2]) / (x[-1] - x[-2]))
+    dydx = dydx.at[1:-1].set((y[2:] - y[:-2]) / (x[2:] - x[:-2]))
+    return dydx
+
+
 # ---------------------------------------------------------------------------
 # Main solver
 # ---------------------------------------------------------------------------
@@ -591,16 +635,7 @@ def thermodynamics_solve(
             (_CR_CGS * T_saha)**1.5 * saha_exp / nH_saha, 1e-300)
         # Helium electron contribution per H nucleus
         xHeII_contrib = 0.25 * Y_He / (1.0 - Y_He) * xHeII
-        # Quadratic: x_H = 2/(1 + xHeII/rhs + sqrt((1+xHeII/rhs)^2 + 4/rhs))
-        inv_rhs = jnp.minimum(1.0 / saha_rhs, 1e100)  # clamp to avoid sqrt overflow
-        v_over_rhs = xHeII_contrib * inv_rhs
-        xHII_saha = 2.0 / (1.0 + v_over_rhs + jnp.sqrt(
-            (1.0 + v_over_rhs)**2 + 4.0 * inv_rhs))
-        # Stop gradient through Saha: at z>1600, x_HII ≈ 1 and the exact value
-        # barely affects C_l. Gradients should flow through the RECFAST ODE
-        # (z<1600) where recombination physics actually matters.
-        xHII_saha = jax.lax.stop_gradient(xHII_saha)
-
+        xHII_saha = _solve_hydrogen_saha(saha_rhs, xHeII_contrib)
         # Below z~1600: use RECFAST Peebles ODE (accurate through recombination).
         # Above z~1600: use Saha equilibrium (hydrogen fully ionized).
         # Smooth sigmoid blend for differentiability (width=50, matching CLASS delta_z).
@@ -634,7 +669,6 @@ def thermodynamics_solve(
         new_xHeII_saha, _ = _ionHe(
             new_tb, new_a, new_xHII, xHeII, xHeIII, Y_He, H0_kmsMpc, Omega_b
         )
-        new_xHeII_saha = jax.lax.stop_gradient(new_xHeII_saha)
 
         # Blend: Saha at z>5000, Peebles below
         w_saha_He = jax.nn.sigmoid(0.05 * (z_half - 5000.0))
@@ -679,19 +713,12 @@ def thermodynamics_solve(
     dtau_grid = jnp.diff(tau_grid)
 
     # --- Reionization: find z_reio self-consistently to match tau_reio ---
-    # Step 1: Compute kappa from recombination only (xe_raw)
-    kd_raw = xe_raw_grid * kd_prefactor
-    kappa_raw_integ = 0.5 * (kd_raw[:-1] + kd_raw[1:]) * dtau_grid
-    kappa_raw_total = jnp.sum(kappa_raw_integ)  # total optical depth without reionization
-
-    # Step 2: Find z_reio such that the reionization contribution = tau_reio - kappa_raw_residual
-    # We use a scan over candidate z_reio values and select the one giving the right tau.
-    # The reionization optical depth for a given z_reio is:
-    #   tau_reio_model(z_reio) = ∫ max(xe_reio(z,z_reio) - xe_raw(z), 0) * kd_prefactor * dtau
-    # We precompute this for several z_reio candidates and interpolate.
+    # Forward solve stays with the robust bounded bisection below. The reverse
+    # pass for z_reio(theta) is supplied by _find_z_reio's custom VJP so AD
+    # does not inherit the zero-sensitivity jnp.where updates from bisection.
     z_reio = _find_z_reio(
-        params.tau_reio, xe_raw_grid, kd_prefactor, dtau_grid,
-        z_grid, Y_He, kappa_raw_total)
+        params.tau_reio, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He
+    )
 
     # CLASS-style additive reionization: xe = xe_before + (xe_after - xe_before) * frac
     xe_grid = jax.vmap(
@@ -711,17 +738,8 @@ def thermodynamics_solve(
 
     # --- g' = dg/dτ analytically (CLASS thermodynamics.c:3482-3483) ---
     # g = κ̇ e^{-κ},  g' = (κ̈ + κ̇²) e^{-κ}
-    # where κ̈ = d(κ̇)/dτ.
-    # Compute κ̈ using spline derivative for accuracy (not finite differences).
-    # Build a temporary spline of κ̇(loga), then evaluate its derivative.
-    # dκ̇/dτ = (dκ̇/d(loga)) * (d(loga)/dτ) = (dκ̇/d(loga)) * (a'/a) / a
-    # But a'/a = aH, so d(loga)/dτ = (1/a)(da/dτ) = H (physical Hubble, not conformal).
-    # Actually: d(loga)/dτ = d(ln a)/dτ = (1/a)(da/dτ) = a'/a² ... no.
-    # loga = ln(a), d(loga)/dτ = (da/dτ)/a = a'/a = aH (conformal Hubble).
-    # Wait: a' = da/dτ (conformal time), so d(ln a)/dτ = a'/a = aH. Yes.
-    # So dκ̇/dτ = (dκ̇/d(loga)) * aH  where aH = a'(τ)/a(τ)
-    kd_spline_tmp = CubicSpline(loga_grid, kappa_dot_grid)
-    dkd_dloga_grid = jax.vmap(kd_spline_tmp.derivative)(loga_grid)
+    # where κ̈ = d(κ̇)/dτ and dκ̇/dτ = (dκ̇/dloga) * aH.
+    dkd_dloga_grid = _first_derivative_table(loga_grid, kappa_dot_grid)
     # a'/a = aH at each grid point
     a_grid_loc = jnp.exp(loga_grid)
     H_grid_loc = jax.vmap(bg.H_of_loga.evaluate)(loga_grid)
@@ -743,6 +761,7 @@ def thermodynamics_solve(
     xe_of_loga = CubicSpline(loga_grid, xe_grid)
     Tb_of_loga = CubicSpline(loga_grid, tb_grid)
     kappa_dot_of_loga = CubicSpline(loga_grid, kappa_dot_grid)
+    dkappa_dot_dloga_of_loga = CubicSpline(loga_grid, dkd_dloga_grid)
     exp_m_kappa_of_loga = CubicSpline(loga_grid, exp_m_kappa_grid)
     g_of_loga = CubicSpline(loga_grid, g_grid)
     g_prime_of_loga = CubicSpline(loga_grid, g_prime_grid)
@@ -752,6 +771,7 @@ def thermodynamics_solve(
         xe_of_loga=xe_of_loga,
         Tb_of_loga=Tb_of_loga,
         kappa_dot_of_loga=kappa_dot_of_loga,
+        dkappa_dot_dloga_of_loga=dkappa_dot_dloga_of_loga,
         exp_m_kappa_of_loga=exp_m_kappa_of_loga,
         g_of_loga=g_of_loga,
         g_prime_of_loga=g_prime_of_loga,
@@ -764,36 +784,53 @@ def thermodynamics_solve(
     )
 
 
-def _find_z_reio(tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid,
-                 z_grid, Y_He, kappa_raw_total):
-    """Find z_reio such that the reionization optical depth matches tau_reio.
+def _tau_reio_for_zreio(
+    z_reio_cand,
+    xe_raw_grid,
+    kd_prefactor,
+    dtau_grid,
+    z_grid,
+    Y_He,
+):
+    """Return the reionization-only optical depth for a given ``z_reio``.
+
+    Uses CLASS-style additive reionization:
+        xe_total = xe_before + (xe_after - xe_before) * frac
+    and integrates only the extra optical depth above the recombination baseline.
+    """
+    xe_total = jax.vmap(
+        lambda z, xe_raw: _reionization_xe(z, z_reio_cand, Y_He, xe_before=xe_raw)
+    )(z_grid, xe_raw_grid)
+    xe_extra = jnp.maximum(xe_total - xe_raw_grid, 0.0)
+    kd_extra = xe_extra * kd_prefactor
+    kappa_integ = 0.5 * (kd_extra[:-1] + kd_extra[1:]) * dtau_grid
+    return jnp.sum(kappa_integ)
+
+
+def _find_z_reio_impl(
+    tau_reio_target,
+    xe_raw_grid,
+    kd_prefactor,
+    dtau_grid,
+    z_grid,
+    Y_He,
+):
+    """Find ``z_reio`` such that the reionization optical depth matches ``tau_reio``.
 
     The reionization optical depth is the EXTRA optical depth from
     reionization above the recombination baseline:
         tau_reio = ∫ max(xe_reio - xe_raw, 0) * kd_prefactor * dtau
 
-    Uses bisection (20 iterations → accuracy ~0.001 in z_reio).
+    Uses bounded bisection in the forward pass.
     Memory-efficient: only one _reionization_xe evaluation per iteration.
     """
-    def _tau_reio_for_zreio(z_reio_cand):
-        """Compute reionization-only optical depth for a given z_reio.
-
-        Uses CLASS-style additive formula: xe_total = xe_before + (xe_after - xe_before) * frac.
-        The extra optical depth from reionization is ∫ (xe_total - xe_raw) * kd_prefactor dτ.
-        """
-        xe_total = jax.vmap(
-            lambda z, xe_raw: _reionization_xe(z, z_reio_cand, Y_He, xe_before=xe_raw)
-        )(z_grid, xe_raw_grid)
-        xe_extra = jnp.maximum(xe_total - xe_raw_grid, 0.0)
-        kd_extra = xe_extra * kd_prefactor
-        kappa_integ = 0.5 * (kd_extra[:-1] + kd_extra[1:]) * dtau_grid
-        return jnp.sum(kappa_integ)
-
     # Bisection: find z_reio in [4, 25] where tau_reio = tau_reio_target
     def bisect_step(carry, _):
         z_lo, z_hi = carry
         z_mid = 0.5 * (z_lo + z_hi)
-        tau_mid = _tau_reio_for_zreio(z_mid)
+        tau_mid = _tau_reio_for_zreio(
+            z_mid, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He
+        )
         # If tau_mid < target, need higher z_reio (more reionization)
         z_lo = jnp.where(tau_mid < tau_reio_target, z_mid, z_lo)
         z_hi = jnp.where(tau_mid < tau_reio_target, z_hi, z_mid)
@@ -801,6 +838,95 @@ def _find_z_reio(tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid,
 
     (z_lo, z_hi), _ = jax.lax.scan(bisect_step, (4.0, 25.0), jnp.arange(40))
     return 0.5 * (z_lo + z_hi)
+
+
+@jax.custom_vjp
+def _find_z_reio(
+    tau_reio_target,
+    xe_raw_grid,
+    kd_prefactor,
+    dtau_grid,
+    z_grid,
+    Y_He,
+):
+    """Differentiable ``z_reio`` solve with implicit backward pass.
+
+    The primal calculation uses the robust bounded bisection in
+    ``_find_z_reio_impl``. The backward pass applies the implicit function
+    theorem to the scalar residual
+
+        F(z_reio, inputs) = tau_reio_model(z_reio, inputs) - tau_reio_target.
+
+    This preserves forward behavior while avoiding the zero AD sensitivity from
+    the discrete bisection branch updates.
+    """
+    return _find_z_reio_impl(
+        tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He
+    )
+
+
+def _find_z_reio_fwd(
+    tau_reio_target,
+    xe_raw_grid,
+    kd_prefactor,
+    dtau_grid,
+    z_grid,
+    Y_He,
+):
+    z_reio = _find_z_reio_impl(
+        tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He
+    )
+    return z_reio, (
+        z_reio,
+        tau_reio_target,
+        xe_raw_grid,
+        kd_prefactor,
+        dtau_grid,
+        z_grid,
+        Y_He,
+    )
+
+
+def _find_z_reio_bwd(res, g):
+    z_reio, tau_reio_target, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He = res
+
+    def residual_z(z_reio_cand):
+        return _tau_reio_for_zreio(
+            z_reio_cand, xe_raw_grid, kd_prefactor, dtau_grid, z_grid, Y_He
+        ) - tau_reio_target
+
+    dF_dz = jax.grad(residual_z)(z_reio)
+    dF_dz = jnp.where(
+        jnp.abs(dF_dz) < 1e-12,
+        jnp.where(dF_dz >= 0.0, 1e-12, -1e-12),
+        dF_dz,
+    )
+
+    def residual_inputs(
+        tau_reio_target_,
+        xe_raw_grid_,
+        kd_prefactor_,
+        dtau_grid_,
+        z_grid_,
+        Y_He_,
+    ):
+        return _tau_reio_for_zreio(
+            z_reio, xe_raw_grid_, kd_prefactor_, dtau_grid_, z_grid_, Y_He_
+        ) - tau_reio_target_
+
+    _, vjp_fn = jax.vjp(
+        residual_inputs,
+        tau_reio_target,
+        xe_raw_grid,
+        kd_prefactor,
+        dtau_grid,
+        z_grid,
+        Y_He,
+    )
+    return vjp_fn(-g / dF_dz)
+
+
+_find_z_reio.defvjp(_find_z_reio_fwd, _find_z_reio_bwd)
 
 
 def _estimate_z_reio(tau_reio_target):

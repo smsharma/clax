@@ -1221,6 +1221,67 @@ For the perturbation ODE (the most expensive):
   Cheapest in memory but can be inaccurate for stiff systems. NOT recommended
   for the perturbation system.
 
+### Environment-specific adjoint policy
+
+The supported public switch is `PrecisionParams.ode_adjoint`, but the intended
+policy is stricter than "all modes are interchangeable":
+
+- **Production / default path**: `RecursiveCheckpointAdjoint` for background,
+  thermodynamics, and perturbations.
+- **Optional alternate path**: `DirectAdjoint` is supported as a diagnostic or
+  benchmark mode, not as the default reference implementation.
+- **Unsupported for production perturbations**: `BacksolveAdjoint`.
+
+This matters because adjoint selection is an environment-sensitive numerical
+choice, not just a memory/speed toggle. A reverse pass that behaves acceptably
+on one backend or problem size is not automatically validated on another.
+
+#### CPU vs GPU guidance
+
+- **CPU / laptop / local development**: use `RecursiveCheckpointAdjoint` by
+  default. Treat `DirectAdjoint` as opt-in and validation-required.
+- **GPU / production inference**: still start from `RecursiveCheckpointAdjoint`.
+  Switch to `DirectAdjoint` only if it is explicitly benchmarked and its AD
+  gradients are revalidated on that GPU setup and precision profile.
+- **Cross-environment rule**: CPU validation does not certify GPU behavior, and
+  GPU validation does not certify CPU behavior.
+
+#### Selection criteria
+
+| Mode | Memory profile | Reverse-pass cost | Expected use | Validation burden | Main risks |
+|------|----------------|-------------------|--------------|-------------------|------------|
+| `recursive_checkpoint` | Sublinear in saved trajectory via recomputation | Higher wall time from replay | Default production gradients, CI/test oracle, large stiff perturbation solves | Low: this is the reference path | Extra recomputation cost |
+| `direct` | O(T) in solver trajectory/storage needs | Can be faster when memory is cheap | Reduced problems, adjoint debugging, target-specific benchmarking | High: must re-check AD vs FD on target setup | OOM, backend-sensitive instability, misleading test failures |
+
+#### Validation before switching adjoints
+
+Before trusting `DirectAdjoint` for a new machine, backend, or precision profile:
+
+1. Run a module-local thermodynamics gradient sanity check so upstream AD is known-good.
+2. Compare AD vs central finite differences on representative `P(k)` probes.
+3. Include density parameters (`h`, `omega_b`, `omega_cdm`) and amplitude/tilt
+   parameters (`ln10A_s`, `n_s`, optionally `k_pivot`).
+4. Run both a reduced/fast probe and at least one representative full solve.
+5. Check solver behavior itself: runtime, peak memory, and any `max_steps` or
+   backend/runtime failures.
+6. Keep `RecursiveCheckpointAdjoint` as the reference until the alternate mode
+   passes the same contract on that exact environment.
+
+Suggested repository-level checks:
+
+- `pytest tests/test_thermodynamics.py -q -k 'test_reionization_gradients_match_fd or test_opacity_logderivative_gradient_matches_fd_for_omega_b'`
+- `pytest tests/test_pk_gradients.py -q --fast`
+- `pytest tests/test_pk_gradients.py -q -k 'test_scalar_partials_match_fd_full and 1.0'`
+
+#### Why end-to-end validation is required
+
+Module-local AD checks are necessary but not sufficient. A useful recent example
+was a checkout where the repaired thermodynamics gradients still passed, but the
+single-mode perturbation solve under `DirectAdjoint` produced unstable
+end-to-end `dP/dtheta` results for density parameters on CPU/macOS. That is why
+adjoint choice must be validated at the full pipeline level, not only through
+isolated submodules.
+
 ### Handling non-differentiable operations
 
 | Operation | Issue | Solution |

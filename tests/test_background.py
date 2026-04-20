@@ -1,8 +1,14 @@
-"""Test background module against CLASS reference data.
+"""Tests background-layer value and gradient behavior.
 
-Validates H(z), distances, growth factor, sound horizon, and derived
-quantities. Each test prints a concise summary on failure (following
-CLAUDE.md context-window hygiene rules).
+Contract:
+- Background quantities and background AD behavior match the documented CLASS-derived references.
+
+Scope:
+- Covers scalar quantities, redshift-dependent functions, and cheap background gradients.
+- Excludes thermodynamics, perturbation, and top-level API contracts owned elsewhere.
+
+Notes:
+- These tests use CLASS-generated reference data and a dedicated high-accuracy background preset.
 """
 
 import jax
@@ -13,7 +19,6 @@ import pytest
 from clax.background import (
     background_solve,
     H_of_z,
-    tau_of_z,
     angular_diameter_distance,
     luminosity_distance,
     comoving_distance,
@@ -32,60 +37,64 @@ PREC = PrecisionParams(
 
 @pytest.fixture(scope="module")
 def bg():
-    """Compute background once for all tests in this module."""
+    """Compute the fiducial background state once for this module."""
     params = CosmoParams()
     return background_solve(params, PREC)
 
 
 class TestBackgroundScalars:
-    """Test scalar derived quantities."""
+    """Tests scalar background quantities."""
 
     def test_H0(self, bg, lcdm_scalars):
-        """H0 should match CLASS exactly (both compute the same formula)."""
+        """H0 matches CLASS; expects <1e-6 relative error."""
         ref = lcdm_scalars['H0']
         rel_err = abs(float(bg.H0) - ref) / ref
         assert rel_err < 1e-6, f"H0: rel err {rel_err:.2e} (got {bg.H0:.6e}, expected {ref:.6e})"
 
     def test_conformal_age(self, bg, lcdm_scalars):
-        """Conformal age tau_0 should match CLASS to < 0.1%."""
+        """Conformal age matches CLASS; expects <0.1% relative error."""
         ref = lcdm_scalars['conformal_age']
         val = float(bg.conformal_age)
         rel_err = abs(val - ref) / ref
         assert rel_err < 1e-3, f"conformal_age: rel err {rel_err:.4%} (got {val:.2f}, expected {ref:.2f})"
 
     def test_age(self, bg, lcdm_scalars):
-        """Age in Gyr should match CLASS to < 0.1%."""
+        """Cosmic age matches CLASS; expects <0.1% relative error."""
         ref = lcdm_scalars['age_Gyr']
         val = float(bg.age_Gyr)
         rel_err = abs(val - ref) / ref
         assert rel_err < 1e-3, f"age: rel err {rel_err:.4%} (got {val:.4f} Gyr, expected {ref:.4f} Gyr)"
 
     def test_z_eq(self, bg, lcdm_scalars):
-        """Matter-radiation equality redshift should match CLASS to < 1%."""
+        """Matter-radiation equality redshift matches CLASS; expects <1% relative error."""
         ref = lcdm_scalars['z_eq']
         val = float(bg.z_eq)
         rel_err = abs(val - ref) / ref
         assert rel_err < 0.01, f"z_eq: rel err {rel_err:.4%} (got {val:.1f}, expected {ref:.1f})"
 
     def test_omega_b(self, bg, lcdm_scalars):
+        """``Omega_b`` matches CLASS; expects <1e-6 relative error."""
         ref = lcdm_scalars['Omega_b']
         val = float(bg.Omega_b)
         rel_err = abs(val - ref) / ref
         assert rel_err < 1e-6, f"Omega_b: rel err {rel_err:.2e}"
 
     def test_omega_cdm(self, bg, lcdm_scalars):
+        """``Omega_cdm`` matches CLASS; expects <1e-6 relative error."""
         ref = lcdm_scalars['Omega_cdm']
         val = float(bg.Omega_cdm)
         rel_err = abs(val - ref) / ref
         assert rel_err < 1e-6, f"Omega_cdm: rel err {rel_err:.2e}"
 
     def test_omega_lambda(self, bg, lcdm_scalars):
+        """``Omega_Lambda`` matches CLASS; expects <0.1% relative error."""
         ref = lcdm_scalars['Omega_Lambda']
         val = float(bg.Omega_lambda)
         rel_err = abs(val - ref) / ref
         assert rel_err < 1e-3, f"Omega_Lambda: rel err {rel_err:.4%} (got {val:.6f}, expected {ref:.6f})"
 
     def test_omega_g(self, bg, lcdm_scalars):
+        """``Omega_g`` matches CLASS; expects <1e-4 relative error."""
         ref = lcdm_scalars['Omega_g']
         val = float(bg.Omega_g)
         rel_err = abs(val - ref) / ref
@@ -93,10 +102,10 @@ class TestBackgroundScalars:
 
 
 class TestBackgroundFunctions:
-    """Test background quantities as functions of redshift."""
+    """Tests background functions of redshift."""
 
     def test_hubble(self, bg, lcdm_bg_ref, fast_mode):
-        """H(z) should match CLASS to < 0.01% at all z."""
+        """``H(z)`` matches CLASS on the sampled grid; expects <1e-4 relative error."""
         z = lcdm_bg_ref['z']
         H_ref = lcdm_bg_ref['H']
         if fast_mode:
@@ -106,7 +115,7 @@ class TestBackgroundFunctions:
         assert_close(H_us, H_ref, rtol=1e-4, name="H(z)", coordinate=z)
 
     def test_angular_diameter_distance(self, bg, lcdm_bg_ref, fast_mode):
-        """D_A(z) should match CLASS to < 0.01%."""
+        """``D_A(z)`` matches CLASS on the sampled grid; expects <0.1% relative error."""
         z = lcdm_bg_ref['z']
         DA_ref = lcdm_bg_ref['D_A']
         if fast_mode:
@@ -120,7 +129,7 @@ class TestBackgroundFunctions:
         assert_close(DA_us, DA_ref, rtol=1e-3, name="D_A(z)", coordinate=z)
 
     def test_luminosity_distance(self, bg, lcdm_bg_ref, fast_mode):
-        """D_L(z) should match CLASS to < 0.01%."""
+        """``D_L(z)`` matches CLASS on the sampled grid; expects <0.1% relative error."""
         z = lcdm_bg_ref['z']
         DL_ref = lcdm_bg_ref['D_L']
         if fast_mode:
@@ -133,7 +142,7 @@ class TestBackgroundFunctions:
         assert_close(DL_us, DL_ref, rtol=1e-3, name="D_L(z)", coordinate=z)
 
     def test_comoving_distance(self, bg, lcdm_bg_ref, fast_mode):
-        """chi(z) should match CLASS to < 0.01%."""
+        """``chi(z)`` matches CLASS on the sampled grid; expects <0.1% relative error."""
         z = lcdm_bg_ref['z']
         chi_ref = lcdm_bg_ref['chi']
         if fast_mode:
@@ -146,7 +155,7 @@ class TestBackgroundFunctions:
         assert_close(chi_us, chi_ref, rtol=1e-3, name="chi(z)", coordinate=z)
 
     def test_growth_factor(self, bg, lcdm_bg_ref, fast_mode):
-        """Growth factor D(z) should match CLASS to < 0.1%."""
+        """Growth factor matches CLASS on the sampled grid; expects <0.5% relative error."""
         z = lcdm_bg_ref['z']
         D_ref = lcdm_bg_ref['D']
         if fast_mode:
@@ -166,10 +175,10 @@ class TestBackgroundFunctions:
 
 
 class TestBackgroundGradients:
-    """Test that gradients through background_solve are correct."""
+    """Tests background gradient correctness."""
 
     def test_dH0_dh(self):
-        """d(H(z=0))/d(h) via AD should match finite differences."""
+        """``dH0/dh`` matches finite differences; expects <1% relative error."""
         prec = PrecisionParams(bg_n_points=200, ncdm_bg_n_points=100, bg_tol=1e-8)
 
         def H_at_z0(h):
@@ -189,7 +198,7 @@ class TestBackgroundGradients:
         )
 
     def test_dconf_age_domega_b(self):
-        """d(conformal_age)/d(omega_b) via AD should match finite differences."""
+        """``d(tau_0)/domega_b`` matches finite differences; expects <1% relative error."""
         prec = PrecisionParams(bg_n_points=200, ncdm_bg_n_points=100, bg_tol=1e-8)
 
         def conf_age(omega_b):

@@ -1,9 +1,14 @@
-"""Test shooting method: theta_s -> h.
+"""Tests shooting-method forward and gradient behavior.
 
-Validates that:
-1. _compute_theta_s gives a reasonable value at fiducial h
-2. Round-trip: shoot_h(compute_theta_s(h_fid)) == h_fid
-3. Gradient d(h)/d(theta_s) is finite and matches finite differences
+Contract:
+- The ``theta_s -> h`` shooting map is numerically stable, approximately correct, and differentiable.
+
+Scope:
+- Covers fiducial ``theta_s``, round-trip shooting, and local gradient checks.
+- Excludes unrelated background or perturbation contracts owned elsewhere.
+
+Notes:
+- Gradients remain in this file because they are local to the shooting contract and comparatively cheap.
 """
 
 import jax
@@ -20,30 +25,22 @@ PREC = PrecisionParams()
 
 @pytest.fixture(scope="module")
 def theta_s_fiducial():
-    """Compute 100*theta_s at fiducial h=0.6736."""
+    """Compute the fiducial ``100*theta_s`` value once for this module."""
     params = CosmoParams()
     return float(_compute_theta_s(0.6736, params, PREC))
 
 
 class TestComputeThetaS:
-    """Test the theta_s computation."""
+    """Tests direct ``theta_s`` computation."""
 
     def test_theta_s_reasonable_value(self, theta_s_fiducial):
-        """100*theta_s should be approximately 1.04 for fiducial LCDM."""
+        """Fiducial ``100*theta_s`` has the expected scale; expects a value in [1.03, 1.06]."""
         assert 1.03 < theta_s_fiducial < 1.06, (
             f"100*theta_s = {theta_s_fiducial:.4f} outside reasonable range [1.03, 1.06]"
         )
 
     def test_theta_s_close_to_class(self, theta_s_fiducial, lcdm_derived):
-        """100*theta_s should be within 1% of CLASS value.
-
-        Our z_rec may differ slightly from CLASS due to MB95 approximation,
-        so the exact theta_s differs. We allow 1% tolerance.
-        CLASS uses rs_rec/ra_rec at z_rec (visibility peak).
-        """
-        # Compute CLASS's 100*theta_s from derived quantities
-        # CLASS: 100*theta_s = 100 * rs_rec / ra_rec
-        #   where ra_rec = conformal_age - tau_rec (for flat universe)
+        """Fiducial ``100*theta_s`` matches the CLASS-derived value; expects <1% relative error."""
         rs_rec = lcdm_derived['rs_rec']
         tau_rec = lcdm_derived['tau_rec']
         conformal_age = lcdm_derived['conformal_age']
@@ -57,7 +54,7 @@ class TestComputeThetaS:
         )
 
     def test_theta_s_monotonic_in_h(self):
-        """theta_s should increase with h (larger H0 -> larger sound horizon angle)."""
+        """``theta_s`` increases with ``h`` on the probe grid; expects monotonic ordering."""
         params = CosmoParams()
         ts_low = _compute_theta_s(0.60, params, PREC)
         ts_mid = _compute_theta_s(0.67, params, PREC)
@@ -68,10 +65,10 @@ class TestComputeThetaS:
 
 
 class TestShootingRoundTrip:
-    """Test that shooting recovers h from theta_s."""
+    """Tests shooting round-trip behavior."""
 
     def test_roundtrip_fiducial(self, theta_s_fiducial):
-        """shoot_h(compute_theta_s(0.6736)) should recover h=0.6736."""
+        """Shooting recovers fiducial ``h`` from fiducial ``theta_s``; expects <1e-4 relative error."""
         params = CosmoParams()
         shoot_fn = make_shoot_h_from_theta_s(PREC)
         h_recovered = float(shoot_fn(theta_s_fiducial, params))
@@ -84,7 +81,7 @@ class TestShootingRoundTrip:
 
     @pytest.mark.slow
     def test_roundtrip_alternative_h(self):
-        """Round-trip should work for h values away from the initial guess."""
+        """Round-trip shooting works away from the initial guess; expects <1e-4 relative error on the probe grid."""
         params = CosmoParams()
         shoot_fn = make_shoot_h_from_theta_s(PREC)
 
@@ -99,10 +96,10 @@ class TestShootingRoundTrip:
 
 
 class TestShootingGradient:
-    """Test differentiability of the shooting method."""
+    """Tests shooting-method gradient behavior."""
 
     def test_gradient_finite(self, theta_s_fiducial):
-        """d(h)/d(theta_s) should be finite and positive."""
+        """``dh/dtheta_s`` is finite and positive; expects a finite positive gradient."""
         params = CosmoParams()
         shoot_fn = make_shoot_h_from_theta_s(PREC)
 
@@ -113,7 +110,7 @@ class TestShootingGradient:
         assert grad_val > 0, f"Gradient should be positive, got {grad_val}"
 
     def test_gradient_vs_finite_diff(self, theta_s_fiducial):
-        """AD gradient should match finite differences."""
+        """``dh/dtheta_s`` matches finite differences; expects <1% relative error."""
         params = CosmoParams()
         shoot_fn = make_shoot_h_from_theta_s(PREC)
 
@@ -133,7 +130,7 @@ class TestShootingGradient:
         )
 
     def test_gradient_reasonable_magnitude(self, theta_s_fiducial):
-        """d(h)/d(100*theta_s) should be O(1) -- neither tiny nor huge."""
+        """``dh/d(100*theta_s)`` has a reasonable scale; expects a value between 1 and 20."""
         params = CosmoParams()
         shoot_fn = make_shoot_h_from_theta_s(PREC)
 

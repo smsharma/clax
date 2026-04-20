@@ -1,4 +1,15 @@
-"""Test non-linear P(k) (HaloFit) against CLASS reference data."""
+"""Tests nonlinear ``P(k)`` forward and local-gradient behavior.
+
+Contract:
+- HaloFit-derived nonlinear spectra are structurally sane, approximately CLASS-consistent, and differentiable with respect to linear inputs.
+
+Scope:
+- Covers ``sigma(R)``, HaloFit parameters, nonlinear ``P(k)`` values, and local differentiability checks.
+- Excludes linear-spectrum contracts owned by ``test_pk_accuracy.py`` and ``test_pk_gradients.py``.
+
+Notes:
+- These tests consume CLASS nonlinear reference data and do not depend on the perturbation solver.
+"""
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -20,7 +31,7 @@ REFERENCE_DIR = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
 
 @pytest.fixture(scope="module")
 def pk_nl_ref():
-    """Load nonlinear P(k) reference data from CLASS."""
+    """Load nonlinear ``P(k)`` CLASS reference data once for this module."""
     path = os.path.join(REFERENCE_DIR, 'lcdm_fiducial', 'pk_nonlinear.npz')
     return dict(np.load(path))
 
@@ -41,10 +52,10 @@ FNU = 0.00138 / OMEGA_M_0  # Omega_ncdm / Omega_m
 
 
 class TestSigmaR:
-    """Test sigma(R) integral computation."""
+    """Tests ``sigma(R)`` behavior."""
 
     def test_sigma_decreasing(self, pk_nl_ref):
-        """sigma(R) should decrease with increasing R."""
+        """``sigma(R)`` decreases with ``R``; expects monotonic ordering on the probe grid."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         lnk = jnp.log(k)
@@ -57,7 +68,7 @@ class TestSigmaR:
         assert s1 > s5 > s10, f"sigma not decreasing: {s1:.3f}, {s5:.3f}, {s10:.3f}"
 
     def test_sigma_positive(self, pk_nl_ref):
-        """sigma(R) should be positive for any R."""
+        """``sigma(R)`` is positive on the probe grid; expects positive values."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         lnk = jnp.log(k)
@@ -69,10 +80,10 @@ class TestSigmaR:
 
 
 class TestHaloFitParameters:
-    """Test the non-linear scale and spectral parameters."""
+    """Tests HaloFit parameter extraction."""
 
     def test_k_sigma_range(self, pk_nl_ref):
-        """k_sigma should be in a physically reasonable range (~0.1-0.5 Mpc^-1)."""
+        """``k_sigma`` and ``n_eff`` have reasonable values; expects both in the documented ranges."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         lnk = jnp.log(k)
@@ -86,7 +97,7 @@ class TestHaloFitParameters:
         assert -3.0 < n_eff < 0.0, f"n_eff = {n_eff:.4f} out of range"
 
     def test_sigma_at_k_sigma_is_one(self, pk_nl_ref):
-        """sigma(1/k_sigma) should be 1 by construction."""
+        """``sigma(1/k_sigma)`` equals unity by construction; expects <1e-4 absolute error."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         lnk = jnp.log(k)
@@ -100,10 +111,10 @@ class TestHaloFitParameters:
 
 
 class TestHaloFitPk:
-    """Test non-linear P(k) against CLASS HaloFit reference."""
+    """Tests nonlinear ``P(k)`` value behavior."""
 
     def test_pk_nl_z0_low_k(self, pk_nl_ref):
-        """At low k, non-linear P(k) should equal linear P(k)."""
+        """Nonlinear ``P(k)`` matches linear ``P(k)`` at low ``k``; expects exact agreement on the low-``k`` mask."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
 
@@ -121,7 +132,7 @@ class TestHaloFitPk:
         )
 
     def test_pk_nl_z0_enhancement(self, pk_nl_ref):
-        """At high k, non-linear P(k) should exceed linear P(k)."""
+        """Nonlinear ``P(k)`` exceeds linear ``P(k)`` at high ``k``; expects enhancement at ``k≈1``."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
 
@@ -137,7 +148,7 @@ class TestHaloFitPk:
         assert ratio > 2.0, f"P_NL/P_lin at k=1: {ratio:.2f}, expected > 2"
 
     def test_pk_nl_z0_vs_class(self, pk_nl_ref):
-        """Non-linear P(k) at z=0 should match CLASS to < 10% for k < 10 Mpc^-1."""
+        """Nonlinear ``P(k)`` at ``z=0`` matches CLASS; expects <10% max relative error for ``0.01 < k < 10``."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         pk_class_nl = pk_nl_ref['pk_nl_z0']
@@ -164,7 +175,7 @@ class TestHaloFitPk:
         )
 
     def test_pk_nl_z0_vs_class_quasi_linear(self, pk_nl_ref):
-        """Non-linear P(k) in the quasi-linear regime should match CLASS well."""
+        """Nonlinear ``P(k)`` matches CLASS in the quasi-linear regime; expects <5% max relative error."""
         k = pk_nl_ref['k']
         pk_lin = pk_nl_ref['pk_lin_z0']
         pk_class_nl = pk_nl_ref['pk_nl_z0']
@@ -186,10 +197,10 @@ class TestHaloFitPk:
 
 
 class TestHaloFitDifferentiable:
-    """Test that HaloFit is differentiable."""
+    """Tests HaloFit differentiability and JIT behavior."""
 
     def test_grad_pk_nl_wrt_pk_lin(self, pk_nl_ref):
-        """Gradient of P_NL w.r.t. P_lin should be computable."""
+        """The HaloFit map is differentiable in ``P_lin``; expects finite non-zero gradients."""
         k_test = jnp.array([0.01, 0.1, 1.0, 10.0])
         # Create a simple power-law linear P(k)
         A_s = 2.1e-9
@@ -208,7 +219,7 @@ class TestHaloFitDifferentiable:
         assert jnp.any(grad != 0.0), "Gradient is all zeros"
 
     def test_jit_compatible(self, pk_nl_ref):
-        """HaloFit should be JIT-compilable."""
+        """HaloFit is JIT-compatible; expects finite outputs under ``jax.jit``."""
         k = jnp.array(pk_nl_ref['k'])
         pk_lin = jnp.array(pk_nl_ref['pk_lin_z0'])
 
