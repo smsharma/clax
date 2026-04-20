@@ -84,6 +84,78 @@ def compute_cl_pp(
     return jnp.array(cls)
 
 
+def compute_cl_pp_fast(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    l_max: int,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi for l=0..l_max via a single lax.scan over l.
+
+    Fuses the upward Bessel recurrence with the tau-integral: at each l-step,
+    advance j_l via ``(2l+1)/x * j_l - j_{l-1}``, contract with
+    ``source_lens * dtau`` to get T_l(k), then assemble C_l.  The carry is
+    only two (Nk, Ntau) arrays, so memory is O(Nk * Ntau) regardless of l_max.
+
+    This replaces the Python for-loop + per-point ``spherical_jl`` in
+    ``compute_cl_pp`` with a single compiled ``lax.scan``.
+
+    Args:
+        pt: perturbation results (source functions, k/tau grids)
+        params: cosmological parameters
+        bg: background results
+        l_max: maximum multipole (returns C_l for l=0..l_max)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.bessel import _j0, _j1
+
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+    chi_grid = tau_0 - tau_grid
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    S_dtau = pt.source_lens * dtau_mid[None, :]  # (Nk, Ntau)
+
+    # x = k * chi for all (k, tau) pairs
+    x_grid = k_grid[:, None] * chi_grid[None, :]  # (Nk, Ntau)
+    x_safe = jnp.where(jnp.abs(x_grid) < 1e-30, 1e-30, x_grid)
+
+    # j_0 and j_1 at all (k, tau) points
+    j0 = _j0(x_grid)
+    j1 = _j1(x_grid)
+
+    # C_l from T_l(k) via trapezoidal k-integration
+    def _cl_from_Tl(T_l, l_fl):
+        prefactor = (2.0 / (l_fl * (l_fl + 1.0)))**2
+        integrand = P_R * T_l**2
+        return prefactor * 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    # Scan: at each step advance j_l -> j_{l+1}, contract with S*dtau -> T
+    def scan_fn(carry, l_curr):
+        j_prev, j_curr = carry
+        l_fl = l_curr.astype(jnp.float64)
+        j_next = (2.0 * l_fl + 1.0) / x_safe * j_curr - j_prev
+        # Zero classically forbidden region to prevent overflow
+        j_next = jnp.where(jnp.abs(x_grid) < 0.7 * (l_fl + 1.0), 0.0, j_next)
+        j_next = jnp.clip(j_next, -1.0, 1.0)
+        T_next = jnp.sum(S_dtau * j_next, axis=1)
+        cl = _cl_from_Tl(T_next, l_fl + 1.0)
+        return (j_curr, j_next), cl
+
+    _, cl_2_to_lmax = jax.lax.scan(
+        scan_fn, (j0, j1), jnp.arange(1, l_max))
+
+    # l=0,1 have no lensing contribution
+    return jnp.concatenate([jnp.zeros(2), cl_2_to_lmax])
 # =============================================================================
 # Wigner d-matrix recurrence coefficients (Kostelec & Rockmore 2003)
 # cf. CLASS lensing.c:1256-1964
