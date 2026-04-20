@@ -2188,8 +2188,8 @@ def _perturbations_solve_mpk_impl(
             dt0=tau_ini * 0.1,
             y0=y0,
             saveat=diffrax.SaveAt(ts=tau_grid),
-            stepsize_controller=_make_scalar_pid_controller(
-                prec=prec, k=k, idx=idx, config=pid_config,
+            stepsize_controller=_make_scalar_pid_controller_unfiltered(
+                prec=prec, config=pid_config,
             ),
             adjoint=_get_adjoint(prec.ode_adjoint),
             max_steps=prec.ode_max_steps,
@@ -2258,8 +2258,8 @@ def _matter_delta_m_single_k_impl(
         dt0=tau_ini * 0.1,
         y0=y0,
         saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=_make_scalar_pid_controller(
-            prec=prec, k=k, idx=idx, config=pid_config,
+        stepsize_controller=_make_scalar_pid_controller_unfiltered(
+            prec=prec, config=pid_config,
         ),
         adjoint=_get_adjoint(prec.ode_adjoint),
         max_steps=prec.ode_max_steps,
