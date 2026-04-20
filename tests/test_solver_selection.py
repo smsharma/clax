@@ -39,10 +39,10 @@ class TestSolverSelection:
         with pytest.raises(ValueError, match="Unknown stiff solver"):
             _get_stiff_solver("euler")
 
-    def test_fit_cl_uses_rosenbrock(self):
-        """fit_cl preset uses Rosenbrock solver."""
+    def test_fit_cl_uses_rodas5(self):
+        """fit_cl preset uses Rodas5 solver."""
         prec = PrecisionParams.fit_cl()
-        assert prec.pt_ode_solver == "rosenbrock"
+        assert prec.pt_ode_solver == "rodas5"
 
     def test_fit_cl_loosened_atol(self):
         """fit_cl preset uses DISCO-EB-style loosened atol=1e-4."""

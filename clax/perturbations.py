@@ -2207,7 +2207,7 @@ def _perturbations_solve_mpk_impl(
         solve_kind="mpk",
     )
 
-    if prec.pt_ode_solver == "rosenbrock_batched":
+    if prec.pt_ode_solver in ("rodas5", "rosenbrock", "rosenbrock_batched"):
         all_delta_m = _solve_mpk_batched_rosenbrock(
             k_grid, batch_size, tau_ini, tau_max, tau_grid, n_tau, n_eq,
             bg, th, params, prec, idx, pid_config, args_ncdm,

@@ -170,7 +170,12 @@ class PrecisionParams:
     # ODE solver settings
     ode_max_steps: int = 65536
     ode_adjoint: str = "recursive_checkpoint"  # or "direct"
-    pt_ode_solver: str = "kvaerno5"  # "kvaerno5" (ESDIRK, default) or "rosenbrock" (Rodas5)
+    # Perturbation ODE solver.
+    #   "kvaerno5" — 5th-order ESDIRK (diffrax default, robust, Newton iteration)
+    #   "rodas5"   — 5th-order Rosenbrock (no Newton, LU only; ~1.3x faster on
+    #                CPU, potentially 3-5x on GPU; batched automatically for
+    #                table solves)
+    pt_ode_solver: str = "kvaerno5"
 
     # Memory management
     # >0 exact chunk size, 0 backend-aware auto-batching, <0 force full vmap.
@@ -324,5 +329,5 @@ class PrecisionParams:
             ode_max_steps=1024,      # actual steps ~460, 2x headroom (was 32768)
             hr_n_k_fine=5000,        # fine k-grid for accurate Bessel integrals
             hr_l_max=1500,           # reduced max multipole
-            pt_ode_solver="rosenbrock",  # Rodas5: avoids Newton iteration, ~3-5x faster
+            pt_ode_solver="rodas5",
         )

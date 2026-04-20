@@ -132,25 +132,22 @@ def _get_adjoint(adjoint: str):
 
 
 def _get_stiff_solver(solver_name: str):
-    """Return a stiff ODE solver instance from string name.
+    """Return a single-mode stiff ODE solver instance.
 
     Args:
-        solver_name: "kvaerno5" for Kvaerno5 (ESDIRK, Newton iteration) or
-                     "rosenbrock" for Rodas5 (Rosenbrock, LU factorization only).
+        solver_name: ``"kvaerno5"`` (ESDIRK, default) or ``"rodas5"``
+            (Rosenbrock, LU-only — no Newton iteration).
 
     Returns:
-        A Diffrax-compatible solver instance.
+        A Diffrax-compatible solver instance (single-mode, not batched).
     """
     if solver_name == "kvaerno5":
         return diffrax.Kvaerno5()
-    elif solver_name == "rosenbrock":
+    elif solver_name in ("rodas5", "rosenbrock"):
         from clax.rosenbrock import Rodas5
         return Rodas5()
-    elif solver_name == "rosenbrock_batched":
-        from clax.rosenbrock import Rodas5Batched
-        return Rodas5Batched()
     else:
         raise ValueError(
             f"Unknown stiff solver: {solver_name!r}. "
-            f"Choose 'kvaerno5' or 'rosenbrock'."
+            f"Choose 'kvaerno5' or 'rodas5'."
         )
