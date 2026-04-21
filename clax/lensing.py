@@ -84,6 +84,196 @@ def compute_cl_pp(
     return jnp.array(cls)
 
 
+def compute_cl_pp_fast(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    l_max: int,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi for l=0..l_max via a single lax.scan over l.
+
+    Fuses the upward Bessel recurrence with the tau-integral: at each l-step,
+    advance j_l via ``(2l+1)/x * j_l - j_{l-1}``, contract with
+    ``source_lens * dtau`` to get T_l(k), then assemble C_l.  The carry is
+    only two (Nk, Ntau) arrays, so memory is O(Nk * Ntau) regardless of l_max.
+
+    This replaces the Python for-loop + per-point ``spherical_jl`` in
+    ``compute_cl_pp`` with a single compiled ``lax.scan``.
+
+    Args:
+        pt: perturbation results (source functions, k/tau grids)
+        params: cosmological parameters
+        bg: background results
+        l_max: maximum multipole (returns C_l for l=0..l_max)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.bessel import _j0, _j1
+
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+    chi_grid = tau_0 - tau_grid
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    S_dtau = pt.source_lens * dtau_mid[None, :]  # (Nk, Ntau)
+
+    # x = k * chi for all (k, tau) pairs
+    x_grid = k_grid[:, None] * chi_grid[None, :]  # (Nk, Ntau)
+    x_safe = jnp.where(jnp.abs(x_grid) < 1e-30, 1e-30, x_grid)
+
+    # j_0 and j_1 at all (k, tau) points
+    j0 = _j0(x_grid)
+    j1 = _j1(x_grid)
+
+    # C_l from T_l(k) via trapezoidal k-integration
+    def _cl_from_Tl(T_l, l_fl):
+        prefactor = (2.0 / (l_fl * (l_fl + 1.0)))**2
+        integrand = P_R * T_l**2
+        return prefactor * 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    # Scan: at each step advance j_l -> j_{l+1}, contract with S*dtau -> T
+    def scan_fn(carry, l_curr):
+        j_prev, j_curr = carry
+        l_fl = l_curr.astype(jnp.float64)
+        j_next = (2.0 * l_fl + 1.0) / x_safe * j_curr - j_prev
+        # Zero classically forbidden region to prevent overflow
+        j_next = jnp.where(jnp.abs(x_grid) < 0.7 * (l_fl + 1.0), 0.0, j_next)
+        j_next = jnp.clip(j_next, -1.0, 1.0)
+        T_next = jnp.sum(S_dtau * j_next, axis=1)
+        cl = _cl_from_Tl(T_next, l_fl + 1.0)
+        return (j_curr, j_next), cl
+
+    _, cl_2_to_lmax = jax.lax.scan(
+        scan_fn, (j0, j1), jnp.arange(1, l_max))
+
+    # l=0,1 have no lensing contribution
+    return jnp.concatenate([jnp.zeros(2), cl_2_to_lmax])
+
+
+def compute_cl_pp_vmap(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    l_max: int,
+    n_x: int = 50000,
+    x_max: float = 15000.0,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi for l=2..l_max using precomputed Bessel tables + vmap.
+
+    Precomputes j_l(x) and j_l'(x) on a 1-D x-grid for a sparse set of
+    l-values (backward + upward recurrence, blended), then evaluates all l
+    in parallel via ``jax.vmap`` with cubic Hermite interpolation.
+    GPU-optimal: the l-dimension is fully parallel.
+
+    Uses the same ``build_jl_table`` infrastructure as
+    ``harmonic.compute_cls_all_fast``, with 4th-order Hermite interpolation
+    (matching CLASS's Bessel table lookup) for sub-percent accuracy.
+
+    Args:
+        pt: perturbation results (source functions, k/tau grids)
+        params: cosmological parameters
+        bg: background results
+        l_max: maximum multipole (returns C_l for l=0..l_max)
+        n_x: Bessel table x-grid points (default 50000)
+        x_max: maximum x in table (default 15000)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.bessel import build_jl_table, sparse_l_grid
+
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+    chi_grid = tau_0 - tau_grid
+    n_k = k_grid.shape[0]
+    n_tau = tau_grid.shape[0]
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    S_dtau = pt.source_lens * dtau_mid[None, :]  # (Nk, Ntau)
+
+    # 1. Build Bessel table (j_l AND j_l') on sparse l-grid
+    x_max_auto = float(jnp.max(k_grid) * tau_0 * 1.05)
+    x_max_use = max(x_max, x_max_auto)
+    n_x_use = max(n_x, int(x_max_use * 3))
+    x_table, jl_table, jlp_table = build_jl_table(
+        l_max, n_x=n_x_use, x_max=x_max_use)
+    n_x_actual = x_table.shape[0]
+    h_table = x_max_use / (n_x_actual - 1)  # uniform spacing
+
+    # 2. Precompute interpolation indices for x_query = k * chi
+    x_query = k_grid[:, None] * chi_grid[None, :]  # (Nk, Ntau)
+    x_flat = x_query.flatten()
+
+    idx_right = jnp.searchsorted(x_table, x_flat)
+    idx_left = jnp.clip(idx_right - 1, 0, n_x_actual - 2)
+    idx_right_safe = jnp.clip(idx_right, 1, n_x_actual - 1)
+    dx = x_table[idx_right_safe] - x_table[idx_left]
+    dx_safe = jnp.where(dx < 1e-30, 1e-30, dx)
+    t = jnp.clip((x_flat - x_table[idx_left]) / dx_safe, 0.0, 1.0)
+
+    # Cubic Hermite basis polynomials (4th-order, uses j_l and j_l')
+    # H(t) = f_i h00 + f'_i h * h10 + f_{i+1} h01 + f'_{i+1} h * h11
+    # cf. CLASS transfer.c Hermite interpolation for Bessel tables
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0   # Hermite basis for f(x_i)
+    h10 = t3 - 2.0 * t2 + t             # Hermite basis for f'(x_i) * h
+    h01 = -2.0 * t3 + 3.0 * t2          # Hermite basis for f(x_{i+1})
+    h11 = t3 - t2                        # Hermite basis for f'(x_{i+1}) * h
+
+    # 3. vmap over sparse l: Hermite table lookup → T_l(k) → C_l
+    l_sparse = sparse_l_grid(l_max)
+    l_sparse_fl = jnp.array(l_sparse, dtype=jnp.float64)
+
+    def _single_l_cl(l_idx):
+        """Compute C_l^pp for one l-index via Hermite table lookup."""
+        l_fl = l_sparse_fl[l_idx]
+        # Cubic Hermite interpolation from j_l and j_l' tables
+        fl = jl_table[l_idx, idx_left]
+        fr = jl_table[l_idx, idx_right_safe]
+        dfl = jlp_table[l_idx, idx_left]
+        dfr = jlp_table[l_idx, idx_right_safe]
+        jl_flat = fl * h00 + dfl * h_table * h10 + fr * h01 + dfr * h_table * h11
+        jl_2d = jl_flat.reshape(n_k, n_tau)
+
+        # T_l(k) = sum_tau S * j_l * dtau
+        T_l = jnp.sum(S_dtau * jl_2d, axis=1)  # (Nk,)
+
+        # C_l = [2/(l(l+1))]^2 * 4pi * integral dlnk P_R T_l^2
+        prefactor = (2.0 / (l_fl * (l_fl + 1.0)))**2
+        integrand = P_R * T_l**2
+        return prefactor * 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    cl_sparse = jax.vmap(_single_l_cl)(jnp.arange(len(l_sparse)))
+
+    # 4. Spline-interpolate sparse C_l to all l=0..l_max
+    from clax.interpolation import CubicSpline
+    l_sparse_log = jnp.log(l_sparse_fl)
+    cl_sparse_safe = jnp.maximum(cl_sparse, 1e-100)
+    log_cl_spline = CubicSpline(l_sparse_log, jnp.log(cl_sparse_safe))
+
+    l_all = jnp.arange(2, l_max + 1, dtype=jnp.float64)
+    log_cl_all = log_cl_spline.evaluate(jnp.log(l_all))
+    cl_all = jnp.exp(log_cl_all)
+
+    return jnp.concatenate([jnp.zeros(2), cl_all])
+
+
 # =============================================================================
 # Wigner d-matrix recurrence coefficients (Kostelec & Rockmore 2003)
 # cf. CLASS lensing.c:1256-1964

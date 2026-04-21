@@ -170,6 +170,12 @@ class PrecisionParams:
     # ODE solver settings
     ode_max_steps: int = 65536
     ode_adjoint: str = "recursive_checkpoint"  # or "direct"
+    # Perturbation ODE solver.
+    #   "kvaerno5" — 5th-order ESDIRK (diffrax default, robust, Newton iteration)
+    #   "rodas5"   — 5th-order Rosenbrock (no Newton, LU only; ~1.3x faster on
+    #                CPU, potentially 3-5x on GPU; batched automatically for
+    #                table solves)
+    pt_ode_solver: str = "kvaerno5"
 
     # Memory management
     # >0 exact chunk size, 0 backend-aware auto-batching, <0 force full vmap.
@@ -307,6 +313,7 @@ class PrecisionParams:
         V100 timing (cached): BG 0.5s, TH 1.5s, PT ~30s, HR 1.7s ≈ 34s total.
         Accuracy: <1.5% TT/EE at l≤500, ~7% at l=1000 (perturbation-limited).
         Perturbation ODE is the floor (~30s for 100 k-modes × Kvaerno5 × 59 vars).
+        With Rosenbrock (Rodas5), perturbation ODE expected ~3-5x faster.
         """
         return PrecisionParams(
             pt_k_max_cl=1.0,         # keep full k range for l coverage
@@ -318,8 +325,9 @@ class PrecisionParams:
             pt_l_max_ur=17,
             ncdm_q_size=0,           # disable ncdm hierarchy (massless approx, ~3x faster)
             pt_ode_rtol=1e-3,        # aggressive tolerance (33% speedup, <0.1% C_l impact)
-            pt_ode_atol=1e-8,
+            pt_ode_atol=1e-4,        # DISCO-EB default; filtered PID ignores small vars (was 1e-8)
             ode_max_steps=1024,      # actual steps ~460, 2x headroom (was 32768)
             hr_n_k_fine=5000,        # fine k-grid for accurate Bessel integrals
             hr_l_max=1500,           # reduced max multipole
+            pt_ode_solver="rodas5",
         )

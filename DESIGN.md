@@ -1111,14 +1111,30 @@ These smooth approximations are differentiable.
 
 ### 4.14 ODE Solver Utilities
 
-**File**: `ode.py`
+**Files**: `ode.py`, `rosenbrock.py`
 
 **Purpose**: Wrappers around Diffrax that set up the solver configuration
 consistently across modules.
 
+**Stiff solver selection** (`PrecisionParams.pt_ode_solver`):
+
+| Value | Method | Per-step cost | Best for |
+|-------|--------|---------------|----------|
+| `"kvaerno5"` | ESDIRK (5th order, Newton iteration) | Higher (iterative) | Default, robust |
+| `"rodas5"` | Rosenbrock (5th order, LU only) | Lower (direct) | GPU, batch table solves |
+
+When `"rodas5"` is selected, the code automatically uses `Rodas5Batched` for
+table solves (solving a chunk of k-modes in one `diffeqsolve` call with shared
+adaptive stepping) and unbatched `Rodas5` for single-k evaluations.
+
+**Rosenbrock implementation** (`rosenbrock.py`): Rodas5 (Di Marzo 1993),
+8-stage order 5(4), transformed W-formulation:
+  W = I/(h·γ) − J; each stage solves W·k_i = RHS via LU back-substitution.
+  Error estimate is k_8 (the last stage). L-stable and stiffly accurate.
+
 ```python
 def solve_stiff(rhs_fn, t_span, y0, saveat, params, prec):
-    """Solve a stiff ODE system using Kvaerno5 (implicit ESDIRK).
+    """Solve a stiff ODE system.
 
     Args:
         rhs_fn: callable (t, y, args) -> dy
@@ -1131,7 +1147,7 @@ def solve_stiff(rhs_fn, t_span, y0, saveat, params, prec):
     Returns:
         solution states at saveat points
     """
-    solver = diffrax.Kvaerno5()
+    solver = _get_stiff_solver(prec.pt_ode_solver)
     controller = diffrax.PIDController(
         rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol
     )
