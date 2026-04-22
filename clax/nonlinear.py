@@ -185,6 +185,69 @@ def halofit_parameters(
 # HaloFit non-linear P(k) (Takahashi 2012 + Bird 2012)
 # ---------------------------------------------------------------------------
 
+def _extend_pk_for_sigma(lnk, pk, k_max_target=50.0, k_per_decade=80):
+    """Build a dense internal k-grid for the sigma(R) integral.
+
+    Mirrors CLASS's approach (halofit.c): the Halofit module builds its
+    own internal k-grid with ``halofit_k_per_decade = 80`` points per
+    decade, independent of the user's output k-grid.  The input P(k) is
+    interpolated (via cubic spline in log-log) onto this dense grid, and
+    extrapolated to ``k_max_target`` using a power-law fit from the
+    high-k tail.
+
+    This function runs OUTSIDE the JAX trace (uses numpy) because it
+    changes array shapes.
+
+    Args:
+        lnk: log wavenumbers, shape (N,)
+        pk: linear P(k) [Mpc^3], shape (N,)
+        k_max_target: extend to this k [Mpc^-1] (default 50)
+        k_per_decade: internal grid density (default 80, matching CLASS)
+
+    Returns:
+        (lnk_dense, pk_dense) on the dense internal grid
+    """
+    import numpy as _np
+    from scipy.interpolate import CubicSpline as _CubicSpline
+
+    lnk_np = _np.asarray(lnk)
+    pk_np = _np.asarray(pk)
+    k_min_in = _np.exp(lnk_np[0])
+    k_max_in = _np.exp(lnk_np[-1])
+
+    if k_max_in >= k_max_target * 0.9 or len(lnk_np) < 10:
+        return lnk, pk
+
+    # Build dense internal grid from k_min to k_max_target
+    n_decades = _np.log10(k_max_target / k_min_in)
+    n_dense = max(100, int(n_decades * k_per_decade))
+    lnk_dense = _np.linspace(lnk_np[0], _np.log(k_max_target), n_dense)
+
+    # Interpolate within the input range via cubic spline in log-log.
+    # Beyond k_max_in, extrapolate with a power law anchored at the
+    # last two points (the spline's cubic extrapolation diverges).
+    lnpk_np = _np.log(_np.maximum(pk_np, 1e-300))
+    spline = _CubicSpline(lnk_np, lnpk_np, extrapolate=False)
+
+    in_range = lnk_dense <= lnk_np[-1]
+    lnpk_dense = _np.zeros(n_dense)
+
+    # Within range: spline interpolation
+    lnpk_dense[in_range] = spline(lnk_dense[in_range])
+
+    # Beyond range: power law from the derivative at the last input point
+    # dln(P)/dln(k) at k_max gives the local spectral slope
+    slope_at_edge = float(spline(lnk_np[-1], 1))  # first derivative
+    lnpk_edge = lnpk_np[-1]
+    beyond = ~in_range
+    lnpk_dense[beyond] = lnpk_edge + slope_at_edge * (lnk_dense[beyond] - lnk_np[-1])
+
+    pk_dense = _np.exp(lnpk_dense)
+    pk_dense = _np.maximum(pk_dense, 1e-300)
+
+    return jnp.array(lnk_dense), jnp.array(pk_dense)
+
+
 def halofit_nl_pk(
     k: Float[Array, "N"],
     pk_lin: Float[Array, "N"],
@@ -193,6 +256,8 @@ def halofit_nl_pk(
     w: float,
     fnu: float,
     h: float,
+    _lnk_sigma: Float[Array, "M"] | None = None,
+    _pk_sigma: Float[Array, "M"] | None = None,
 ) -> Float[Array, "N"]:
     """Compute the non-linear power spectrum using HaloFit (Takahashi 2012).
 
@@ -200,6 +265,10 @@ def halofit_nl_pk(
     Bird et al. (2012) massive neutrino corrections.
 
     P_NL(k) = P_quasi(k) + P_halo(k)
+
+    The input P(k) is automatically extended to high k (up to 50 Mpc^-1)
+    via power-law extrapolation if needed, to ensure the sigma(R) integral
+    converges at the nonlinear scale.
 
     cf. halofit.c:404-468
 
@@ -217,8 +286,11 @@ def halofit_nl_pk(
     """
     lnk = jnp.log(k)
 
-    # Find non-linear scale and spectral parameters
-    k_sigma, n_eff, C = halofit_parameters(lnk, pk_lin)
+    # Find non-linear scale and spectral parameters.
+    # Use extended k-grid if provided (for sigma(R) convergence with narrow inputs).
+    lnk_for_sigma = _lnk_sigma if _lnk_sigma is not None else lnk
+    pk_for_sigma = _pk_sigma if _pk_sigma is not None else pk_lin
+    k_sigma, n_eff, C = halofit_parameters(lnk_for_sigma, pk_for_sigma)
 
     # Abbreviations
     # cf. halofit.c:410
@@ -378,4 +450,15 @@ def compute_pk_nonlinear(
     # Dark energy EOS at this redshift (CPL parameterization)
     w = w0 + wa * (1.0 - a)
 
-    return halofit_nl_pk(k, pk_lin, Omega_m, Omega_v, w, fnu, h)
+    # Extend the k-grid for sigma(R) convergence if too narrow.
+    # This must happen outside JAX tracing (changes array shapes), so we
+    # detect traced arrays and skip the extension in that case (callers using
+    # jax.grad typically provide a wide k-grid from reference data).
+    lnk = jnp.log(k)
+    try:
+        lnk_wide, pk_wide = _extend_pk_for_sigma(lnk, pk_lin)
+    except (jax.errors.TracerArrayConversionError, Exception):
+        lnk_wide, pk_wide = lnk, pk_lin
+
+    return halofit_nl_pk(k, pk_lin, Omega_m, Omega_v, w, fnu, h,
+                         _lnk_sigma=lnk_wide, _pk_sigma=pk_wide)
