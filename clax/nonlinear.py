@@ -185,6 +185,56 @@ def halofit_parameters(
 # HaloFit non-linear P(k) (Takahashi 2012 + Bird 2012)
 # ---------------------------------------------------------------------------
 
+def _extend_pk_for_sigma(lnk, pk, k_max_target=50.0):
+    """Extend P(k) to high k via power-law extrapolation for sigma(R) convergence.
+
+    The sigma(R) Gaussian integral needs k coverage up to ~5/R_nl where
+    R_nl ~ 3 Mpc.  If the input k-grid is too narrow, sigma(R) at small R
+    is underestimated, causing the Halofit bisection for k_sigma to fail.
+
+    This function is called OUTSIDE the JIT trace (before scan/jit).
+    It uses numpy to avoid JAX tracing issues.
+
+    Args:
+        lnk: log wavenumbers, shape (N,)
+        pk: linear P(k) [Mpc^3], shape (N,)
+        k_max_target: extend to this k [Mpc^-1] (default 50)
+
+    Returns:
+        (lnk_ext, pk_ext) with extended coverage
+    """
+    import numpy as _np
+
+    lnk_np = _np.asarray(lnk)
+    pk_np = _np.asarray(pk)
+    k_max_in = _np.exp(lnk_np[-1])
+
+    if k_max_in >= k_max_target * 0.9 or len(lnk_np) < 10:
+        return lnk, pk
+
+    # Power-law slope from last 20% of k-grid
+    n_fit = max(5, len(lnk_np) // 5)
+    lnk_fit = lnk_np[-n_fit:]
+    lnpk_fit = _np.log(_np.maximum(pk_np[-n_fit:], 1e-300))
+    dlnk_fit = lnk_fit[-1] - lnk_fit[0]
+    if abs(dlnk_fit) < 1e-10:
+        slope = -3.0
+    else:
+        slope = (lnpk_fit[-1] - lnpk_fit[0]) / dlnk_fit
+    intercept = lnpk_fit[-1] - slope * lnk_fit[-1]
+
+    # Extension grid
+    dlnk = lnk_np[-1] - lnk_np[-2]
+    if dlnk <= 0:
+        return lnk, pk
+    n_ext = max(1, int(_np.log(k_max_target / k_max_in) / dlnk) + 1)
+    lnk_ext = lnk_np[-1] + dlnk * _np.arange(1, n_ext + 1)
+    pk_ext = _np.exp(slope * lnk_ext + intercept)
+
+    return jnp.array(_np.concatenate([lnk_np, lnk_ext])), \
+           jnp.array(_np.concatenate([pk_np, pk_ext]))
+
+
 def halofit_nl_pk(
     k: Float[Array, "N"],
     pk_lin: Float[Array, "N"],
@@ -193,6 +243,8 @@ def halofit_nl_pk(
     w: float,
     fnu: float,
     h: float,
+    _lnk_sigma: Float[Array, "M"] | None = None,
+    _pk_sigma: Float[Array, "M"] | None = None,
 ) -> Float[Array, "N"]:
     """Compute the non-linear power spectrum using HaloFit (Takahashi 2012).
 
@@ -200,6 +252,10 @@ def halofit_nl_pk(
     Bird et al. (2012) massive neutrino corrections.
 
     P_NL(k) = P_quasi(k) + P_halo(k)
+
+    The input P(k) is automatically extended to high k (up to 50 Mpc^-1)
+    via power-law extrapolation if needed, to ensure the sigma(R) integral
+    converges at the nonlinear scale.
 
     cf. halofit.c:404-468
 
@@ -217,8 +273,11 @@ def halofit_nl_pk(
     """
     lnk = jnp.log(k)
 
-    # Find non-linear scale and spectral parameters
-    k_sigma, n_eff, C = halofit_parameters(lnk, pk_lin)
+    # Find non-linear scale and spectral parameters.
+    # Use extended k-grid if provided (for sigma(R) convergence with narrow inputs).
+    lnk_for_sigma = _lnk_sigma if _lnk_sigma is not None else lnk
+    pk_for_sigma = _pk_sigma if _pk_sigma is not None else pk_lin
+    k_sigma, n_eff, C = halofit_parameters(lnk_for_sigma, pk_for_sigma)
 
     # Abbreviations
     # cf. halofit.c:410
@@ -378,4 +437,15 @@ def compute_pk_nonlinear(
     # Dark energy EOS at this redshift (CPL parameterization)
     w = w0 + wa * (1.0 - a)
 
-    return halofit_nl_pk(k, pk_lin, Omega_m, Omega_v, w, fnu, h)
+    # Extend the k-grid for sigma(R) convergence if too narrow.
+    # This must happen outside JAX tracing (changes array shapes), so we
+    # detect traced arrays and skip the extension in that case (callers using
+    # jax.grad typically provide a wide k-grid from reference data).
+    lnk = jnp.log(k)
+    try:
+        lnk_wide, pk_wide = _extend_pk_for_sigma(lnk, pk_lin)
+    except (jax.errors.TracerArrayConversionError, Exception):
+        lnk_wide, pk_wide = lnk, pk_lin
+
+    return halofit_nl_pk(k, pk_lin, Omega_m, Omega_v, w, fnu, h,
+                         _lnk_sigma=lnk_wide, _pk_sigma=pk_wide)
