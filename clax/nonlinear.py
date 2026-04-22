@@ -185,54 +185,67 @@ def halofit_parameters(
 # HaloFit non-linear P(k) (Takahashi 2012 + Bird 2012)
 # ---------------------------------------------------------------------------
 
-def _extend_pk_for_sigma(lnk, pk, k_max_target=50.0):
-    """Extend P(k) to high k via power-law extrapolation for sigma(R) convergence.
+def _extend_pk_for_sigma(lnk, pk, k_max_target=50.0, k_per_decade=80):
+    """Build a dense internal k-grid for the sigma(R) integral.
 
-    The sigma(R) Gaussian integral needs k coverage up to ~5/R_nl where
-    R_nl ~ 3 Mpc.  If the input k-grid is too narrow, sigma(R) at small R
-    is underestimated, causing the Halofit bisection for k_sigma to fail.
+    Mirrors CLASS's approach (halofit.c): the Halofit module builds its
+    own internal k-grid with ``halofit_k_per_decade = 80`` points per
+    decade, independent of the user's output k-grid.  The input P(k) is
+    interpolated (via cubic spline in log-log) onto this dense grid, and
+    extrapolated to ``k_max_target`` using a power-law fit from the
+    high-k tail.
 
-    This function is called OUTSIDE the JIT trace (before scan/jit).
-    It uses numpy to avoid JAX tracing issues.
+    This function runs OUTSIDE the JAX trace (uses numpy) because it
+    changes array shapes.
 
     Args:
         lnk: log wavenumbers, shape (N,)
         pk: linear P(k) [Mpc^3], shape (N,)
         k_max_target: extend to this k [Mpc^-1] (default 50)
+        k_per_decade: internal grid density (default 80, matching CLASS)
 
     Returns:
-        (lnk_ext, pk_ext) with extended coverage
+        (lnk_dense, pk_dense) on the dense internal grid
     """
     import numpy as _np
+    from scipy.interpolate import CubicSpline as _CubicSpline
 
     lnk_np = _np.asarray(lnk)
     pk_np = _np.asarray(pk)
+    k_min_in = _np.exp(lnk_np[0])
     k_max_in = _np.exp(lnk_np[-1])
 
     if k_max_in >= k_max_target * 0.9 or len(lnk_np) < 10:
         return lnk, pk
 
-    # Power-law slope from last 20% of k-grid
-    n_fit = max(5, len(lnk_np) // 5)
-    lnk_fit = lnk_np[-n_fit:]
-    lnpk_fit = _np.log(_np.maximum(pk_np[-n_fit:], 1e-300))
-    dlnk_fit = lnk_fit[-1] - lnk_fit[0]
-    if abs(dlnk_fit) < 1e-10:
-        slope = -3.0
-    else:
-        slope = (lnpk_fit[-1] - lnpk_fit[0]) / dlnk_fit
-    intercept = lnpk_fit[-1] - slope * lnk_fit[-1]
+    # Build dense internal grid from k_min to k_max_target
+    n_decades = _np.log10(k_max_target / k_min_in)
+    n_dense = max(100, int(n_decades * k_per_decade))
+    lnk_dense = _np.linspace(lnk_np[0], _np.log(k_max_target), n_dense)
 
-    # Extension grid
-    dlnk = lnk_np[-1] - lnk_np[-2]
-    if dlnk <= 0:
-        return lnk, pk
-    n_ext = max(1, int(_np.log(k_max_target / k_max_in) / dlnk) + 1)
-    lnk_ext = lnk_np[-1] + dlnk * _np.arange(1, n_ext + 1)
-    pk_ext = _np.exp(slope * lnk_ext + intercept)
+    # Interpolate within the input range via cubic spline in log-log.
+    # Beyond k_max_in, extrapolate with a power law anchored at the
+    # last two points (the spline's cubic extrapolation diverges).
+    lnpk_np = _np.log(_np.maximum(pk_np, 1e-300))
+    spline = _CubicSpline(lnk_np, lnpk_np, extrapolate=False)
 
-    return jnp.array(_np.concatenate([lnk_np, lnk_ext])), \
-           jnp.array(_np.concatenate([pk_np, pk_ext]))
+    in_range = lnk_dense <= lnk_np[-1]
+    lnpk_dense = _np.zeros(n_dense)
+
+    # Within range: spline interpolation
+    lnpk_dense[in_range] = spline(lnk_dense[in_range])
+
+    # Beyond range: power law from the derivative at the last input point
+    # dln(P)/dln(k) at k_max gives the local spectral slope
+    slope_at_edge = float(spline(lnk_np[-1], 1))  # first derivative
+    lnpk_edge = lnpk_np[-1]
+    beyond = ~in_range
+    lnpk_dense[beyond] = lnpk_edge + slope_at_edge * (lnk_dense[beyond] - lnk_np[-1])
+
+    pk_dense = _np.exp(lnpk_dense)
+    pk_dense = _np.maximum(pk_dense, 1e-300)
+
+    return jnp.array(lnk_dense), jnp.array(pk_dense)
 
 
 def halofit_nl_pk(
