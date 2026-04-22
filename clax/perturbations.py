@@ -481,7 +481,7 @@ class PerturbationResult:
     source_T1: Float[Array, "Nk Ntau"]   # Temperature dipole source (ISW dipole)
     source_T2: Float[Array, "Nk Ntau"]   # Temperature quadrupole source (g*Pi)
     source_E: Float[Array, "Nk Ntau"]    # E-polarization source
-    source_lens: Float[Array, "Nk Ntau"]  # Lensing potential source
+    source_lens: Float[Array, "Nk Ntau"]  # Lensing potential source (exp(-kappa)*2*phi)
     delta_m: Float[Array, "Nk Ntau"]     # Total matter density contrast
 
     # Decomposed T0 subterms for diagnostics
@@ -494,6 +494,9 @@ class PerturbationResult:
     source_Doppler_nonIBP: Float[Array, "Nk Ntau"]  # g*theta_b_shifted/k (uses j_l' radial)
     source_T0_noDopp: Float[Array, "Nk Ntau"]       # SW + ISW (no Doppler)
 
+    # Weyl potential (phi+psi) in synchronous gauge (eta + alpha_prime)
+    source_phi_plus_psi: Float[Array, "Nk Ntau"]
+
     def tree_flatten(self):
         return [
             self.k_grid, self.tau_grid,
@@ -501,6 +504,7 @@ class PerturbationResult:
             self.source_E, self.source_lens, self.delta_m,
             self.source_SW, self.source_ISW_vis, self.source_ISW_fs, self.source_Doppler,
             self.source_Doppler_nonIBP, self.source_T0_noDopp,
+            self.source_phi_plus_psi,
         ], None
 
     @classmethod
@@ -1656,8 +1660,14 @@ def _extract_sources(y, k, tau, bg, th, idx, params,
     # Our harmonic.py has E_l = sqrt((l+2)(l+1)l(l-1)) * int source_E * j_l/(kchi)^2 dtau
     source_E = 3.0 * g * Pi_src / 16.0
 
-    # Lensing potential source
+    # Lensing potential source (visibility-weighted, for backward compatibility)
     source_lens = exp_m_kappa * 2.0 * phi_newt
+
+    # Weyl potential (phi+psi) in synchronous gauge, without exp(-kappa).
+    # CLASS perturbations.c:7754-7756 (synchronous gauge):
+    #   source_phi_plus_psi = y[index_pt_eta] + pvecmetric[index_mt_alpha_prime]
+    # The geometric lensing kernel is applied in compute_cl_pp_transfer.
+    source_phi_plus_psi = eta + alpha_prime
 
     # Matter density contrast (for P(k))
     # Include ncdm when hierarchy is active (n_q > 0) to match CLASS P_m(k)
@@ -1668,7 +1678,7 @@ def _extract_sources(y, k, tau, bg, th, idx, params,
 
     return (source_T0, source_T1, source_T2, source_E, source_lens, delta_m,
             source_SW, source_ISW_vis, source_ISW_fs, source_Doppler,
-            source_Doppler_nonIBP, source_T0_noDopp)
+            source_Doppler_nonIBP, source_T0_noDopp, source_phi_plus_psi)
 
 
 def _extract_delta_m(
@@ -2032,6 +2042,7 @@ def _perturbations_solve_impl(
         source_Doppler=all_sources[9],
         source_Doppler_nonIBP=all_sources[10],
         source_T0_noDopp=all_sources[11],
+        source_phi_plus_psi=all_sources[12],
     )
 
 

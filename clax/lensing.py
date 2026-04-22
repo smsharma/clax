@@ -275,6 +275,91 @@ def compute_cl_pp_vmap(
 
 
 
+def compute_cl_pp_transfer(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    th,
+    l_values: Float[Array, "Nl"],
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi via the full Bessel transfer function integral.
+
+    Mirrors CLASS transfer.c:2428 + harmonic.c:1073-1108 exactly:
+
+        source(k, tau) = (phi+psi)(k, tau) * W_lcmb(tau)
+        T_l(k) = integral_{tau>tau_rec} dtau * source * j_l(k*chi)
+        C_l^pp = 4pi * integral d(lnk) * P_R(k) * T_l(k)^2
+
+    Three bugs in the original ``compute_cl_pp`` are fixed:
+    1. Source: uses ``source_phi_plus_psi`` (eta + alpha_prime) with
+       the geometric kernel, not ``exp(-kappa) * 2*phi``
+    2. No ``[2/(l(l+1))]^2`` prefactor — CLASS stores C_l^pp directly
+    3. Integration starts at tau_rec (CLASS transfer.c:1712)
+
+    Args:
+        pt: perturbation results (must have source_phi_plus_psi)
+        params: cosmological parameters
+        bg: background results
+        th: thermodynamics results (for tau_rec)
+        l_values: multipoles at which to evaluate
+
+    Returns:
+        C_l^phiphi at each l in l_values
+    """
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+
+    # tau_rec: start of lensing integration (CLASS transfer.c:1712)
+    loga_rec = jnp.log(1.0 / (1.0 + th.z_rec))
+    tau_rec = bg.tau_of_loga.evaluate(loga_rec)
+
+    chi_grid = tau_0 - tau_grid
+    chi_rec = tau_0 - tau_rec
+
+    # Geometric lensing kernel: W = (tau_rec - tau) / [(tau_0-tau)(tau_0-tau_rec)]
+    # cf. CLASS transfer.c:2428 (flat geometry)
+    chi_nonzero = jnp.where(chi_grid > 0.0, chi_grid, 1.0)
+    W_lcmb = (tau_rec - tau_grid) / (chi_nonzero * chi_rec)
+    W_lcmb = jnp.where(chi_grid > 0.0, W_lcmb, 0.0)
+
+    # Build transfer source: (phi+psi) * W, zeroed for tau <= tau_rec
+    # (CLASS transfer.c:1712 discards times before recombination)
+    S_transfer = pt.source_phi_plus_psi * W_lcmb[None, :]
+    S_transfer = jnp.where(tau_grid[None, :] > tau_rec, S_transfer, 0.0)
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    def compute_clpp_single_l(l):
+        l_int = int(l)
+        l_fl = jnp.float64(l)
+
+        def transfer_single_k(ik):
+            k = k_grid[ik]
+            x = k * chi_grid
+            jl = spherical_jl(l_int, x)
+            return jnp.sum(S_transfer[ik, :] * jl * dtau_mid)
+
+        T_l = jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
+        # No [2/(l(l+1))]^2 prefactor — CLASS stores C_l^pp directly
+        # cf. CLASS harmonic.c:1073 (factor = 4*PI/k for all spectra)
+        integrand = P_R * T_l**2
+        dlnk = jnp.diff(log_k)
+        return 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    cls = []
+    for l in l_values:
+        cl = compute_clpp_single_l(l)
+        cls.append(cl)
+    return jnp.array(cls)
+
+
+
+
 def compute_cl_pp_limber(
     pt: PerturbationResult,
     params: CosmoParams,
