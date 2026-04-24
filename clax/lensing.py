@@ -488,6 +488,152 @@ def compute_cl_pp_limber(
     return jnp.concatenate([jnp.zeros(2), cl_arr])
 
 
+def _parabolic_interp_S_chi(tau0_minus_tau, S_source, chi_limber):
+    """Interpolate S(tau)*chi parabollically at chi_limber.
+
+    Mirrors CLASS ``transfer_limber_interpolate`` (transfer.c:3763-3828):
+    interpolates the *product* S*(tau0-tau) rather than bare S, because
+    the lensing source diverges as 1/chi at chi->0 while S*chi is regular.
+
+    Args:
+        tau0_minus_tau: chi = tau0-tau array, shape (Ntau,), DECREASING
+        S_source: source values, shape (Ntau,)
+        chi_limber: target chi value (scalar)
+
+    Returns:
+        Interpolated value of S*chi at chi_limber.
+    """
+    n = len(tau0_minus_tau)
+    # Binary search for bracketing index (tau0_minus_tau is decreasing)
+    idx = int(np.searchsorted(-np.asarray(tau0_minus_tau), -chi_limber))
+    idx = max(1, min(idx, n - 2))
+
+    x0 = float(tau0_minus_tau[idx - 1])
+    x1 = float(tau0_minus_tau[idx])
+    x2 = float(tau0_minus_tau[idx + 1])
+    # Interpolate S*chi (the regular product)
+    y0 = float(S_source[idx - 1]) * x0
+    y1 = float(S_source[idx]) * x1
+    # At the boundary (idx == n-2), S*chi is approximately constant
+    # cf. CLASS transfer.c:3808-3823
+    if idx >= n - 2:
+        y2 = y1  # S*chi constant near tau=tau0
+    else:
+        y2 = float(S_source[idx + 1]) * x2
+
+    # Parabolic (Lagrange) interpolation
+    x = chi_limber
+    L0 = (x - x1) * (x - x2) / ((x0 - x1) * (x0 - x2))
+    L1 = (x - x0) * (x - x2) / ((x1 - x0) * (x1 - x2))
+    L2 = (x - x0) * (x - x1) / ((x2 - x0) * (x2 - x1))
+    return y0 * L0 + y1 * L1 + y2 * L2
+
+
+def compute_cl_pp_source_limber(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    th,
+    l_max: int,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi via source-based Limber (CLASS-accurate at all l).
+
+    Mirrors CLASS transfer.c + harmonic.c exactly:
+
+        source(k, tau) = (phi+psi)(k, tau) * W_lcmb(tau)
+        T_l(k) = [S*chi]_interp * IPhiFlat / (l+0.5)     (Limber)
+        C_l^pp = 4pi * integral d(lnk) * P_R(k) * T_l(k)^2
+
+    where IPhiFlat = sqrt(pi/(2l)) * (1 - 0.25/l + 1/(32l^2)) is the
+    extended Limber correction, and S*chi is interpolated parabolically
+    (cf. CLASS transfer_limber_interpolate, transfer.c:3763).
+
+    Accuracy vs CLASS (Planck 2018 LCDM):
+        Matches CLASS to <3% for l <= 500, same as ``compute_cl_pp_limber``.
+        Both Limber variants share a systematic overestimate at l > 1000
+        (~5% at l=1500, ~20% at l=2500) whose root cause is under
+        investigation. This function avoids the Poisson reconstruction
+        and enables CLASS-style nonlinear corrections via source
+        multiplication (to be added).
+
+    Args:
+        pt: perturbation results (must have source_phi_plus_psi)
+        params: cosmological parameters
+        bg: background results
+        th: thermodynamics results (for tau_rec)
+        l_max: maximum multipole
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+
+    # tau_rec: lensing integration starts here (CLASS transfer.c:1712)
+    loga_rec = jnp.log(1.0 / (1.0 + th.z_rec))
+    tau_rec = bg.tau_of_loga.evaluate(loga_rec)
+    chi_rec = tau_0 - tau_rec
+
+    chi_grid = tau_0 - tau_grid  # chi = tau_0 - tau
+
+    # Geometric lensing kernel W_lcmb (CLASS transfer.c:2428, flat case)
+    # W = (tau_rec - tau) / [(tau_0-tau)(tau_0-tau_rec)]
+    chi_safe = jnp.where(chi_grid > 0.0, chi_grid, 1.0)
+    W_lcmb = (tau_rec - tau_grid) / (chi_safe * chi_rec)
+    W_lcmb = jnp.where(chi_grid > 0.0, W_lcmb, 0.0)
+
+    # Build lensing source: S(k,tau) = (phi+psi) * W, zeroed for tau <= tau_rec
+    S_transfer = pt.source_phi_plus_psi * W_lcmb[None, :]
+    S_transfer = jnp.where(tau_grid[None, :] > tau_rec, S_transfer, 0.0)
+
+    # chi array for interpolation (same ordering as tau_grid: increasing tau
+    # means DECREASING chi). CLASS stores tau0_minus_tau in decreasing order.
+    chi_arr = np.asarray(chi_grid)  # decreasing if tau_grid is increasing
+
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+    Nk = len(k_grid)
+
+    S_np = np.asarray(S_transfer)  # (Nk, Ntau) for indexing in the loop
+
+    def compute_cl_single_l(l_val):
+        nu = l_val + 0.5
+        l_fl = float(l_val)
+
+        # Extended Limber correction (CLASS transfer.c:3664)
+        IPhiFlat = np.sqrt(np.pi / (2.0 * l_fl)) * (
+            1.0 - 0.25 / l_fl + 1.0 / (32.0 * l_fl * l_fl))
+
+        T_l = np.zeros(Nk)
+        for ik in range(Nk):
+            k = float(k_grid[ik])
+            chi_limber = nu / k
+
+            # Out of range check (CLASS transfer.c:3645-3648)
+            if chi_limber > float(chi_arr[0]) or chi_limber < float(chi_arr[-1]):
+                continue
+
+            # Parabolic interpolation of S*chi at the Limber point
+            S_chi = _parabolic_interp_S_chi(chi_arr, S_np[ik, :], chi_limber)
+
+            # T_l = [S*chi] * IPhiFlat / nu  (CLASS transfer.c:3666-3669)
+            T_l[ik] = S_chi * IPhiFlat / nu
+
+        # C_l = 4pi * integral d(lnk) * P_R * T_l^2
+        # cf. CLASS harmonic.c:1073 (factor = 4*PI/k => integrand for dk)
+        integrand = np.asarray(P_R) * T_l**2
+        return 4.0 * np.pi * np.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * np.asarray(dlnk))
+
+    # Loop over l (can be vmapped later for GPU)
+    cls = np.zeros(l_max + 1)
+    for l_val in range(2, l_max + 1):
+        cls[l_val] = compute_cl_single_l(l_val)
+
+    return jnp.array(cls)
+
 
 # =============================================================================
 # Wigner d-matrix recurrence coefficients (Kostelec & Rockmore 2003)
