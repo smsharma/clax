@@ -155,3 +155,33 @@ class TestSourceLimberPositivity:
         for l in range(10, 500):
             assert cl[l] >= cl[l + 1], (
                 f"Not decreasing: C_l({l})={cl[l]:.4e} < C_l({l+1})={cl[l+1]:.4e}")
+
+
+class TestSourceLimberJaxCompat:
+    """JIT compilation and automatic differentiation."""
+
+    def test_jit_compatible(self, pipeline):
+        """Function compiles under jax.jit."""
+        from clax.lensing import compute_cl_pp_source_limber
+        params, bg, th, pt = pipeline
+        cl_jit = jax.jit(compute_cl_pp_source_limber, static_argnums=(4,))(
+            pt, params, bg, th, 50)
+        assert cl_jit.shape == (51,)
+        assert float(cl_jit[2]) > 0
+
+    def test_grad_wrt_ln10As(self, pipeline):
+        """jax.grad through ln10A_s gives finite nonzero gradient."""
+        from clax.lensing import compute_cl_pp_source_limber
+        _, bg, th, pt = pipeline
+
+        def objective(params):
+            cl = compute_cl_pp_source_limber(pt, params, bg, th, l_max=30)
+            return jnp.sum(cl[2:])
+
+        from clax import CosmoParams
+        params = CosmoParams()
+        grad = jax.grad(objective)(params)
+        g_As = grad.ln10A_s
+        print(f"  d(sum Cl)/d(ln10As) = {g_As:.6e}")
+        assert jnp.isfinite(g_As), f"Gradient is not finite: {g_As}"
+        assert abs(g_As) > 0, "Gradient is zero"
