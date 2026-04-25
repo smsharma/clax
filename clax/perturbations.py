@@ -41,7 +41,7 @@ from jaxtyping import Array, Float
 from clax import constants as const
 from clax.background import BackgroundResult
 from clax.interpolation import CubicSpline
-from clax.ode import _get_adjoint
+from clax.ode import _get_adjoint, _get_stiff_solver
 from clax.params import CosmoParams, PrecisionParams
 from clax.thermodynamics import ThermoResult
 
@@ -159,6 +159,57 @@ def _make_scalar_pid_controller(
         rtol=prec.pt_ode_rtol,
         atol=prec.pt_ode_atol,
         norm=lambda err: _scalar_pid_filtered_rms_norm(err, filter_indices, filter_weights),
+        pcoeff=config.pcoeff,
+        icoeff=config.icoeff,
+        dcoeff=config.dcoeff,
+        factormax=config.factormax,
+        factormin=config.factormin,
+    )
+
+
+def _scalar_pid_filtered_rms_norm_batched(
+    x,
+    filter_indices: jnp.ndarray,
+    filter_weights_batch: jnp.ndarray,
+):
+    """Batched filtered RMS norm — single scalar from ``(batch_size, n_eq)`` error.
+
+    Selects filtered variables per mode, applies k-dependent weights, then
+    flattens everything into one vector and returns its RMS.  This ensures
+    the shared step size is controlled by the worst-case error across the
+    batch.
+
+    cf. DISCO-EB ``rms_norm_filtered_batched``
+    """
+    # x is (batch_size, n_eq) — select and weight per mode
+    xs_weighted = jax.vmap(
+        lambda x_single, w: x_single[filter_indices] * w,
+        (0, 0),
+    )(x, filter_weights_batch)  # (batch_size, n_filter)
+    return _rms_norm_safe(xs_weighted.ravel())
+
+
+def _make_scalar_pid_controller_batched(
+    *,
+    prec: PrecisionParams,
+    k_batch,
+    idx,
+    config: PerturbationPIDControllerConfig,
+):
+    """Construct PID controller for the batched Rosenbrock solver.
+
+    Pre-computes per-mode k-dependent filter weights and returns a
+    controller whose norm collapses the ``(batch_size, n_eq)`` error
+    estimate to a single scalar.
+    """
+    filter_indices = _scalar_pid_filtered_variable_indices(idx)
+    filter_weights_batch = jax.vmap(_scalar_pid_filtered_variable_weights)(k_batch)
+    return diffrax.PIDController(
+        rtol=prec.pt_ode_rtol,
+        atol=prec.pt_ode_atol,
+        norm=lambda err: _scalar_pid_filtered_rms_norm_batched(
+            err, filter_indices, filter_weights_batch,
+        ),
         pcoeff=config.pcoeff,
         icoeff=config.icoeff,
         dcoeff=config.dcoeff,
@@ -430,7 +481,7 @@ class PerturbationResult:
     source_T1: Float[Array, "Nk Ntau"]   # Temperature dipole source (ISW dipole)
     source_T2: Float[Array, "Nk Ntau"]   # Temperature quadrupole source (g*Pi)
     source_E: Float[Array, "Nk Ntau"]    # E-polarization source
-    source_lens: Float[Array, "Nk Ntau"]  # Lensing potential source
+    source_lens: Float[Array, "Nk Ntau"]  # Lensing potential source (exp(-kappa)*2*phi)
     delta_m: Float[Array, "Nk Ntau"]     # Total matter density contrast
 
     # Decomposed T0 subterms for diagnostics
@@ -443,6 +494,9 @@ class PerturbationResult:
     source_Doppler_nonIBP: Float[Array, "Nk Ntau"]  # g*theta_b_shifted/k (uses j_l' radial)
     source_T0_noDopp: Float[Array, "Nk Ntau"]       # SW + ISW (no Doppler)
 
+    # Weyl potential (phi+psi) in synchronous gauge (eta + alpha_prime)
+    source_phi_plus_psi: Float[Array, "Nk Ntau"]
+
     def tree_flatten(self):
         return [
             self.k_grid, self.tau_grid,
@@ -450,6 +504,7 @@ class PerturbationResult:
             self.source_E, self.source_lens, self.delta_m,
             self.source_SW, self.source_ISW_vis, self.source_ISW_fs, self.source_Doppler,
             self.source_Doppler_nonIBP, self.source_T0_noDopp,
+            self.source_phi_plus_psi,
         ], None
 
     @classmethod
@@ -1605,8 +1660,14 @@ def _extract_sources(y, k, tau, bg, th, idx, params,
     # Our harmonic.py has E_l = sqrt((l+2)(l+1)l(l-1)) * int source_E * j_l/(kchi)^2 dtau
     source_E = 3.0 * g * Pi_src / 16.0
 
-    # Lensing potential source
+    # Lensing potential source (visibility-weighted, for backward compatibility)
     source_lens = exp_m_kappa * 2.0 * phi_newt
+
+    # Weyl potential (phi+psi) in synchronous gauge, without exp(-kappa).
+    # CLASS perturbations.c:7754-7756 (synchronous gauge):
+    #   source_phi_plus_psi = y[index_pt_eta] + pvecmetric[index_mt_alpha_prime]
+    # The geometric lensing kernel is applied in compute_cl_pp_transfer.
+    source_phi_plus_psi = eta + alpha_prime
 
     # Matter density contrast (for P(k))
     # Include ncdm when hierarchy is active (n_q > 0) to match CLASS P_m(k)
@@ -1617,7 +1678,7 @@ def _extract_sources(y, k, tau, bg, th, idx, params,
 
     return (source_T0, source_T1, source_T2, source_E, source_lens, delta_m,
             source_SW, source_ISW_vis, source_ISW_fs, source_Doppler,
-            source_Doppler_nonIBP, source_T0_noDopp)
+            source_Doppler_nonIBP, source_T0_noDopp, source_phi_plus_psi)
 
 
 def _extract_delta_m(
@@ -1940,7 +2001,7 @@ def _perturbations_solve_impl(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_perturbation_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=tau_max,
             dt0=tau_ini * 0.1,
@@ -1981,6 +2042,7 @@ def _perturbations_solve_impl(
         source_Doppler=all_sources[9],
         source_Doppler_nonIBP=all_sources[10],
         source_T0_noDopp=all_sources[11],
+        source_phi_plus_psi=all_sources[12],
     )
 
 
@@ -2009,6 +2071,94 @@ def perturbations_solve_mpk(
         pt_pid_factormin=pt_pid_factormin,
     )
     return _perturbations_solve_mpk_impl(params, prec, bg, th, pid_config)
+
+
+def _solve_mpk_batched_rosenbrock(
+    k_grid, batch_size, tau_ini, tau_max, tau_grid, n_tau, n_eq,
+    bg, th, params, prec, idx, pid_config, args_ncdm,
+    l_max_g, l_max_pol, l_max_ur,
+    ncdmfa_mode_code, ncdmfa_trigger,
+):
+    """Solve the mPk perturbation system using ``Rodas5Batched``.
+
+    Each chunk of ``batch_size`` k-modes is solved in a single
+    ``diffeqsolve`` call with shared time-stepping.
+    """
+    from clax.rosenbrock import Rodas5Batched
+
+    q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm = args_ncdm
+    n_k = len(k_grid)
+
+    # Shared args captured in closure — only k varies per mode.
+    shared_args = (bg, th, params, idx, l_max_g, l_max_pol, l_max_ur,
+                   ncdmfa_mode_code, ncdmfa_trigger,
+                   q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
+
+    def f_single(t, y, k_scalar):
+        """Single-mode RHS for Jacobian computation by Rodas5Batched."""
+        return _perturbation_rhs(t, y, (k_scalar,) + shared_args)
+
+    def vf_batched(t, y_batch, args):
+        """Batched vector field: vmaps f_single over the batch dimension.
+
+        During diffrax's compatibility check ``args = (f, k_batch)``; during
+        actual solve ``args = k_batch`` (just the per-mode data).
+        cf. DISCO-EB perturbations.py:842-863
+        """
+        if isinstance(args, tuple) and len(args) == 2:
+            return jax.tree_util.tree_map(jnp.zeros_like, y_batch)
+        return jax.vmap(f_single, in_axes=(None, 0, 0))(t, y_batch, args)
+
+    def solve_batch(k_batch):
+        """Solve one batch of k-modes with shared stepping."""
+        y0_batch = jax.vmap(
+            lambda ki: _adiabatic_ic(ki, jnp.array(tau_ini), bg, params, idx, n_eq,
+                                     args_ncdm=args_ncdm)
+        )(k_batch)
+
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vf_batched),
+            solver=Rodas5Batched(),
+            t0=tau_ini,
+            t1=tau_max,
+            dt0=tau_ini * 0.1,
+            y0=y0_batch,
+            saveat=diffrax.SaveAt(ts=tau_grid),
+            stepsize_controller=_make_scalar_pid_controller_batched(
+                prec=prec, k_batch=k_batch, idx=idx, config=pid_config,
+            ),
+            adjoint=diffrax.DirectAdjoint(),
+            max_steps=prec.ode_max_steps,
+            args=(f_single, k_batch),
+        )
+        # sol.ys: (n_tau, batch_size, n_eq)
+        # Extract delta_m for each (tau, k) pair.
+        def extract_at_tau(i):
+            return jax.vmap(
+                lambda y_single, ki: _extract_delta_m(
+                    y_single, ki, tau_grid[i], bg, idx,
+                    q_ncdm=q_ncdm, w_ncdm=w_ncdm, M_ncdm=M_ncdm,
+                    ncdmfa_mode_code=ncdmfa_mode_code,
+                    ncdmfa_trigger=ncdmfa_trigger,
+                ),
+                in_axes=(0, 0),
+            )(sol.ys[i], k_batch)
+
+        return jax.vmap(extract_at_tau)(jnp.arange(n_tau))  # (n_tau, batch_size)
+
+    # Pad to full chunks to avoid recompilation for the tail.
+    n_tail = n_k % batch_size
+    pad_size = (batch_size - n_tail) if n_tail > 0 else 0
+    k_padded = jnp.concatenate([k_grid, jnp.full(pad_size, k_grid[-1])])
+    k_chunks = k_padded.reshape(-1, batch_size)  # (n_chunks, batch_size)
+
+    # solve_batch returns (n_tau, batch_size);
+    # lax.map stacks to (n_chunks, n_tau, batch_size).
+    all_delta_m = jax.lax.map(solve_batch, k_chunks)
+    # Reshape to (n_k, n_tau) matching the unbatched path.
+    all_delta_m = jnp.transpose(all_delta_m, (0, 2, 1))   # (n_chunks, batch_size, n_tau)
+    all_delta_m = all_delta_m.reshape(-1, n_tau)[:n_k]     # (n_k, n_tau)
+    return all_delta_m
 
 
 def _perturbations_solve_mpk_impl(
@@ -2043,7 +2193,7 @@ def _perturbations_solve_mpk_impl(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_perturbation_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=tau_max,
             dt0=tau_ini * 0.1,
@@ -2067,7 +2217,16 @@ def _perturbations_solve_mpk_impl(
         n_outputs=_pt_saved_output_count(solve_kind="mpk"),
         solve_kind="mpk",
     )
-    all_delta_m = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
+
+    if prec.pt_ode_solver in ("rodas5", "rosenbrock", "rosenbrock_batched"):
+        all_delta_m = _solve_mpk_batched_rosenbrock(
+            k_grid, batch_size, tau_ini, tau_max, tau_grid, n_tau, n_eq,
+            bg, th, params, prec, idx, pid_config, args_ncdm,
+            l_max_g, l_max_pol, l_max_ur,
+            ncdmfa_mode_code, ncdmfa_trigger,
+        )
+    else:
+        all_delta_m = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
 
     return MatterPerturbationResult(k_grid=k_grid, tau_grid=tau_grid, delta_m=all_delta_m)
 
@@ -2104,7 +2263,7 @@ def _matter_delta_m_single_k_impl(
                 q_ncdm, w_ncdm, M_ncdm, dlnf0_ncdm)
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(_perturbation_rhs),
-        solver=diffrax.Kvaerno5(),
+        solver=_get_stiff_solver(prec.pt_ode_solver),
         t0=tau_ini,
         t1=tau_end,
         dt0=tau_ini * 0.1,
@@ -2545,7 +2704,7 @@ def tensor_perturbations_solve(
 
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(_tensor_rhs),
-            solver=diffrax.Kvaerno5(),
+            solver=_get_stiff_solver(prec.pt_ode_solver),
             t0=tau_ini,
             t1=bg.conformal_age * 0.999,
             dt0=tau_ini * 0.1,

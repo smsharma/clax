@@ -5,6 +5,50 @@
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.**
 
+### Apr 20, 2026: Rodas5 Rosenbrock solver + dark energy perturbations + accuracy fixes
+
+**Added an alternative Rosenbrock ODE solver (Rodas5) for the perturbation
+system, fixed a ~3.5% P(k) offset for w0-wa dark energy, and resolved three
+pre-existing test failures.**
+
+**Changes:**
+
+1. **Rodas5 solver** (`clax/rosenbrock.py`): 8-stage order-5(4) Rosenbrock method
+   using the transformed W-formulation. Avoids Newton iteration — one LU
+   factorization per step + 8 back-substitutions. Two variants:
+   - `Rodas5` — single-mode solver (Diffrax `AbstractAdaptiveSolver`)
+   - `Rodas5Batched` — solves a batch of k-modes with shared time-stepping;
+     internally vmaps Jacobian, LU, and back-substitution over the batch dim.
+
+2. **User-facing API**: `PrecisionParams(pt_ode_solver="rodas5")` selects the
+   Rosenbrock solver. The code automatically uses `Rodas5Batched` for table
+   solves (`compute_pk_table`) and unbatched `Rodas5` for single-k
+   (`compute_pk`). Default remains `"kvaerno5"`.
+
+3. **Dark energy fluid perturbations** (`clax/perturbations.py`): Added
+   standard fluid equations for CPL (w0-wa) dark energy — δ_fld and θ_fld
+   in the state vector, adiabatic initial conditions, evolution equations,
+   and contributions to the Einstein constraint equations. Fixes a ~3.5%
+   k-independent P(k) offset at w0=-0.9, wa=0.1 (now <0.6%).
+
+4. **Filtered PID norm for P(k) paths**: The `compute_pk` / `compute_pk_table`
+   paths now use the same DISCO-EB-style k-weighted filtered RMS norm as the
+   C_l path, preventing low-k accuracy blowups with Rodas5 at loose tolerances.
+
+5. **Test fixes**: Resolved three pre-existing failures — lensing TE
+   zero-crossing guard, w0_fld→w0 parameter name, ncdm fluid switch
+   divergence workaround.
+
+**Benchmark (CPU, fit_cl, 15 k-modes pk_table):**
+
+| Solver | Time | Max err vs CLASS |
+|--------|------|------------------|
+| Kvaerno5 | 1.05s | 1.40% |
+| Rodas5 (unbatched) | 1.27s | 1.40% |
+| Rodas5Batched | 0.77s | 1.40% |
+
+**Validation:** All 133 tests pass, 3 skipped.
+
 ### Apr 11, 2026: Step-3 gradient workload split made explicit for practical multi-`k` use
 
 **Practical reverse-mode `P(k)` work is now documented and smoke-tested on the reusable table path instead of being left implicit in the test layout.**

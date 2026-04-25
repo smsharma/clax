@@ -84,6 +84,455 @@ def compute_cl_pp(
     return jnp.array(cls)
 
 
+def compute_cl_pp_fast(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    l_max: int,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi for l=0..l_max via a single lax.scan over l.
+
+    Fuses the upward Bessel recurrence with the tau-integral: at each l-step,
+    advance j_l via ``(2l+1)/x * j_l - j_{l-1}``, contract with
+    ``source_lens * dtau`` to get T_l(k), then assemble C_l.  The carry is
+    only two (Nk, Ntau) arrays, so memory is O(Nk * Ntau) regardless of l_max.
+
+    This replaces the Python for-loop + per-point ``spherical_jl`` in
+    ``compute_cl_pp`` with a single compiled ``lax.scan``.
+
+    Args:
+        pt: perturbation results (source functions, k/tau grids)
+        params: cosmological parameters
+        bg: background results
+        l_max: maximum multipole (returns C_l for l=0..l_max)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.bessel import _j0, _j1
+
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+    chi_grid = tau_0 - tau_grid
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    S_dtau = pt.source_lens * dtau_mid[None, :]  # (Nk, Ntau)
+
+    # x = k * chi for all (k, tau) pairs
+    x_grid = k_grid[:, None] * chi_grid[None, :]  # (Nk, Ntau)
+    x_safe = jnp.where(jnp.abs(x_grid) < 1e-30, 1e-30, x_grid)
+
+    # j_0 and j_1 at all (k, tau) points
+    j0 = _j0(x_grid)
+    j1 = _j1(x_grid)
+
+    # C_l from T_l(k) via trapezoidal k-integration
+    def _cl_from_Tl(T_l, l_fl):
+        prefactor = (2.0 / (l_fl * (l_fl + 1.0)))**2
+        integrand = P_R * T_l**2
+        return prefactor * 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    # Scan: at each step advance j_l -> j_{l+1}, contract with S*dtau -> T
+    def scan_fn(carry, l_curr):
+        j_prev, j_curr = carry
+        l_fl = l_curr.astype(jnp.float64)
+        j_next = (2.0 * l_fl + 1.0) / x_safe * j_curr - j_prev
+        # Zero classically forbidden region to prevent overflow
+        j_next = jnp.where(jnp.abs(x_grid) < 0.7 * (l_fl + 1.0), 0.0, j_next)
+        j_next = jnp.clip(j_next, -1.0, 1.0)
+        T_next = jnp.sum(S_dtau * j_next, axis=1)
+        cl = _cl_from_Tl(T_next, l_fl + 1.0)
+        return (j_curr, j_next), cl
+
+    _, cl_2_to_lmax = jax.lax.scan(
+        scan_fn, (j0, j1), jnp.arange(1, l_max))
+
+    # l=0,1 have no lensing contribution
+    return jnp.concatenate([jnp.zeros(2), cl_2_to_lmax])
+
+
+def compute_cl_pp_vmap(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    l_max: int,
+    n_x: int = 50000,
+    x_max: float = 15000.0,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi for l=2..l_max using precomputed Bessel tables + vmap.
+
+    Precomputes j_l(x) and j_l'(x) on a 1-D x-grid for a sparse set of
+    l-values (backward + upward recurrence, blended), then evaluates all l
+    in parallel via ``jax.vmap`` with cubic Hermite interpolation.
+    GPU-optimal: the l-dimension is fully parallel.
+
+    Uses the same ``build_jl_table`` infrastructure as
+    ``harmonic.compute_cls_all_fast``, with 4th-order Hermite interpolation
+    (matching CLASS's Bessel table lookup) for sub-percent accuracy.
+
+    Args:
+        pt: perturbation results (source functions, k/tau grids)
+        params: cosmological parameters
+        bg: background results
+        l_max: maximum multipole (returns C_l for l=0..l_max)
+        n_x: Bessel table x-grid points (default 50000)
+        x_max: maximum x in table (default 15000)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.bessel import build_jl_table, sparse_l_grid
+
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+    chi_grid = tau_0 - tau_grid
+    n_k = k_grid.shape[0]
+    n_tau = tau_grid.shape[0]
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    dlnk = jnp.diff(log_k)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    S_dtau = pt.source_lens * dtau_mid[None, :]  # (Nk, Ntau)
+
+    # 1. Build Bessel table (j_l AND j_l') on sparse l-grid
+    x_max_auto = float(jnp.max(k_grid) * tau_0 * 1.05)
+    x_max_use = max(x_max, x_max_auto)
+    n_x_use = max(n_x, int(x_max_use * 3))
+    x_table, jl_table, jlp_table = build_jl_table(
+        l_max, n_x=n_x_use, x_max=x_max_use)
+    n_x_actual = x_table.shape[0]
+    h_table = x_max_use / (n_x_actual - 1)  # uniform spacing
+
+    # 2. Precompute interpolation indices for x_query = k * chi
+    x_query = k_grid[:, None] * chi_grid[None, :]  # (Nk, Ntau)
+    x_flat = x_query.flatten()
+
+    idx_right = jnp.searchsorted(x_table, x_flat)
+    idx_left = jnp.clip(idx_right - 1, 0, n_x_actual - 2)
+    idx_right_safe = jnp.clip(idx_right, 1, n_x_actual - 1)
+    dx = x_table[idx_right_safe] - x_table[idx_left]
+    dx_safe = jnp.where(dx < 1e-30, 1e-30, dx)
+    t = jnp.clip((x_flat - x_table[idx_left]) / dx_safe, 0.0, 1.0)
+
+    # Cubic Hermite basis polynomials (4th-order, uses j_l and j_l')
+    # H(t) = f_i h00 + f'_i h * h10 + f_{i+1} h01 + f'_{i+1} h * h11
+    # cf. CLASS transfer.c Hermite interpolation for Bessel tables
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0   # Hermite basis for f(x_i)
+    h10 = t3 - 2.0 * t2 + t             # Hermite basis for f'(x_i) * h
+    h01 = -2.0 * t3 + 3.0 * t2          # Hermite basis for f(x_{i+1})
+    h11 = t3 - t2                        # Hermite basis for f'(x_{i+1}) * h
+
+    # 3. vmap over sparse l: Hermite table lookup → T_l(k) → C_l
+    l_sparse = sparse_l_grid(l_max)
+    l_sparse_fl = jnp.array(l_sparse, dtype=jnp.float64)
+
+    def _single_l_cl(l_idx):
+        """Compute C_l^pp for one l-index via Hermite table lookup."""
+        l_fl = l_sparse_fl[l_idx]
+        # Cubic Hermite interpolation from j_l and j_l' tables
+        fl = jl_table[l_idx, idx_left]
+        fr = jl_table[l_idx, idx_right_safe]
+        dfl = jlp_table[l_idx, idx_left]
+        dfr = jlp_table[l_idx, idx_right_safe]
+        jl_flat = fl * h00 + dfl * h_table * h10 + fr * h01 + dfr * h_table * h11
+        jl_2d = jl_flat.reshape(n_k, n_tau)
+
+        # T_l(k) = sum_tau S * j_l * dtau
+        T_l = jnp.sum(S_dtau * jl_2d, axis=1)  # (Nk,)
+
+        # C_l = [2/(l(l+1))]^2 * 4pi * integral dlnk P_R T_l^2
+        prefactor = (2.0 / (l_fl * (l_fl + 1.0)))**2
+        integrand = P_R * T_l**2
+        return prefactor * 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    cl_sparse = jax.vmap(_single_l_cl)(jnp.arange(len(l_sparse)))
+
+    # 4. Spline-interpolate sparse C_l to all l=0..l_max
+    from clax.interpolation import CubicSpline
+    l_sparse_log = jnp.log(l_sparse_fl)
+    cl_sparse_safe = jnp.maximum(cl_sparse, 1e-100)
+    log_cl_spline = CubicSpline(l_sparse_log, jnp.log(cl_sparse_safe))
+
+    l_all = jnp.arange(2, l_max + 1, dtype=jnp.float64)
+    log_cl_all = log_cl_spline.evaluate(jnp.log(l_all))
+    cl_all = jnp.exp(log_cl_all)
+
+    return jnp.concatenate([jnp.zeros(2), cl_all])
+
+
+
+def compute_cl_pp_transfer(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    th,
+    l_values: Float[Array, "Nl"],
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi via the full Bessel transfer function integral.
+
+    Mirrors CLASS transfer.c:2428 + harmonic.c:1073-1108 exactly:
+
+        source(k, tau) = (phi+psi)(k, tau) * W_lcmb(tau)
+        T_l(k) = integral_{tau>tau_rec} dtau * source * j_l(k*chi)
+        C_l^pp = 4pi * integral d(lnk) * P_R(k) * T_l(k)^2
+
+    Three bugs in the original ``compute_cl_pp`` are fixed:
+    1. Source: uses ``source_phi_plus_psi`` (eta + alpha_prime) with
+       the geometric kernel, not ``exp(-kappa) * 2*phi``
+    2. No ``[2/(l(l+1))]^2`` prefactor — CLASS stores C_l^pp directly
+    3. Integration starts at tau_rec (CLASS transfer.c:1712)
+
+    Args:
+        pt: perturbation results (must have source_phi_plus_psi)
+        params: cosmological parameters
+        bg: background results
+        th: thermodynamics results (for tau_rec)
+        l_values: multipoles at which to evaluate
+
+    Returns:
+        C_l^phiphi at each l in l_values
+    """
+    tau_grid = pt.tau_grid
+    k_grid = pt.k_grid
+    tau_0 = bg.conformal_age
+
+    # tau_rec: start of lensing integration (CLASS transfer.c:1712)
+    loga_rec = jnp.log(1.0 / (1.0 + th.z_rec))
+    tau_rec = bg.tau_of_loga.evaluate(loga_rec)
+
+    chi_grid = tau_0 - tau_grid
+    chi_rec = tau_0 - tau_rec
+
+    # Geometric lensing kernel: W = (tau_rec - tau) / [(tau_0-tau)(tau_0-tau_rec)]
+    # cf. CLASS transfer.c:2428 (flat geometry)
+    chi_nonzero = jnp.where(chi_grid > 0.0, chi_grid, 1.0)
+    W_lcmb = (tau_rec - tau_grid) / (chi_nonzero * chi_rec)
+    W_lcmb = jnp.where(chi_grid > 0.0, W_lcmb, 0.0)
+
+    # Build transfer source: (phi+psi) * W, zeroed for tau <= tau_rec
+    # (CLASS transfer.c:1712 discards times before recombination)
+    S_transfer = pt.source_phi_plus_psi * W_lcmb[None, :]
+    S_transfer = jnp.where(tau_grid[None, :] > tau_rec, S_transfer, 0.0)
+
+    dtau = jnp.diff(tau_grid)
+    dtau_mid = jnp.concatenate([dtau[:1], (dtau[:-1] + dtau[1:]) / 2, dtau[-1:]])
+    log_k = jnp.log(k_grid)
+    P_R = primordial_scalar_pk(k_grid, params)
+
+    def compute_clpp_single_l(l):
+        l_int = int(l)
+        l_fl = jnp.float64(l)
+
+        def transfer_single_k(ik):
+            k = k_grid[ik]
+            x = k * chi_grid
+            jl = spherical_jl(l_int, x)
+            return jnp.sum(S_transfer[ik, :] * jl * dtau_mid)
+
+        T_l = jax.vmap(transfer_single_k)(jnp.arange(len(k_grid)))
+        # No [2/(l(l+1))]^2 prefactor — CLASS stores C_l^pp directly
+        # cf. CLASS harmonic.c:1073 (factor = 4*PI/k for all spectra)
+        integrand = P_R * T_l**2
+        dlnk = jnp.diff(log_k)
+        return 4.0 * jnp.pi * jnp.sum(
+            0.5 * (integrand[:-1] + integrand[1:]) * dlnk)
+
+    cls = []
+    for l in l_values:
+        cl = compute_clpp_single_l(l)
+        cls.append(cl)
+    return jnp.array(cls)
+
+
+
+
+def compute_cl_pp_limber(
+    pt: PerturbationResult,
+    params: CosmoParams,
+    bg: BackgroundResult,
+    th,
+    l_max: int,
+    n_chi: int = 500,
+    nonlinear: bool = False,
+) -> Float[Array, "Nl"]:
+    """Compute C_l^phiphi via the Limber approximation and Poisson equation.
+
+    Uses the ABCMB approach (Zhou, Giovanetti & Liu, arXiv:2602.15104, Eq.B.24-B.25):
+
+        P_psi(k, z) = 9/(8 pi^2) * Omega_m(z)^2 * (aH)^4 * P(k,z) / k
+
+        C_l^pp = 8 pi^2 / (l+0.5)^3 * integral d(ln a) * chi/aH * W^2 * P_psi
+
+    where W(chi) = (chi_* - chi) / (chi_* chi) is the geometric lensing kernel,
+    ``aH`` is the conformal Hubble rate, and the Limber substitution
+    k = (l+0.5)/chi is applied.
+
+    When ``nonlinear=True``, P(k,z) is replaced by the Halofit nonlinear
+    P_NL(k,z) at each integration point via ``compute_pk_nonlinear``.
+    Requires ``pt.k_grid`` to extend to k >= 5 Mpc^-1 (matching CLASS's
+    ``nonlinear_min_k_max``).  At high z where sigma(R) < 1, the NL
+    correction is automatically skipped (cf. CLASS fourier.c:1706-1716).
+
+    Args:
+        pt: perturbation results (for P(k,z) evaluation via delta_m)
+        params: cosmological parameters
+        bg: background results
+        th: thermodynamics results (for z_rec / tau_rec)
+        l_max: maximum multipole
+        n_chi: number of integration points (default 500)
+        nonlinear: if True, use Halofit P_NL(k,z) instead of P_lin(k,z)
+
+    Returns:
+        C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
+    """
+    from clax.interpolation import CubicSpline as CS
+
+    tau_0 = bg.conformal_age
+    loga_rec = jnp.log(1.0 / (1.0 + th.z_rec))
+    tau_rec = bg.tau_of_loga.evaluate(loga_rec)
+    chi_star = tau_0 - tau_rec
+
+    Omega_m_0 = bg.Omega_b + bg.Omega_cdm + bg.Omega_ncdm
+    H0 = bg.H0  # 1/Mpc
+
+    # Integration grid in ln(a) from recombination to today
+    lna_rec = float(loga_rec)
+    lna_grid = jnp.linspace(lna_rec, 0.0, n_chi)
+    a_grid = jnp.exp(lna_grid)
+    z_grid = 1.0 / a_grid - 1.0
+
+    # Background quantities
+    tau_grid_int = bg.tau_of_loga.evaluate(lna_grid)
+    chi_grid = tau_0 - tau_grid_int
+    H_grid = bg.H_of_loga.evaluate(lna_grid)  # cosmic H(z) in 1/Mpc
+    aH_grid = a_grid * H_grid                  # conformal Hubble
+
+    # Omega_m(z) = Omega_m * (1+z)^3 / (H/H0)^2
+    Om_z_grid = Omega_m_0 * (1.0 + z_grid)**3 / (H_grid / H0)**2
+
+    # Lensing window W(chi) = (chi_* - chi) / (chi_* * chi)
+    chi_safe = jnp.where(chi_grid > 1.0, chi_grid, 1.0)
+    W_grid = jnp.where(chi_grid > 1.0,
+                        (chi_star - chi_grid) / (chi_star * chi_safe), 0.0)
+
+    # l-independent background factor:
+    # bg_part = chi / aH * W^2 * 9/(8pi^2) * Om_z^2 * aH^4
+    bg_part = (chi_grid / aH_grid * W_grid**2
+               * 9.0 / (8.0 * jnp.pi**2) * Om_z_grid**2 * aH_grid**4)
+
+    # Perturbation grid for delta_m interpolation
+    log_k_pt = jnp.log(pt.k_grid)
+    k_min = float(pt.k_grid[0])
+    k_max = float(pt.k_grid[-1])
+    delta_m_table = pt.delta_m  # (Nk_pt, Ntau_pt)
+    tau_pt = pt.tau_grid
+
+    l_arr = jnp.arange(2, l_max + 1, dtype=jnp.float64)
+    n_l = l_max - 1
+    dlna = jnp.diff(lna_grid)
+
+    # Precompute NL ratio P_NL/P_lin on the perturbation k-grid at each chi.
+    # Requires k_max >= 5 Mpc^-1 for Halofit sigma(R) convergence
+    # (cf. CLASS precisions.h: nonlinear_min_k_max = 5.0).
+    nl_ratio_spline_at_tau = {}
+    if nonlinear:
+        from clax.nonlinear import compute_pk_nonlinear, _sigma_convergence_check
+        k_max_grid = float(pt.k_grid[-1])
+        if k_max_grid < 4.5:
+            raise ValueError(
+                f"nonlinear=True requires pt_k_max_cl >= 5.0 Mpc^-1 "
+                f"(got k_max={k_max_grid:.2f}). Increase pt_k_max_cl "
+                f"in PrecisionParams for the lensing perturbation solve.")
+        Omega_lambda_0 = bg.Omega_lambda + bg.Omega_de
+        Omega_r_0 = bg.Omega_g + bg.Omega_ur
+        fnu = bg.Omega_ncdm / jnp.maximum(Omega_m_0, 1e-30)
+        ones_ratio = jnp.ones_like(pt.k_grid)
+        for i_chi in range(n_chi):
+            z_val = float(z_grid[i_chi])
+            tau_val = float(tau_grid_int[i_chi])
+            i_tau = int(jnp.argmin(jnp.abs(tau_pt - tau_val)))
+            dm_at_tau = delta_m_table[:, i_tau]
+            P_R_full = primordial_scalar_pk(pt.k_grid, params)
+            pk_lin_full = 2.0 * jnp.pi**2 / pt.k_grid**3 * P_R_full * dm_at_tau**2
+            # Skip Halofit at high z where sigma(R)<1
+            # (cf. CLASS fourier.c:1706-1716: nl_corr_density = 1.0)
+            if not _sigma_convergence_check(log_k_pt, pk_lin_full):
+                nl_ratio_spline_at_tau[i_chi] = CS(log_k_pt, ones_ratio)
+                continue
+            pk_nl_full = compute_pk_nonlinear(
+                pt.k_grid, pk_lin_full,
+                Omega_m_0=Omega_m_0, Omega_lambda_0=Omega_lambda_0,
+                Omega_r_0=Omega_r_0, w0=params.w0, wa=params.wa,
+                fnu=fnu, h=params.h, z=z_val)
+            ratio = jnp.where(pk_lin_full > 0, pk_nl_full / pk_lin_full, 1.0)
+            nl_ratio_spline_at_tau[i_chi] = CS(log_k_pt, ratio)
+
+    # Build integrand for all l: loop over chi, vectorize over l
+    integrand_all = jnp.zeros((n_l, n_chi))
+
+    for i_chi in range(n_chi):
+        chi_val = float(chi_grid[i_chi])
+        if chi_val < 1.0:
+            continue
+        bg_val = float(bg_part[i_chi])
+        if abs(bg_val) < 1e-50:
+            continue
+
+        # k_limber for all l at this chi
+        k_all_l = (l_arr + 0.5) / chi_val
+        valid = (k_all_l >= k_min) & (k_all_l <= k_max)
+
+        # Interpolate delta_m(k, tau) at nearest tau
+        tau_val = float(tau_grid_int[i_chi])
+        i_tau = int(jnp.argmin(jnp.abs(tau_pt - tau_val)))
+        dm_at_tau = delta_m_table[:, i_tau]
+
+        dm_spline = CS(log_k_pt, dm_at_tau)
+        log_k_eval = jnp.log(jnp.clip(k_all_l, k_min, k_max))
+        dm_interp = dm_spline.evaluate(log_k_eval)
+
+        P_R = primordial_scalar_pk(jnp.clip(k_all_l, k_min, k_max), params)
+        pk_vals = 2.0 * jnp.pi**2 / k_all_l**3 * P_R * dm_interp**2
+
+        # Apply Halofit nonlinear correction if requested
+        if nonlinear:
+            log_k_limber = jnp.log(jnp.clip(k_all_l, k_min, k_max))
+            nl_ratio_interp = nl_ratio_spline_at_tau[i_chi].evaluate(log_k_limber)
+            nl_ratio_vals = jnp.where(valid, jnp.maximum(nl_ratio_interp, 0.0), 1.0)
+            pk_vals = pk_vals * nl_ratio_vals
+
+        # Contribution: bg_part * pk / k
+        contrib = bg_val * pk_vals / k_all_l
+        contrib = jnp.where(valid, contrib, 0.0)
+        integrand_all = integrand_all.at[:, i_chi].set(contrib)
+
+    # Integrate over d(ln a) for each l
+    cl_arr = jnp.zeros(n_l)
+    for i_l in range(n_l):
+        l_fl = l_arr[i_l]
+        coeff = 8.0 * jnp.pi**2 / (l_fl + 0.5)**3
+        integ = integrand_all[i_l, :]
+        cl_arr = cl_arr.at[i_l].set(
+            coeff * jnp.sum(0.5 * (integ[:-1] + integ[1:]) * dlna))
+
+    return jnp.concatenate([jnp.zeros(2), cl_arr])
+
+
+
 # =============================================================================
 # Wigner d-matrix recurrence coefficients (Kostelec & Rockmore 2003)
 # cf. CLASS lensing.c:1256-1964

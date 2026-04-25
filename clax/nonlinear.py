@@ -185,6 +185,29 @@ def halofit_parameters(
 # HaloFit non-linear P(k) (Takahashi 2012 + Bird 2012)
 # ---------------------------------------------------------------------------
 
+def _sigma_convergence_check(lnk, pk):
+    """Check whether the k-grid supports sigma(R) = 1 for Halofit.
+
+    CLASS requires k_max >= nonlinear_min_k_max (default 5 h/Mpc) and
+    does NOT extrapolate beyond the perturbation k-grid.  When the grid
+    is too narrow for sigma(R) to reach 1, CLASS sets nl_corr = 1.0
+    (no nonlinear correction).  cf. fourier.c:1597-1716.
+
+    Args:
+        lnk: log wavenumbers, shape (N,)
+        pk: linear P(k) [Mpc^3], shape (N,)
+
+    Returns:
+        True if sigma(R_min) >= 1 (Halofit is computable), False otherwise.
+    """
+    k_max = float(jnp.exp(lnk[-1]))
+    # Smallest R the Gaussian window can probe on this grid
+    # exp(-(k_max * R_min)^2) ~ 1e-7  =>  R_min = sqrt(ln(1e7)) / k_max
+    R_min = float(jnp.sqrt(-jnp.log(1e-7)) / k_max)
+    sig = float(sigma_R(R_min, lnk, pk))
+    return sig >= 1.0
+
+
 def halofit_nl_pk(
     k: Float[Array, "N"],
     pk_lin: Float[Array, "N"],
@@ -193,6 +216,8 @@ def halofit_nl_pk(
     w: float,
     fnu: float,
     h: float,
+    _lnk_sigma: Float[Array, "M"] | None = None,
+    _pk_sigma: Float[Array, "M"] | None = None,
 ) -> Float[Array, "N"]:
     """Compute the non-linear power spectrum using HaloFit (Takahashi 2012).
 
@@ -200,6 +225,10 @@ def halofit_nl_pk(
     Bird et al. (2012) massive neutrino corrections.
 
     P_NL(k) = P_quasi(k) + P_halo(k)
+
+    The input k-grid must be wide enough for the sigma(R) integral to
+    converge (k_max >= ~5 Mpc^-1).  Use ``_sigma_convergence_check``
+    to verify before calling.
 
     cf. halofit.c:404-468
 
@@ -217,8 +246,11 @@ def halofit_nl_pk(
     """
     lnk = jnp.log(k)
 
-    # Find non-linear scale and spectral parameters
-    k_sigma, n_eff, C = halofit_parameters(lnk, pk_lin)
+    # Find non-linear scale and spectral parameters.
+    # Use extended k-grid if provided (for sigma(R) convergence with narrow inputs).
+    lnk_for_sigma = _lnk_sigma if _lnk_sigma is not None else lnk
+    pk_for_sigma = _pk_sigma if _pk_sigma is not None else pk_lin
+    k_sigma, n_eff, C = halofit_parameters(lnk_for_sigma, pk_for_sigma)
 
     # Abbreviations
     # cf. halofit.c:410
@@ -377,5 +409,19 @@ def compute_pk_nonlinear(
 
     # Dark energy EOS at this redshift (CPL parameterization)
     w = w0 + wa * (1.0 - a)
+
+    # Check if the k-grid supports sigma(R)=1 for Halofit.
+    # CLASS does NOT extrapolate beyond the perturbation k-grid.
+    # When k_max is too small, CLASS sets nl_corr=1.0 (no correction).
+    # cf. CLASS fourier.c:1597-1716, precisions.h: nonlinear_min_k_max=5.0
+    #
+    # Skip the check inside JIT (tracer values can't be concretized).
+    # Callers using jax.grad/jit typically provide a wide k-grid.
+    lnk = jnp.log(k)
+    try:
+        if not _sigma_convergence_check(lnk, pk_lin):
+            return pk_lin
+    except jax.errors.ConcretizationTypeError:
+        pass  # inside JIT trace — assume grid is adequate
 
     return halofit_nl_pk(k, pk_lin, Omega_m, Omega_v, w, fnu, h)
