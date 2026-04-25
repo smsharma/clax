@@ -35,7 +35,7 @@ import numpy as np
 from jaxtyping import Array, Float
 
 from clax.background import BackgroundResult
-from clax.bessel import spherical_jl, spherical_jl_backward
+from clax.bessel import spherical_jl, spherical_jl_backward, sparse_l_grid, build_jl_table
 from clax.interpolation import CubicSpline
 from clax.params import CosmoParams, PrecisionParams
 from clax.primordial import primordial_scalar_pk, primordial_tensor_pk
@@ -592,17 +592,7 @@ def compute_cl_te_interp(
 # Sparse l-sampling + full spectrum API
 # ---------------------------------------------------------------------------
 
-def sparse_l_grid(l_max=2500):
-    """Generate sparse l-sampling for efficient C_l computation.
-
-    Mirrors CLASS strategy: dense at low l, sparser at high l.
-    Returns ~100 l-values.
-    """
-    l_list = list(range(2, min(31, l_max + 1)))
-    l_list += list(range(35, min(101, l_max + 1), 5))
-    l_list += list(range(120, min(501, l_max + 1), 20))
-    l_list += list(range(550, l_max + 1, 50))
-    return np.array(l_list, dtype=int)
+# sparse_l_grid is now imported from clax.bessel
 
 
 def compute_cls_all(
@@ -692,125 +682,8 @@ def compute_cls_all_interp(
 # Fast all-l-at-once C_l computation (table-based Bessel)
 # ---------------------------------------------------------------------------
 
-def _build_jl_table(l_max, n_x=30000, x_max=15000.0):
-    """Build j_l(x) and j_l'(x) lookup tables for all sparse l.
-
-    Builds tables of j_l(x) and its derivative j_l'(x) at a 1D x-grid
-    for all sparse l-values. Uses backward recurrence (accurate for x < l)
-    blended with upward recurrence (accurate for x >= l).
-
-    j_l' is needed for the T1 (ISW dipole) contribution to TT transfer
-    functions. radial_T2 for the T2 (polarization quadrupole) term is
-    computed on-the-fly from j_l and j_l' in the scan body.
-
-    Args:
-        l_max: maximum l value (determines sparse l-grid and recurrence depth)
-        n_x: number of x-table points (default 30000, ~0.5 spacing)
-        x_max: maximum x value (default 15000, > k_max * tau_0)
-
-    Returns:
-        x_table: (n_x,) x-grid
-        jl_table: (n_l, n_x) blended j_l values
-        jlp_table: (n_l, n_x) blended j_l'(x) values
-    """
-    from clax.bessel import _j0, _j1
-
-    l_sparse = sparse_l_grid(l_max)
-    n_l = len(l_sparse)
-
-    x_table = jnp.linspace(0.0, x_max, n_x)
-    x_safe = jnp.where(x_table < 1e-30, 1e-30, x_table)
-
-    # --- Backward recurrence (accurate for x < l) ---
-    extra = min(60, max(30, l_max // 5))
-    l_start = l_max + extra
-
-    lookup_np = np.full(l_start + 2, -1, dtype=np.int32)
-    for idx_l, l_val in enumerate(l_sparse):
-        lookup_np[int(l_val)] = idx_l
-    lookup = jnp.array(lookup_np)
-
-    def body_back(i, state):
-        j_curr, j_next, j_at_ls, jlp_at_ls = state
-        n = l_start - i
-        j_prev = (2.0 * n + 1.0) / x_safe * j_curr - j_next
-        scale = jnp.maximum(jnp.abs(j_prev), 1e-300)
-        j_prev = j_prev / scale
-        j_curr = j_curr / scale
-        j_at_ls = j_at_ls / scale[None, :]
-        jlp_at_ls = jlp_at_ls / scale[None, :]
-
-        # j_prev = j_{n-1} = j_{l_val}, j_curr = j_n = j_{l_val+1}
-        l_val = n - 1
-        l_fl = jnp.float64(l_val)
-
-        # j_l'(x) = l/x * j_l(x) - j_{l+1}(x)
-        jlp_val = l_fl / x_safe * j_prev - j_curr
-
-        idx = lookup[l_val]
-        idx_safe = jnp.maximum(idx, 0)
-        j_at_ls = j_at_ls.at[idx_safe].set(
-            jnp.where(idx >= 0, j_prev, j_at_ls[idx_safe])
-        )
-        jlp_at_ls = jlp_at_ls.at[idx_safe].set(
-            jnp.where(idx >= 0, jlp_val, jlp_at_ls[idx_safe])
-        )
-        return (j_prev, j_curr, j_at_ls, jlp_at_ls)
-
-    init_back = (jnp.ones(n_x), jnp.zeros(n_x),
-                 jnp.zeros((n_l, n_x)), jnp.zeros((n_l, n_x)))
-    j_0_back, _, j_at_ls, jlp_at_ls = jax.lax.fori_loop(0, l_start, body_back, init_back)
-
-    # Normalize backward using j_0
-    j_0_true = _j0(x_table)
-    j_0_safe = jnp.where(jnp.abs(j_0_back) < 1e-300, 1e-300, j_0_back)
-    norm = (j_0_true / j_0_safe)[None, :]
-    jl_back = j_at_ls * norm
-    jlp_back = jlp_at_ls * norm
-
-    # --- Upward recurrence (accurate for x > l) ---
-    def body_up(l_curr, state):
-        j_prev, j_curr, j_up_ls, jlp_up_ls = state
-        j_next = (2.0 * l_curr + 1.0) / x_safe * j_curr - j_prev
-        # Clip to prevent overflow (values for x < l are wrong but masked later)
-        j_next = jnp.clip(j_next, -1e200, 1e200)
-
-        # j_next = j_{l_curr+1} = j_{l_new}, j_curr = j_{l_curr} = j_{l_new-1}
-        l_new = l_curr + 1
-        l_fl = jnp.float64(l_new)
-
-        # j_l'(x) = j_{l-1}(x) - (l+1)/x * j_l(x)
-        # (alternative form using j_{l-1} instead of j_{l+1})
-        jlp_val = j_curr - (l_fl + 1.0) / x_safe * j_next
-        jlp_val = jnp.clip(jlp_val, -1e200, 1e200)
-
-        idx = lookup[l_new]
-        idx_safe = jnp.maximum(idx, 0)
-        j_up_ls = j_up_ls.at[idx_safe].set(
-            jnp.where(idx >= 0, j_next, j_up_ls[idx_safe])
-        )
-        jlp_up_ls = jlp_up_ls.at[idx_safe].set(
-            jnp.where(idx >= 0, jlp_val, jlp_up_ls[idx_safe])
-        )
-        return (j_curr, j_next, j_up_ls, jlp_up_ls)
-
-    j0_vals = _j0(x_table)
-    j1_vals = _j1(x_table)
-    init_up = (j0_vals, j1_vals,
-               jnp.zeros((n_l, n_x)), jnp.zeros((n_l, n_x)))
-    _, _, jl_up, jlp_up = jax.lax.fori_loop(1, l_max, body_up, init_up)
-
-    # --- Blend: backward for x < l, upward for x >= l ---
-    l_vals = jnp.array(l_sparse, dtype=jnp.float64)
-    mask_up = x_table[None, :] >= l_vals[:, None]   # (n_l, n_x)
-    jl_table = jnp.where(mask_up, jl_up, jl_back)
-    jlp_table = jnp.where(mask_up, jlp_up, jlp_back)
-
-    # Zero for x very close to 0 (l >= 2)
-    jl_table = jnp.where(x_table[None, :] < 1e-10, 0.0, jl_table)
-    jlp_table = jnp.where(x_table[None, :] < 1e-10, 0.0, jlp_table)
-
-    return x_table, jl_table, jlp_table
+# _build_jl_table is now build_jl_table, imported from clax.bessel
+_build_jl_table = build_jl_table
 
 
 def compute_cls_all_fast(
