@@ -84,3 +84,50 @@ class TestVisibility:
         """Visibility function should peak near z~1090."""
         # z_star should be within 2% of 1090
         assert abs(float(th.z_star) - 1090) < 30, f"z_star = {float(th.z_star):.1f}"
+
+
+# ---------------------------------------------------------------------------
+# Gradient tests (AD vs finite differences)
+# ---------------------------------------------------------------------------
+
+_PREC_GRAD = PrecisionParams(
+    bg_n_points=600, ncdm_bg_n_points=200, bg_tol=1e-8,
+    th_n_points=10000, th_z_max=5e3,
+    ode_adjoint="direct",
+)
+
+
+def _thermo_ad_fd_pair(param_name, quantity_fn, eps=1e-3):
+    """Return (AD gradient, centred-FD gradient) of quantity_fn w.r.t. param_name."""
+    import dataclasses
+
+    base = CosmoParams()
+    p0 = float(getattr(base, param_name))
+
+    def forward(pval):
+        p = dataclasses.replace(base, **{param_name: pval})
+        bg_ = background_solve(p, _PREC_GRAD)
+        th_ = thermodynamics_solve(p, _PREC_GRAD, bg_)
+        return quantity_fn(th_)
+
+    ad = float(jax.grad(forward)(jnp.array(p0)))
+
+    bg_hi = background_solve(dataclasses.replace(base, **{param_name: p0 * (1 + eps)}), _PREC_GRAD)
+    bg_lo = background_solve(dataclasses.replace(base, **{param_name: p0 * (1 - eps)}), _PREC_GRAD)
+    th_hi = thermodynamics_solve(dataclasses.replace(base, **{param_name: p0 * (1 + eps)}), _PREC_GRAD, bg_hi)
+    th_lo = thermodynamics_solve(dataclasses.replace(base, **{param_name: p0 * (1 - eps)}), _PREC_GRAD, bg_lo)
+    fd = float((quantity_fn(th_hi) - quantity_fn(th_lo)) / (2 * p0 * eps))
+
+    return ad, fd
+
+
+class TestThermoGradients:
+    def test_opacity_logderivative_gradient_matches_fd_for_omega_b(self):
+        """AD gradient of dkappa_dot_dloga_of_loga matches finite differences."""
+        ad, fd = _thermo_ad_fd_pair(
+            "omega_b", lambda th: th.dkappa_dot_dloga_of_loga.evaluate(jnp.array(-8.0))
+        )
+        rel = abs(ad - fd) / (abs(fd) + 1e-30)
+        assert rel < 0.01, (
+            f"dkappa_dot_dloga(loga=-8) grad omega_b: AD={ad:.6e} FD={fd:.6e} rel={rel:.2%}"
+        )
