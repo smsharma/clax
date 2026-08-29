@@ -476,17 +476,25 @@ def _first_derivative_table(x, y):
 # Main solver
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnums=(1,))
-def thermodynamics_solve(
+def _thermodynamics_solve_impl(
     params: CosmoParams,
     prec: PrecisionParams,
     bg: BackgroundResult,
 ) -> ThermoResult:
-    """Solve the thermodynamics using the MB95 semi-implicit method.
+    """Undecorated thermodynamics solver body (MB95 semi-implicit method).
+
+    This is the single implementation behind the public
+    ``thermodynamics_solve`` wrapper below.  It is deliberately left without
+    ``jax.jit`` or any custom differentiation rule so that
+
+    * the ``th_grad_mode="stable"`` path can differentiate it in FORWARD mode
+      (``jax.jacfwd``) inside the custom VJP's backward pass, and
+    * the ``th_grad_mode="native"`` path exposes plain JAX derivatives for
+      forward-mode users (``jax.jvp``).
 
     Args:
         params: cosmological parameters
-        prec: precision parameters
+        prec: precision parameters (static)
         bg: background result from background_solve()
 
     Returns:
@@ -860,6 +868,154 @@ def thermodynamics_solve(
         rs_star=rs_star,
         z_reio=z_reio,
     )
+
+
+# ---------------------------------------------------------------------------
+# Reverse-mode stabilization: vjp-through-jvp custom rule (issue #30)
+# ---------------------------------------------------------------------------
+# Native reverse-mode AD through the solver above carries a ~2% error on
+# h-like parameters (issue #30): the Peebles/RECFAST recombination rates
+# contain Boltzmann-exponential ratios (exp(B/kT) ~ e^52), so AD
+# intermediates reach ~1e13.  Forward mode pairs huge x tiny factors locally
+# per grid point (the exponentials cancel element-wise before anything large
+# is formed), which is why jax.jvp through this solver is FD-exact.  Reverse
+# mode must contract thousands of cotangent terms through shared scalar
+# intermediates, summing +/-1e13-scale terms whose true total is ~1e-3 (or
+# exactly 0); float64 keeps a deterministic ULP residue (e.g. 2^-9 -- one
+# ULP at magnitude ~1e13), localized in the recombination-era middle region
+# of the tables.
+#
+# The custom VJP below is NOT an approximation and contains no fudge
+# factors: it evaluates the SAME chain-rule contraction
+#     params_bar[i] = <ct, d th / d params_i>
+# in a different association order -- per-parameter forward-mode columns
+# first (each numerically clean), then one well-conditioned inner product
+# with the output cotangent -- instead of the native
+# transpose-then-accumulate order that forms the ~1e13 partial sums.
+# Mathematically identical arithmetic; only the floating-point evaluation
+# order changes.
+#
+# The BackgroundResult cotangent keeps the NATIVE reverse rule restricted to
+# the bg argument ("hybrid" backward): bg enters the scan only through
+# smooth spline evaluations of H(loga) and tau(loga), not through the
+# n_H_0-scaled Boltzmann funnel that owns the params-channel disease.
+#
+# Cost of one backward pass: one jacfwd over the ~20 traced CosmoParams
+# leaves (a single vmapped forward pass, ~2-4x one thermo evaluation) plus
+# one native vjp w.r.t. bg.  Memory is trivial (the tables are ~20k
+# float64 per leaf).
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _thermodynamics_solve_stable(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+) -> ThermoResult:
+    """``thermodynamics_solve`` with the numerically stable reverse rule.
+
+    Primal values are bit-identical to ``_thermodynamics_solve_impl`` (it IS
+    the same function); only ``jax.grad``/``jax.vjp`` behavior differs.
+    Forward-mode (``jax.jvp``) through this wrapper raises ``TypeError`` by
+    JAX design (custom_vjp blocks jvp); use ``th_grad_mode="native"``.
+    """
+    return _thermodynamics_solve_impl(params, prec, bg)
+
+
+def _thermodynamics_solve_stable_fwd(params, prec, bg):
+    """Forward pass: primal plus residuals (the primal inputs).
+
+    Residuals are just ``(params, bg)``: the backward pass re-solves the
+    thermodynamics in forward mode, which is what makes it stable -- storing
+    native intermediates is exactly what we must avoid.
+    """
+    th = _thermodynamics_solve_impl(params, prec, bg)
+    return th, (params, bg)
+
+
+def _stable_bwd_params_cotangent(prec, params, bg, ct):
+    """CosmoParams cotangent via a batched forward (jacfwd) basis.
+
+    Computes ``params_bar[i] = <ct, d th / d params_i>`` where the Jacobian
+    columns come from forward-mode AD (proven exact for this solver, see
+    issue #30) and the contraction is a single well-conditioned inner
+    product per parameter.  ``jax.jacfwd`` batches all ~20 scalar CosmoParams
+    leaves into ONE vmapped forward pass.
+    """
+    jac = jax.jacfwd(lambda p: _thermodynamics_solve_impl(p, prec, bg))(params)
+    # ``jac`` mirrors the ThermoResult output structure, with every output
+    # leaf replaced by a CosmoParams-structured pytree of Jacobian columns
+    # d(out_leaf)/d(param); each column has out_leaf.shape because every
+    # traced CosmoParams leaf is a scalar.
+    ct_leaves = jax.tree_util.tree_leaves(ct)
+    jac_blocks = jax.tree_util.tree_structure(ct).flatten_up_to(jac)
+    params_bar = None
+    for ct_leaf, block in zip(ct_leaves, jac_blocks):
+        contrib = jax.tree_util.tree_map(
+            lambda col: jnp.sum(ct_leaf * col), block)
+        params_bar = contrib if params_bar is None else jax.tree_util.tree_map(
+            jnp.add, params_bar, contrib)
+    return params_bar
+
+
+def _thermodynamics_solve_stable_bwd(prec, residuals, ct):
+    """Backward pass: jacfwd basis for params, native vjp for bg."""
+    params, bg = residuals
+
+    # (1) CosmoParams cotangent: vjp-through-jvp (the issue #30 fix).
+    params_bar = _stable_bwd_params_cotangent(prec, params, bg, ct)
+
+    # (2) BackgroundResult cotangent: native reverse rule restricted to bg.
+    #     params is captured concrete-per-trace here, so no cotangent flows
+    #     onto the params leaves through this call.
+    _, pullback = jax.vjp(
+        lambda b: _thermodynamics_solve_impl(params, prec, b), bg)
+    (bg_bar,) = pullback(ct)
+
+    return (params_bar, bg_bar)
+
+
+_thermodynamics_solve_stable.defvjp(
+    _thermodynamics_solve_stable_fwd, _thermodynamics_solve_stable_bwd)
+
+
+@functools.partial(jax.jit, static_argnums=(1,))
+def thermodynamics_solve(
+    params: CosmoParams,
+    prec: PrecisionParams,
+    bg: BackgroundResult,
+) -> ThermoResult:
+    """Solve the thermodynamics using the MB95 semi-implicit method.
+
+    Reverse-mode differentiation is gated by the static
+    ``prec.th_grad_mode`` (see ``PrecisionParams``):
+
+    * ``"stable"`` (default): custom VJP computing the CosmoParams cotangent
+      via a batched forward-mode basis ("vjp-through-jvp") and the
+      BackgroundResult cotangent via the native reverse rule.  Fixes the ~2%
+      reverse-mode h-gradient error from catastrophic cancellation in the
+      recombination-era backward pass (issue #30).  ``jax.jvp`` through this
+      mode raises ``TypeError`` (JAX: custom_vjp blocks forward mode).
+    * ``"native"``: plain JAX-derived derivatives; required for forward-mode
+      (``jax.jvp``/``jax.jacfwd``) users, mirroring ``ode_adjoint="direct"``.
+
+    Both modes produce bit-identical primal values.
+
+    Args:
+        params: cosmological parameters
+        prec: precision parameters
+        bg: background result from background_solve()
+
+    Returns:
+        ThermoResult with all thermodynamic spline tables
+    """
+    if prec.th_grad_mode == "stable":
+        return _thermodynamics_solve_stable(params, prec, bg)
+    if prec.th_grad_mode == "native":
+        return _thermodynamics_solve_impl(params, prec, bg)
+    raise ValueError(
+        f"PrecisionParams.th_grad_mode must be 'stable' or 'native', "
+        f"got {prec.th_grad_mode!r}")
 
 
 def _tau_reio_for_zreio(
