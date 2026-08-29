@@ -146,6 +146,19 @@ class PrecisionParams:
     th_z_max: float = 5e4           # max redshift for recombination
     th_n_points: int = 20000        # number of z grid points
     th_tol: float = 1e-5            # ODE tolerance
+    # Reverse-mode differentiation rule for thermodynamics_solve (issue #30).
+    #   "stable" -- custom VJP whose backward pass computes the CosmoParams
+    #               cotangent via a batched forward-mode (jacfwd) basis
+    #               ("vjp-through-jvp"): mathematically identical to the native
+    #               transpose, but avoids the catastrophic FP cancellation of
+    #               contracting ~1e13-scale Boltzmann-exponential intermediates
+    #               in the recombination-era backward pass (~2% h-gradient
+    #               error). Default; use for jax.grad / HMC.
+    #   "native" -- plain JAX-derived VJP. REQUIRED for forward-mode users:
+    #               jax.jvp/jacfwd cannot cross a custom_vjp function (JAX
+    #               raises TypeError), mirroring the ode_adjoint="direct"
+    #               escape hatch below for diffrax's checkpoint adjoint.
+    th_grad_mode: str = "stable"    # or "native"
 
     # Perturbations
     pt_k_min: float = 1e-5          # Mpc^-1

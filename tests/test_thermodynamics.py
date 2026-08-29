@@ -204,8 +204,11 @@ def _thermo_jvp_fd_pair(param_name, quantity_fn, eps=1e-3):
     """Return (jax.jvp tangent, centred-FD gradient) of quantity_fn w.r.t. param_name."""
     import dataclasses
     # Forward-mode needs a direct adjoint through background_solve
-    # (RecursiveCheckpointAdjoint is reverse-mode only).
-    prec = dataclasses.replace(PREC, ode_adjoint="direct")
+    # (RecursiveCheckpointAdjoint is reverse-mode only) and the native
+    # thermo grad path (th_grad_mode="stable" is a custom_vjp, which JAX
+    # forbids under jax.jvp -- see PrecisionParams.th_grad_mode).
+    prec = dataclasses.replace(PREC, ode_adjoint="direct",
+                               th_grad_mode="native")
 
     base = CosmoParams()
     p0 = float(getattr(base, param_name))
@@ -309,6 +312,7 @@ def test_find_z_reio_forward_mode_matches_fd():
         bg_n_points=400, ncdm_bg_n_points=200, bg_tol=1e-8,
         th_n_points=10000, th_z_max=5e4,  # 5e4 floor: see PrecisionParams.th_z_max
         ode_adjoint="direct",
+        th_grad_mode="native",  # jax.jvp cannot cross the "stable" custom_vjp
     )
     params = CosmoParams()
 

@@ -85,9 +85,14 @@ _PROBE_PREC_DIRECT = PrecisionParams(
     pt_ode_rtol=1e-5, pt_ode_atol=1e-6,
     ode_max_steps=16384, pt_ode_solver="rodas5",
     ode_adjoint="direct",
+    # jax.jvp cannot cross the th_grad_mode="stable" custom_vjp around
+    # thermodynamics_solve (issue #30 fix); this prec must stay fully
+    # forward-mode-capable. Its grad twin below keeps the production default.
+    th_grad_mode="native",
 )
 _PROBE_PREC_RECURSIVE = dataclasses.replace(
     _PROBE_PREC_DIRECT, ode_adjoint="recursive_checkpoint",
+    th_grad_mode="stable",  # production default: the anchor arm stays stable
 )
 
 _K_TARGET = 0.1
