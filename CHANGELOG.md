@@ -8,6 +8,53 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
 power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 `compute_cl_pp(... nonlinear="ept")`.**
 
+### Aug 29, 2026: Stable reverse-mode gradients through `thermodynamics_solve` (issue #30, vjp-through-jvp)
+
+**Native `jax.grad` through `thermodynamics_solve` carried a ~2% error on h-like
+parameters while `jax.jvp` was FD-exact** (issue #30): the Peebles/RECFAST
+Boltzmann-exponential ratios (`exp(B/kT) ~ e^52`) put ~1e13-scale intermediates
+in the graph; the reverse transpose contracts thousands of ±1e13 cotangent
+terms whose true total is ~1e-3, leaving deterministic ULP residue (e.g.
+exactly 2^-9) in the recombination-era tables. Reproduced even on CPU: on a
+near-null direction (d/dh with bg pinned; n_H_0 ∝ omega_b exactly, so h
+cancels) the native reverse rule returned -2.72e-7 where forward mode gives
++5.71e-9 — 48x too large, wrong sign.
+
+**Fix (hybrid custom rule).** `thermodynamics_solve` is now wrapped in a
+`jax.custom_vjp` gated by the new static `PrecisionParams.th_grad_mode`
+(default `"stable"`, mirroring the `ode_adjoint` precedent):
+
+- CosmoParams cotangent = `<ct, d th/d theta_i>` computed by ONE batched
+  `jacfwd` pass over the ~20 traced leaves (forward columns are numerically
+  clean; the contraction is a well-conditioned inner product). Mathematically
+  identical chain rule, different association order — no fudge factors, no new
+  `stop_gradient`, primal bit-identical.
+- BackgroundResult cotangent = the native vjp restricted to the `bg` argument.
+
+`th_grad_mode="native"` keeps plain JAX derivatives for forward-mode users
+(`jax.jvp` cannot cross a `custom_vjp`); `tests/test_pk_forward_mode.py` and
+the `test_thermodynamics.py` jvp helpers now set it. New contract tests in
+`tests/test_thermo_reverse_hybrid.py` (grad-vs-jvp <1e-6 on healthy
+directions, measured 2.3e-15 omega_b / 5.3e-11 h; wiring tests).
+
+**Known limitation (measured, V100 jobs 14014-14016): the hybrid backward
+repairs only the params-direct channel.** The bg-mediated reverse channel it
+keeps native is itself diseased (early-gate `bgonly` arm: `xe.y` fwd=+2.077e8
+vs rev=-3.875e12, adjoint-independent), and the pipeline-level error rides
+that channel unchanged: EPT d/dh grad = 4.107387e6 (still +1.93% vs the
+4.029578e6 truth) and delta_m grad-vs-jvp gap +4.146e-3 — identical to
+pre-fix. The pipeline-level target lives in a strict-xfail test pending the
+fused-entry design (issue #30 option 2). ADR:
+`docs/adr/0001-thermo-reverse-mode-vjp-through-jvp.md`. Full numbers in the
+PR for branch `fix/thermo-stable-reverse-hybrid`.
+
+**Failed approach (do not re-attempt): fixing issue #30's pipeline gradient
+error by replacing only `thermodynamics_solve`'s params-channel VJP.** The
+perturbation cotangent reaches h through the bg cotangent
+(`tau_of_loga`/`H_of_loga` tables and the `tau_min`/`dlntau` scalar funnels);
+any design that still emits a native bg cotangent from the thermo backward
+leaves the +1.93%/+4.1e-3 error bit-for-bit intact.
+
 ### Aug 25, 2026: Fix a real tracer leak in the scalar PID controller (`UnexpectedTracerError`)
 
 **The filtered-norm weights were captured in a lambda closure instead of being
