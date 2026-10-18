@@ -146,3 +146,14 @@ A good test checks behaviour a cosmologist relies on (values against CLASS, deri
   - Hermite's cost against the 5% forward budget. Building the table once may pay for it; the spacing can be revisited only with a new gate on L0;
   - the choice of the τ₀ bound.
 - **Docs.** ADR 0004 records D1–D4 and the τ₀ bound. There will also be a CHANGELOG entry and docstrings for `compute_cls_all_fast`, `build_jl_table`, the Halofit and EPT corrections and `PrecisionParams.hr_tau0_max`.
+
+## Amendments from planning (Oct 18, 2026)
+
+- **A1 (amends D1, D4).** `compute_cls_all_fast` and `compute_cl_pp` do not receive precision settings today. They gain a keyword-only argument `prec: PrecisionParams | None = None`.
+  - With `prec`, the table bounds come from `prec.pt_k_max_cl` and `prec.hr_tau0_max`, which works under `jit`, `jvp` and `grad`.
+  - Without `prec`, eager callers keep working: k_max is read from `pt.k_grid`. Under tracing they get a `TypeError` asking for `prec`.
+  - A second guard raises if k·χ exceeds the table, which happens when `prec.pt_k_max_cl` does not match the perturbation grid.
+- **A2 (amends D4 and V2).** Today's EPT correction splines R = P_NL/P_lin through only the EPT nodes inside the perturbation k-range. That node set changes with h, so R jumps discontinuously in h, and no differentiable version can be number-identical to it.
+  - The new correction splines P_NL over the fixed EPT nodes in log(k/h) and divides by P_lin at the exact perturbation k.
+  - V2's EPT identity is replaced by two gates against the base: |ΔR/R| ≤ 10⁻³ for k ∈ [10⁻⁴, k_max] Mpc⁻¹ at fiducial, and C_ℓ^φφ(EPT) shifts ≤ 10⁻³ per ℓ band. Both are measured and reported.
+  - The Halofit correction keeps its V2 identity (10⁻¹⁰).
