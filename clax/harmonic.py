@@ -840,6 +840,25 @@ def _table_position(x_flat, dx_tab, n_x):
     return i_left, u - i_left.astype(u.dtype)
 
 
+def _hermite(f0, f1, d0, d1, t, h):
+    """Cubic Hermite interpolant on [x_i, x_i + h] from values f and slopes d
+    at both ends; t = (x - x_i)/h in [0, 1]. C^1 across intervals (#54)."""
+    t2 = t * t
+    t3 = t2 * t
+    return ((2.0 * t3 - 3.0 * t2 + 1.0) * f0 + (t3 - 2.0 * t2 + t) * h * d0
+            + (-2.0 * t3 + 3.0 * t2) * f1 + (t3 - t2) * h * d1)
+
+
+def _jl_node_second_derivative(jl_n, jlp_n, x_n, ll1_val, is_l2):
+    """j_l'' at table nodes from Bessel's equation,
+    j_l'' = [l(l+1)/x^2 - 1] j_l - (2/x) j_l', with the x -> 0 limit
+    (2/15 for l = 2, 0 for l >= 3)."""
+    small = x_n < 1e-10
+    x_safe = jnp.where(small, 1.0, x_n)
+    jpp = (ll1_val / (x_safe * x_safe) - 1.0) * jl_n - 2.0 / x_safe * jlp_n
+    return jnp.where(small, jnp.where(is_l2, 2.0 / 15.0, 0.0), jpp)
+
+
 def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab, mode):
     """j_l(x) and j_l'(x) from one table row at positions (i_left, t)."""
     i_right = i_left + 1
@@ -847,6 +866,14 @@ def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab, mode):
     jp0, jp1 = jlp_row[i_left], jlp_row[i_right]
     if mode == "linear":
         return jl0 + t * (jl1 - jl0), jp0 + t * (jp1 - jp0)
+    if mode == "hermite":
+        x0 = i_left.astype(t.dtype) * dx_tab
+        x1 = x0 + dx_tab
+        is_l2 = l_val == 2.0
+        jpp0 = _jl_node_second_derivative(jl0, jp0, x0, ll1_val, is_l2)
+        jpp1 = _jl_node_second_derivative(jl1, jp1, x1, ll1_val, is_l2)
+        return (_hermite(jl0, jl1, jp0, jp1, t, dx_tab),
+                _hermite(jp0, jp1, jpp0, jpp1, t, dx_tab))
     raise ValueError(f"unknown Bessel lookup mode {mode!r}")
 
 
