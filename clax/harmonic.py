@@ -28,7 +28,9 @@ References:
 from __future__ import annotations
 
 import functools
+import math
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -781,8 +783,71 @@ def _sparse_l_padded(l_max):
 # l < 50 and +20% in EE at l = 2 (precision sweep, Oct 2026,
 # docs/precision_sweep_2026-10-10.md finding 6). At 30 the fast path matches
 # the exact-j_l path to 0.01% for l <= 500; the table costs ~0.7 GB at
-# l_max 2500 and the harmonic stage ~12 s instead of ~4 s on a V100.
+# l_max 2500 and the harmonic stage ~12 s instead of ~4 s on a V100. Those
+# were measured on the then cosmology-dependent range x_max = 1.05 k_max tau_0
+# (~14800 at k_max 1/Mpc). On the fixed x-range of #54, x_max = 1.05
+# pt_k_max_cl hr_tau0_max = 21000, the table is 2 x 105 x 630000 doubles =
+# 1.06 GB at l_max 2500 (0.86 GB at 1500), built once per process and kept
+# (see _jl_tables).
 JL_TABLE_X_PER_UNIT = 30.0
+
+
+def _table_bounds(pt, prec):
+    """Static (k_bound, tau0_max) for the fixed-range Bessel table (#54).
+
+    With prec: k_bound = prec.pt_k_max_cl (the fine k-grid ends at pt.k_grid[-1]
+    = pt_k_max_cl) and tau0_max = prec.hr_tau0_max -- both static, so jit, jvp
+    and grad work. Without prec (eager callers only), k_bound is read from
+    pt.k_grid; under tracing that read fails and we ask for prec instead.
+    """
+    if prec is not None:
+        return float(prec.pt_k_max_cl), float(prec.hr_tau0_max)
+    try:
+        k_bound = float(pt.k_grid[-1])
+    except jax.errors.ConcretizationTypeError as err:
+        raise TypeError(
+            "compute_cls_all_fast: pass prec=<the PrecisionParams of the perturbation "
+            "solve> to jit or differentiate; without prec the Bessel table's k-range "
+            "is read from pt.k_grid, which is traced here.") from err
+    return k_bound, float(PrecisionParams().hr_tau0_max)
+
+
+def _table_grid(k_bound, tau0_max, x_per_unit):
+    """x_max = 1.05 k_bound tau0_max and n_x = ceil(x_per_unit x_max), at
+    least 30000 points: the fixed x-range at the density the caller passes
+    (compute_cls_all_fast's x_per_unit, default JL_TABLE_X_PER_UNIT)."""
+    x_max = 1.05 * k_bound * tau0_max
+    return x_max, max(30000, int(math.ceil(x_per_unit * x_max)))
+
+
+@functools.lru_cache(maxsize=8)
+def _jl_tables(l_max_padded, n_x, x_max):
+    """j_l, j_l' on the fixed x-range for the rows of sparse_l_grid(l_max_padded);
+    compute_cls_all_fast passes l_max + L_SPLINE_PAD so the rows match
+    _sparse_l_padded(l_max). Built once per (l_max_padded, n_x, x_max) and
+    reused across cosmologies and calls -- concrete arrays, never traced.
+    Each entry holds 2 x n_l x n_x doubles for the life of the process
+    (fit_cl at 30 points per unit x: 2 x 85 x 630000 x 8 B = 0.86 GB)."""
+    with jax.ensure_compile_time_eval():
+        return build_jl_table(l_max_padded, n_x=n_x, x_max=x_max)
+
+
+def _table_position(x_flat, dx_tab, n_x):
+    """Left table index and fractional position t in [0, 1] on the uniform
+    x-table. The index carries no derivative; t carries d/dx = 1/dx_tab."""
+    u = x_flat / dx_tab
+    i_left = jnp.clip(jnp.floor(u).astype(jnp.int32), 0, n_x - 2)
+    return i_left, u - i_left.astype(u.dtype)
+
+
+def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab, mode):
+    """j_l(x) and j_l'(x) from one table row at positions (i_left, t)."""
+    i_right = i_left + 1
+    jl0, jl1 = jl_row[i_left], jl_row[i_right]
+    jp0, jp1 = jlp_row[i_left], jlp_row[i_right]
+    if mode == "linear":
+        return jl0 + t * (jl1 - jl0), jp0 + t * (jp1 - jp0)
+    raise ValueError(f"unknown Bessel lookup mode {mode!r}")
 
 
 def compute_cls_all_fast(
@@ -790,6 +855,7 @@ def compute_cls_all_fast(
     n_k_fine=5000, tt_mode=None,
     k_interp_method="spline",
     x_per_unit=JL_TABLE_X_PER_UNIT,
+    *, prec=None, _jl_lookup="linear",
 ):
     """Fast C_l computation using precomputed j_l/j_l' tables + source interpolation.
 
@@ -822,8 +888,12 @@ def compute_cls_all_fast(
             (Lobatto nodes in log k) -- the barycentric weights assume
             Lobatto spacing.
         x_per_unit: Bessel-table points per unit x (default
-            JL_TABLE_X_PER_UNIT = 30). Values below ~10 bias C_l low by
-            ~ -h^2/12 per unit amplitude; see the module constant.
+            JL_TABLE_X_PER_UNIT = 30) on the table's fixed x-range
+            [0, 1.05 k_bound hr_tau0_max] (#54). Values below ~10 bias C_l
+            low by ~ -h^2/12 per unit amplitude; see the module constant.
+        prec: PrecisionParams of the perturbation solve; required to jit or
+            differentiate (fixes the Bessel table's x-range from pt_k_max_cl
+            and hr_tau0_max). _jl_lookup: internal, measurement only (#54).
 
     Accuracy (Oct 2026 sweep, massless RECFAST reference, planck_cl-class
     perturbations): with n_k_fine 20000 and the default table this path
@@ -849,7 +919,12 @@ def compute_cls_all_fast(
     source_T2_fine = fine_sources[3]
 
     # 2. Setup grids
-    tau_0 = bg.conformal_age
+    k_bound, tau0_max = _table_bounds(pt, prec)
+    x_max, n_x = _table_grid(k_bound, tau0_max, x_per_unit)
+    tau_0 = eqx.error_if(
+        bg.conformal_age, bg.conformal_age > tau0_max,
+        f"compute_cls_all_fast: conformal age tau_0 exceeds PrecisionParams.hr_tau0_max "
+        f"= {tau0_max:g} Mpc, the Bessel table's design bound; raise hr_tau0_max.")
     chi_grid = tau_0 - pt.tau_grid
     n_tau = pt.tau_grid.shape[0]
     dtau = jnp.diff(pt.tau_grid)
@@ -860,6 +935,11 @@ def compute_cls_all_fast(
     src_T1_dtau = source_T1_fine * dtau_mid[None, :]           # T1: * j_l'
     src_T2_dtau = (source_T2_fine / 8.0) * dtau_mid[None, :]  # T2/8: * radial_T2
     x_query = k_fine[:, None] * chi_grid[None, :]              # (n_k, n_tau)
+    x_query = eqx.error_if(
+        x_query, jnp.max(x_query) > x_max,
+        f"compute_cls_all_fast: k*chi exceeds the Bessel table (x_max = {x_max:g}); "
+        "prec.pt_k_max_cl is smaller than the perturbation grid's k_max -- pass the "
+        "prec used for the perturbation solve.")
     x_safe = jnp.where(jnp.abs(x_query) < 1e-30, 1e-30, x_query)
     src_E_dtau = source_E_fine * dtau_mid[None, :] / (x_safe * x_safe)
 
@@ -869,19 +949,13 @@ def compute_cls_all_fast(
     inv_x_flat = 1.0 / x_safe_flat
     inv_x2_flat = inv_x_flat * inv_x_flat
 
-    # 3. Build j_l and j_l' tables for all sparse l-values
-    x_max = float(jnp.max(k_fine) * tau_0 * 1.05)
-    n_x = max(30000, int(x_max * x_per_unit))  # see JL_TABLE_X_PER_UNIT
-    x_table, jl_table, jlp_table = _build_jl_table(l_max + L_SPLINE_PAD, n_x=n_x, x_max=x_max)  # rows match _sparse_l_padded
+    # 3. j_l and j_l' tables on the fixed x-range (#54): independent of cosmology;
+    #    rows match _sparse_l_padded(l_max)
+    x_table, jl_table, jlp_table = _jl_tables(l_max + L_SPLINE_PAD, n_x, x_max)
+    dx_tab = x_max / (n_x - 1)
 
-    # 4. Precompute interpolation indices (shared across all l and both tables)
-    idx_right = jnp.searchsorted(x_table, x_flat_query)
-    idx_left = jnp.clip(idx_right - 1, 0, n_x - 2)
-    idx_right_safe = jnp.clip(idx_right, 1, n_x - 1)
-    dx = x_table[idx_right_safe] - x_table[idx_left]
-    dx_safe = jnp.where(dx < 1e-30, 1e-30, dx)
-    frac = (x_flat_query - x_table[idx_left]) / dx_safe
-    frac = jnp.clip(frac, 0.0, 1.0)
+    # 4. Table positions (shared across all l and both tables)
+    i_left, t_pos = _table_position(x_flat_query, dx_tab, n_x)
 
     # 5. Compute transfer functions via table lookup (scan over l)
     l_sparse = _sparse_l_padded(l_max)
@@ -895,18 +969,13 @@ def compute_cls_all_fast(
         (l_sparse_jnp - 1.0) * (l_sparse_jnp + 2.0)
     )
 
+    # jax.checkpoint: the backward pass recomputes each l's lookups instead of
+    # storing ~(n_l x n_k x n_tau) residuals (~46 GB at fit_cl; #54).
+    @jax.checkpoint
     def scan_body(carry, l_idx):
-        # Interpolate j_l from table
-        jl_row = jl_table[l_idx]                            # (n_x,)
-        jl_left = jl_row[idx_left]                          # (n_k*n_tau,)
-        jl_right = jl_row[idx_right_safe]
-        jl_flat = jl_left + frac * (jl_right - jl_left)
-
-        # Interpolate j_l' from table
-        jlp_row = jlp_table[l_idx]                          # (n_x,)
-        jlp_left = jlp_row[idx_left]
-        jlp_right = jlp_row[idx_right_safe]
-        jlp_flat = jlp_left + frac * (jlp_right - jlp_left)
+        jl_flat, jlp_flat = _lookup_jl(
+            jl_table[l_idx], jlp_table[l_idx], l_sparse_jnp[l_idx], ll1[l_idx],
+            i_left, t_pos, dx_tab, _jl_lookup)
 
         # Compute radial_T2 on-the-fly from j_l and j_l':
         # j_l''(x) = [l(l+1)/x² - 1]*j_l - 2/x*j_l'

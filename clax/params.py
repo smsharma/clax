@@ -195,6 +195,7 @@ class PrecisionParams:
     hr_n_k_fine: int = 5000          # fine k-grid for source interpolation
     hr_l_max: int = 2500             # max multipole for C_l computation
     hr_l_limber: int = 0             # use Limber approx for l >= this (0=disabled)
+    hr_tau0_max: float = 20000.0     # Mpc; upper bound on tau_0 fixing the Bessel-table x-range (#54)
 
     # Lensing
     le_l_max: int = 2500
