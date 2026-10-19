@@ -438,8 +438,51 @@ def generate_recfast_hesw1_thermo(name, overrides, outdir_base):
     print(f"  {name}: x_e(z=2500)={np.interp(2500.0, z_out, on_grid('x_e')):.6f}")
 
 
+# C_l differentiability gates (smsharma/clax#54): unlensed C_l^phiphi on the same
+# CLASS base as the cls.npz references (FIDUCIAL_PARAMS + the multipoint overrides).
+CL_PP_GRID = {
+    "lcdm_fiducial": {},
+    "omega_b_high": {"omega_b": 0.02237 * 1.20},
+    "h_high": {"h": 0.6736 * 1.10},
+    "h_low": {"h": 0.6736 * 0.90},
+    "massive_nu_015": {"m_ncdm": 0.15},
+}
+
+
+def generate_cl_pp(name, overrides, outdir_base):
+    """Unlensed C_l^phiphi (CLASS raw_cl 'pp', l = 0..2500) at FIDUCIAL_PARAMS +
+    overrides; writes cl_pp.npz (ell, pp) and cl_pp.json provenance."""
+    import classy
+    from classy import Class
+
+    pars = dict(FIDUCIAL_PARAMS)
+    pars.update(overrides)
+    c = Class()
+    c.set(pars)
+    c.compute()
+    raw = c.raw_cl(2500)
+    ell = np.arange(2501)
+    pp = np.asarray(raw['pp'])[:2501]
+    outdir = os.path.join(outdir_base, name)
+    os.makedirs(outdir, exist_ok=True)
+    np.savez(os.path.join(outdir, 'cl_pp.npz'), ell=ell, pp=pp)
+    with open(os.path.join(outdir, 'cl_pp.json'), 'w') as fh:
+        json.dump({"class_params": pars,
+                   "classy": getattr(classy, '__version__', 'unknown'),
+                   "build": "CLASS-PT tree (CLASS v3.3.4), classpt env",
+                   "quantity": "unlensed C_l^phiphi, CLASS raw_cl()['pp'], l=0..2500"},
+                  fh, indent=1)
+    c.struct_cleanup()
+    c.empty()
+    print(f"  {name}: C_l^pp(l=100)={pp[100]:.6e}")
+
+
 def main():
     outdir = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
+    if '--cl-pp' in sys.argv:
+        for name, overrides in CL_PP_GRID.items():
+            generate_cl_pp(name, overrides, outdir)
+        return
     if '--recfast-hesw1-thermo' in sys.argv:
         # Optional cosmology names after the flag restrict the run to those points.
         only = [a for a in sys.argv[1:] if not a.startswith('--')]
