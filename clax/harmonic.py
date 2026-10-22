@@ -777,19 +777,27 @@ L_SPLINE_PAD = 100
 def _sparse_l_padded(l_max):
     return sparse_l_grid(l_max + L_SPLINE_PAD)
 
-# Bessel lookup-table resolution (points per unit x). Linear interpolation of
-# j_l at spacing h biases the amplitude by ~ -h^2/12 on average; the historical
-# 3 points per unit x (h ~ 0.33 at k_max = 1/Mpc) gave a -1% TT offset at
-# l < 50 and +20% in EE at l = 2 (precision sweep, Oct 2026,
-# docs/precision_sweep_2026-10-10.md finding 6). At 30 the fast path matches
-# the exact-j_l path to 0.01% for l <= 500; the table costs ~0.7 GB at
-# l_max 2500 and the harmonic stage ~12 s instead of ~4 s on a V100. Those
-# were measured on the then cosmology-dependent range x_max = 1.05 k_max tau_0
-# (~14800 at k_max 1/Mpc). On the fixed x-range of #54, x_max = 1.05
-# pt_k_max_cl hr_tau0_max = 21000, the table is 2 x 105 x 630000 doubles =
-# 1.06 GB at l_max 2500 (0.86 GB at 1500), built once per process and kept
-# (see _jl_tables).
-JL_TABLE_X_PER_UNIT = 30.0
+# Bessel lookup-table resolution (points per unit x). The fast path looks up
+# j_l and j_l' with a cubic Hermite interpolant in x built from the stored j_l
+# and j_l' at the two neighbouring nodes (j_l'' from Bessel's equation), so the
+# error falls as h^4 and the amplitude bias of a LINEAR lookup, ~ -h^2/12 per
+# unit amplitude, does not apply. History: the original linear lookup at 3
+# points per unit x (h ~ 0.33 at k_max = 1/Mpc) gave -1% in TT at l < 50 and
+# +20% in EE at l = 2 (precision sweep, Oct 2026,
+# docs/precision_sweep_2026-10-10.md finding 6); #50 cured that by raising the
+# linear density to 30 (table ~0.7 GB at l_max 2500, harmonic stage ~12 s
+# instead of ~4 s on a V100), measured on the then cosmology-dependent range
+# x_max = 1.05 k_max tau_0 (~14800 at k_max 1/Mpc); #54 replaced the lookup
+# by the Hermite one, which needs only 3. Measured at fit_cl (Task 4b of #54,
+# jobs 27208-27214, V100): Hermite at 3 agrees with Hermite at 30 to <= 1.6e-5
+# in C_l^TT and to <= 6e-6 in the h, omega_b and omega_cdm gradients, with a
+# table of 82 MiB instead of 0.8 GiB, and dC_l/dh along h is smooth to 5.6e-6
+# (the linear lookup at 30 gives 1.4e-2: its derivative is the piecewise
+# constant chord slope). On the fixed x-range of #54, x_max = 1.05
+# pt_k_max_cl hr_tau0_max = 21000, the table is 2 x 105 x 63000 doubles =
+# 106 MB at l_max 2500 (2 x 85 x 63000 = 86 MB at 1500), built once per process
+# and kept (see _jl_tables).
+JL_TABLE_X_PER_UNIT = 3.0
 
 
 def _table_bounds(pt, prec):
@@ -827,7 +835,8 @@ def _jl_tables(l_max_padded, n_x, x_max):
     _sparse_l_padded(l_max). Built once per (l_max_padded, n_x, x_max) and
     reused across cosmologies and calls -- concrete arrays, never traced.
     Each entry holds 2 x n_l x n_x doubles for the life of the process
-    (fit_cl at 30 points per unit x: 2 x 85 x 630000 x 8 B = 0.86 GB)."""
+    (fit_cl at the default 3 points per unit x: 2 x 85 x 63000 x 8 B = 82 MiB;
+    30 points per unit x would hold 0.8 GiB)."""
     with jax.ensure_compile_time_eval():
         return build_jl_table(l_max_padded, n_x=n_x, x_max=x_max)
 
@@ -859,22 +868,21 @@ def _jl_node_second_derivative(jl_n, jlp_n, x_n, ll1_val, is_l2):
     return jnp.where(small, jnp.where(is_l2, 2.0 / 15.0, 0.0), jpp)
 
 
-def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab, mode):
-    """j_l(x) and j_l'(x) from one table row at positions (i_left, t)."""
+def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab):
+    """j_l(x) and j_l'(x) from one table row at positions (i_left, t): cubic
+    Hermite in x from the stored values and slopes at the two nodes (#54).
+    The slope of j_l is the stored j_l'; the slope of j_l' is j_l'' from
+    Bessel's equation."""
     i_right = i_left + 1
     jl0, jl1 = jl_row[i_left], jl_row[i_right]
     jp0, jp1 = jlp_row[i_left], jlp_row[i_right]
-    if mode == "linear":
-        return jl0 + t * (jl1 - jl0), jp0 + t * (jp1 - jp0)
-    if mode == "hermite":
-        x0 = i_left.astype(t.dtype) * dx_tab
-        x1 = x0 + dx_tab
-        is_l2 = l_val == 2.0
-        jpp0 = _jl_node_second_derivative(jl0, jp0, x0, ll1_val, is_l2)
-        jpp1 = _jl_node_second_derivative(jl1, jp1, x1, ll1_val, is_l2)
-        return (_hermite(jl0, jl1, jp0, jp1, t, dx_tab),
-                _hermite(jp0, jp1, jpp0, jpp1, t, dx_tab))
-    raise ValueError(f"unknown Bessel lookup mode {mode!r}")
+    x0 = i_left.astype(t.dtype) * dx_tab
+    x1 = x0 + dx_tab
+    is_l2 = l_val == 2.0
+    jpp0 = _jl_node_second_derivative(jl0, jp0, x0, ll1_val, is_l2)
+    jpp1 = _jl_node_second_derivative(jl1, jp1, x1, ll1_val, is_l2)
+    return (_hermite(jl0, jl1, jp0, jp1, t, dx_tab),
+            _hermite(jp0, jp1, jpp0, jpp1, t, dx_tab))
 
 
 def compute_cls_all_fast(
@@ -882,7 +890,7 @@ def compute_cls_all_fast(
     n_k_fine=5000, tt_mode=None,
     k_interp_method="spline",
     x_per_unit=JL_TABLE_X_PER_UNIT,
-    *, prec=None, _jl_lookup="linear",
+    *, prec=None,
 ):
     """Fast C_l computation using precomputed j_l/j_l' tables + source interpolation.
 
@@ -915,18 +923,24 @@ def compute_cls_all_fast(
             (Lobatto nodes in log k) -- the barycentric weights assume
             Lobatto spacing.
         x_per_unit: Bessel-table points per unit x (default
-            JL_TABLE_X_PER_UNIT = 30) on the table's fixed x-range
-            [0, 1.05 k_bound hr_tau0_max] (#54). Values below ~10 bias C_l
-            low by ~ -h^2/12 per unit amplitude; see the module constant.
+            JL_TABLE_X_PER_UNIT = 3) on the table's fixed x-range
+            [0, 1.05 k_bound hr_tau0_max] (#54). The lookup is cubic Hermite,
+            so 3 is converged: 30 agrees to <= 1.6e-5 in C_l^TT and <= 6e-6 in
+            the gradients (fit_cl, Task 4b) at ten times the table memory
+            (0.8 GiB vs 82 MiB) and a longer compile (harmonic stage alone
+            19.3 s vs 3.3 s, Task 4a). Larger values add both with no
+            measurable gain; see the module constant.
         prec: PrecisionParams of the perturbation solve; required to jit or
             differentiate (fixes the Bessel table's x-range from pt_k_max_cl
-            and hr_tau0_max). _jl_lookup: internal, measurement only (#54).
+            and hr_tau0_max).
 
     Accuracy (Oct 2026 sweep, massless RECFAST reference, planck_cl-class
-    perturbations): with n_k_fine 20000 and the default table this path
-    matches the exact-j_l path (compute_cls_all_interp) to 0.011% for
-    l <= 500, 0.024% for l <= 1000, 0.17% for l <= 2000; n_k_fine 5000 is
-    percent-level above l ~ 500.
+    perturbations, measured with the earlier LINEAR lookup at 30 points per
+    unit x): with n_k_fine 20000 this path matches the exact-j_l path
+    (compute_cls_all_interp) to 0.011% for l <= 500, 0.024% for l <= 1000,
+    0.17% for l <= 2000; n_k_fine 5000 is percent-level above l ~ 500. The
+    Hermite lookup at 3 points per unit x moves C_l^TT by <= 1e-4 relative
+    to that linear lookup at fit_cl (it removes its ~1e-4 chord bias; Task 4b).
 
     Returns:
         dict with 'ell', 'tt', 'ee', 'te' (arrays of length l_max+1)
@@ -1002,7 +1016,7 @@ def compute_cls_all_fast(
     def scan_body(carry, l_idx):
         jl_flat, jlp_flat = _lookup_jl(
             jl_table[l_idx], jlp_table[l_idx], l_sparse_jnp[l_idx], ll1[l_idx],
-            i_left, t_pos, dx_tab, _jl_lookup)
+            i_left, t_pos, dx_tab)
 
         # Compute radial_T2 on-the-fly from j_l and j_l':
         # j_l''(x) = [l(l+1)/x² - 1]*j_l - 2/x*j_l'

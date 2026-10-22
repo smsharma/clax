@@ -1,17 +1,20 @@
 """L0 (#54): the Bessel-table lookup in compute_cls_all_fast against direct
 spherical Bessel functions, including x within +-2 of l where the table switches
-from backward to upward recurrence, at both table densities in use: 3 points per
-unit x (the pre-#50 density) and 30 (JL_TABLE_X_PER_UNIT since #50). The table
-is the production one: the rows of _sparse_l_padded(1500) on the fixed range
-x_max = 1.05 x 1/Mpc x 20000 Mpc. Cosmology-independent numerics: exempt from the
-multi-cosmology rule.
+from backward to upward recurrence, at two table densities: 3 points per unit x
+(JL_TABLE_X_PER_UNIT, the default, with the cubic Hermite lookup) and 30 (kept
+as the dense comparison; it was the default of the linear lookup under #50). The
+table is the production one: the rows of _sparse_l_padded(1500) on the fixed
+range x_max = 1.05 x 1/Mpc x 20000 Mpc. Cosmology-independent numerics: exempt
+from the multi-cosmology rule.
 
 Bars, per density = 2x the Hermite lookup's measured worst error, rounded up to
 2 significant figures (l0_measure.py, job 27124; every worst sits at l = 2).
-The linear lookup fails them at 30 points per unit x for every tested l (its
-worst is ~3e4 times the bar), and at 3 points per unit x for l = 2, 30 and 300;
-at 3 points per unit x and l = 1200 its error (4.9e-6 in j_l, 5.9e-5 in the AD
-derivative) is below the l = 2-set bars, so that case does not catch it."""
+For the record, measured while the linear lookup was still switchable (during
+#54, before the switch was removed): it fails these bars at 30 points per unit
+x for every tested l (its worst is ~3e4 times the bar), and at 3 points per unit
+x for l = 2, 30 and 300; at 3 points per unit x and l = 1200 its error (4.9e-6
+in j_l, 5.9e-5 in the AD derivative) is below the l = 2-set bars, so that case
+does not catch it."""
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -38,13 +41,13 @@ def tables(request):
     return dens, x_max, n_x, jl_t, jlp_t
 
 
-def _lookup(tables, ell, x, mode):
+def _lookup(tables, ell, x):
     _, x_max, n_x, jl_t, jlp_t = tables
     li = int(np.nonzero(_sparse_l_padded(L_MAX) == ell)[0][0])
     dx_tab = x_max / (n_x - 1)
     i_left, t = _table_position(x, dx_tab, n_x)
     return _lookup_jl(jl_t[li], jlp_t[li], jnp.float64(ell), jnp.float64(ell * (ell + 1.0)),
-                      i_left, t, dx_tab, mode)
+                      i_left, t, dx_tab)
 
 
 def _samples(ell, x_max):
@@ -58,7 +61,7 @@ def test_hermite_lookup_matches_spherical_bessel(tables, ell):
     dens = tables[0]
     bar_jl, bar_jlp, _ = BARS[dens]
     x = _samples(ell, tables[1])
-    jl, jlp = _lookup(tables, ell, jnp.asarray(x), "hermite")
+    jl, jlp = _lookup(tables, ell, jnp.asarray(x))
     e_jl = float(np.max(np.abs(np.asarray(jl) - spherical_jn(ell, x))))
     e_jlp = float(np.max(np.abs(np.asarray(jlp) - spherical_jn(ell, x, derivative=True))))
     print(f"{dens:g} pts/unit-x, l={ell}: |dj_l| {e_jl:.2e} (bar {bar_jl:.1e}), "
@@ -72,7 +75,7 @@ def test_ad_derivative_of_lookup_is_jl_prime(tables, ell):
     dens = tables[0]
     bar_djl = BARS[dens][2]
     x = _samples(ell, tables[1])
-    d = jax.vmap(jax.grad(lambda xx: _lookup(tables, ell, xx, "hermite")[0]))(jnp.asarray(x))
+    d = jax.vmap(jax.grad(lambda xx: _lookup(tables, ell, xx)[0]))(jnp.asarray(x))
     e = float(np.max(np.abs(np.asarray(d) - spherical_jn(ell, x, derivative=True))))
     print(f"{dens:g} pts/unit-x, l={ell}: |d/dx lookup - j_l'| {e:.2e} (bar {bar_djl:.1e})")
     assert np.all(np.isfinite(np.asarray(d))), f"ERROR non-finite AD derivative (l={ell}, {dens:g} pts/unit-x)"
