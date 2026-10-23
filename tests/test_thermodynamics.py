@@ -27,6 +27,7 @@ from clax.thermodynamics import thermodynamics_solve
 from clax.perturbations import _compute_tca_criterion
 from clax.params import CosmoParams, PrecisionParams
 from tests.pk_test_utils import PK_GRAD_PARAM_STEPS
+from tests.recomb_test_utils import load_drag
 
 
 PREC = PrecisionParams(
@@ -70,19 +71,36 @@ def th(bg):
 class TestThermoScalars:
     """Tests thermodynamics scalar quantities."""
 
-    def test_z_star(self, th, lcdm_derived):
-        """``z_star`` matches CLASS; expects <1% relative error."""
-        ref = lcdm_derived['z_star']
+    def test_z_star(self, th):
+        """``z_star``, the visibility maximum, matches CLASS's parabolic estimate of
+        it (CLASS calls that epoch z_rec) on the RECFAST oracle. Until #44 the code
+        took the grid point (off by up to one step) and this test's bar was 1%."""
+        ref = load_drag("lcdm_fiducial")["z_rec"]
         val = float(th.z_star)
         rel_err = abs(val - ref) / ref
-        assert rel_err < 0.01, f"z_star: {val:.1f} vs CLASS {ref:.1f}, err={rel_err:.2%}"
+        # 10000 points sit between the 20000-point (1.1e-6) and 3000-point (2.9e-5)
+        # worst cases of tests/test_recomb_thermo.py; the grid-point value was off by
+        # up to one step (9e-4 in z here), wherever the knot fell.
+        assert rel_err < 1e-4, f"z_star: {val:.4f} vs CLASS {ref:.4f}, err={rel_err:.2e}"
 
-    def test_z_rec(self, th, lcdm_derived):
-        """``z_rec`` matches CLASS; expects <2% relative error."""
-        ref = lcdm_derived['z_rec']
-        val = float(th.z_rec)
-        rel_err = abs(val - ref) / ref
-        assert rel_err < 0.02, f"z_rec: {val:.1f} vs CLASS {ref:.1f}, err={rel_err:.2%}"
+    def test_z_rec(self, th):
+        """``z_rec`` is where the optical depth crosses one: exp(-kappa(z_rec)) =
+        e^-1. (CLASS has no such derived quantity; its "z_rec" is the visibility
+        maximum, which this module calls z_star. Until #44 this test compared the
+        two definitions with a 2% bar that hid their 0.4% difference.)"""
+        val = float(th.exp_m_kappa_of_loga.evaluate(jnp.log(1.0 / (1.0 + th.z_rec))))
+        rel_err = abs(val / np.exp(-1.0) - 1.0)
+        assert rel_err < 1e-4, f"exp(-kappa(z_rec)) = {val:.6f} vs e^-1, err={rel_err:.2e}"
+
+    def test_drag_epoch(self, th):
+        """z_d, tau_d, rs_d (baryon drag, kappa_b = 1) match CLASS RECFAST (#44)."""
+        ref = load_drag("lcdm_fiducial")
+        for q in ("z_d", "tau_d", "rs_d"):
+            val = float(getattr(th, q))
+            rel_err = abs(val - ref[q]) / ref[q]
+            # 10000 points: between the 20000-point (1.5e-6) and 3000-point (3.6e-5)
+            # worst cases of tests/test_recomb_thermo.py; the fit was 1.3e-4 off here.
+            assert rel_err < 1e-4, f"{q}: {val:.6f} vs CLASS {ref[q]:.6f}, err={rel_err:.2e}"
 
     def test_tau_free_streaming(self, th, bg):
         """``tau_free_streaming`` matches CLASS's definition to 0.05% (0.18 Mpc).
@@ -355,6 +373,31 @@ class TestThermoGradients:
     # -6 again, with -5 kept.
     _EXP_M_KAPPA_SAMPLES = [(-8.0, "omega_b"), (-7.0, "omega_b"), (-6.0, "omega_b"),
                             (-5.0, "omega_b"), (-7.0, "omega_cdm"), (-6.0, "omega_cdm")]
+
+    # Derived epochs (smsharma/clax#44): rs_d is the BAO ruler and z_d, tau_star
+    # feed the EPT damping scale and the perturbation save grid. Until #44 rs_d
+    # came from a fitting formula and tau_star was a grid-point value, piecewise
+    # constant in the parameters. Bars: twice the worst measured residual at this
+    # precision block (4.6e-5, rs_d and z_d along h, where the epochs move only
+    # through Lambda; 3.2e-6 or better along omega_b and omega_cdm; job 28147,
+    # Oct 23, 2026), ceiled to one figure.
+    @pytest.mark.parametrize("param_name", ["omega_b", "omega_cdm", "h"])
+    def test_rs_d_gradient_matches_fd(self, param_name):
+        ad, fd = _thermo_ad_fd_pair(param_name, lambda th: th.rs_d)
+        rel = abs(ad - fd) / (abs(fd) + 1e-30)
+        assert rel < 1e-4, f"rs_d grad {param_name}: AD={ad:.6e} FD={fd:.6e} rel={rel:.2e}"
+
+    @pytest.mark.parametrize("param_name", ["omega_b", "omega_cdm", "h"])
+    def test_tau_star_gradient_matches_fd(self, param_name):
+        ad, fd = _thermo_ad_fd_pair(param_name, lambda th: th.tau_star)
+        rel = abs(ad - fd) / (abs(fd) + 1e-30)
+        assert rel < 1e-4, f"tau_star grad {param_name}: AD={ad:.6e} FD={fd:.6e} rel={rel:.2e}"
+
+    @pytest.mark.parametrize("param_name", ["omega_b", "omega_cdm"])
+    def test_z_d_gradient_matches_fd(self, param_name):
+        ad, fd = _thermo_ad_fd_pair(param_name, lambda th: th.z_d)
+        rel = abs(ad - fd) / (abs(fd) + 1e-30)
+        assert rel < 1e-4, f"z_d grad {param_name}: AD={ad:.6e} FD={fd:.6e} rel={rel:.2e}"
 
     @pytest.mark.parametrize("loga,param_name", _OPACITY_SAMPLES)
     def test_opacity_logderivative_gradient_matches_fd(self, loga, param_name):

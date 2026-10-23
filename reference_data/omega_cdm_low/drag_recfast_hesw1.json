@@ -1,0 +1,29 @@
+{
+ "z_d": 1058.1012801461388,
+ "tau_d": 300.12814181235177,
+ "rs_d": 153.9490366463578,
+ "z_rec": 1087.121790576167,
+ "tau_rec": 294.00784990040324,
+ "rs_rec": 151.18304704204797,
+ "conformal_age": 15215.011500582452,
+ "class_params": {
+  "h": 0.6736,
+  "omega_b": 0.02237,
+  "omega_cdm": 0.096,
+  "A_s": 2.1e-09,
+  "n_s": 0.9649,
+  "tau_reio": 0.0544,
+  "N_ur": 2.0328,
+  "N_ncdm": 1,
+  "m_ncdm": 0.06,
+  "T_ncdm": 0.71611,
+  "YHe": 0.2454006,
+  "recombination": "RECFAST",
+  "recfast_Heswitch": 1,
+  "tol_background_integration": 1e-12,
+  "tol_thermo_integration": 1e-10
+ },
+ "classy": "v3.3.4",
+ "build": "classy imported from /home/n2minh/micromamba/envs/classpt/lib/python3.10/site-packages/classy",
+ "definitions": "z_d: kappa_b(tau_d) = 1 with dkappa_b/dtau = kappa'/R, R = 3 rho_b / 4 rho_gamma, linear interpolation on CLASS's table (thermodynamics.c, thermodynamics_calculate_drag_quantities); z_rec: maximum of the visibility g by a three-point parabola (thermodynamics_calculate_recombination_quantities); rs_* from the background sound horizon at that z"
+}

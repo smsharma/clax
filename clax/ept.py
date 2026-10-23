@@ -2647,10 +2647,18 @@ def compute_ept_from_clax(
     z: float = 0.0,
     prec: EPTPrecisionParams = EPTPrecisionParams(),
     *,
+    th=None,          # ThermoResult; supplies the integrated r_s(z_d) (smsharma/clax#44)
     omfid: Optional[float] = None,
     field: str = "cb",
 ) -> EPTComponents:
     """Compute EPT components from a full clax perturbation run.
+
+    ``th``: the ThermoResult of the same solve. With it, the IR-resummation
+    damping scale is its integrated ``rs_d`` (CLASS's ``pth->rs_d``, the
+    quantity CLASS-PT uses at nonlinear_pt.c:5596); without it, the Aubourg
+    et al. 2015 fit of ``clax.background.sound_horizon_drag``, which is
+    0.12% accurate at best and 0.150% off at omega_b +20% (smsharma/clax#44).
+    Every pipeline call site passes ``th``.
 
     Converts clax's linear P(k) (in Mpc³) to h-units, evaluates on
     the EPT k-grid, and runs compute_ept().
@@ -2723,7 +2731,8 @@ def compute_ept_from_clax(
     # now flow (closes the 1.39% ln10A_s / 1.19% h structural residual,
     # issue #30). Only the DST grid endpoints stay pinned (see
     # _ir_resummation_jax) and the RSD FFTLog basis (phase 2, below).
-    rs_h_traced = sound_horizon_drag(params) * params.h
+    rs_d = th.rs_d if th is not None else sound_horizon_drag(params)
+    rs_h_traced = rs_d * params.h
     ir_pre = _ir_resummation_jax(pk_h, k_h, rs_h_traced, h_conc)
     return compute_ept(pk_h, jnp.array(k_h), h=h, f=f, prec=prec,
                         # rs_h is a dead argument on the _ir_precomputed path

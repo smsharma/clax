@@ -13,16 +13,26 @@ import pytest
 from clax.background import background_solve
 from clax.interpolation import CubicSpline
 from clax.thermodynamics import thermodynamics_solve
-from tests.recomb_test_utils import (QS, QS_OPACITY, THETAS, THERMO_GRIDS, as_traced,
-                                     load_ref, spike_ratio, table_on_ref_grid, tables,
-                                     tables_opacity, tangent_tables, thermo_prec,
-                                     xe_on_ref_grid, z_of)
+from tests.recomb_test_utils import (QS, QS_OPACITY, THERMO_GRIDS, THETAS, as_traced, load_drag, load_ref, spike_ratio, table_on_ref_grid, tables, tables_opacity, tangent_tables, thermo_prec, xe_on_ref_grid, z_of)
 
 _CACHE = {}
 # Under --fast the 3000-point (fit_cl) grid runs at fiducial; the default 20000-point
 # grid and the FD tests (a jvp compile per cosmology and theta) are marked slow.
 GRIDS = [pytest.param(n, marks=pytest.mark.slow, id=str(n)) if n > 3000 else n
          for n in THERMO_GRIDS]
+
+
+_TH_CACHE = {}
+
+
+def _thermo(name, p, n):
+    """The ThermoResult itself (for its derived scalars), cached per (name, n)."""
+    key = (name, n)
+    if key not in _TH_CACHE:
+        prec = thermo_prec(n)
+        pt = as_traced(p)
+        _TH_CACHE[key] = thermodynamics_solve(pt, prec, background_solve(pt, prec))
+    return _TH_CACHE[key]
 
 
 def _prim_tan(name, p, n, theta="h"):
@@ -252,6 +262,62 @@ ZS_H = np.array([1800., 1600., 1550., 1300., 1100., 800., 400.])
 @pytest.mark.parametrize("theta", THETAS)
 def test_tangents_match_converged_fd_hydrogen(recomb_cosmology, theta):
     _fd_check(recomb_cosmology, theta, ZS_H)
+
+
+# ---- Derived epochs: the baryon drag epoch (smsharma/clax#44) and the visibility peak ----
+# Oracle: CLASS RECFAST (Heswitch = 1) with the same setup as the x_e references,
+# drag_recfast_hesw1.json (scripts/generate_class_reference.py --recfast-hesw1-drag).
+# z_d is where kappa_b = 1, dkappa_b/dtau = kappa'/R with R = 3 rho_b / 4 rho_gamma,
+# found by linear interpolation on the table as thermodynamics.c does; tau_d and
+# rs_d are the background's conformal time and sound horizon there. z_rec is CLASS's
+# visibility maximum by a three-point parabola on its table, which clax calls
+# z_star; tau_rec and rs_rec likewise. Bars are twice the worst over the 11
+# cosmologies on the fixed code, ceiled to two figures (job 28139, Oct 23, 2026:
+# z_d 1.5e-6 / 3.6e-5, rs_d 8.6e-7 / 2.4e-5, z_star 1.1e-6 / 2.9e-5 on 20000 /
+# 3000 points). The Aubourg et al. fit this replaces was 1.3e-4 off at fiducial
+# and 1.5e-3 at omega_b +20%; the grid-point z_star was up to 1.8e-4 / 1.1e-3 off.
+DRAG_EPOCH_BARS = {
+    20000: {"z_d": 3.1e-6, "tau_d": 2.0e-6, "rs_d": 1.8e-6},
+    3000: {"z_d": 7.3e-5, "tau_d": 5.4e-5, "rs_d": 4.8e-5},
+}
+VISIBILITY_PEAK_BARS = {
+    20000: {"z_star": 2.2e-6, "tau_star": 1.4e-6, "rs_star": 1.2e-6},
+    3000: {"z_star": 5.8e-5, "tau_star": 4.3e-5, "rs_star": 3.7e-5},
+}
+
+
+@pytest.mark.parametrize("n", GRIDS)
+def test_drag_epoch_matches_class(recomb_cosmology, n):
+    name, p = recomb_cosmology
+    th = _thermo(name, p, n)
+    ref = load_drag(name)
+    failures = []
+    for q in ("z_d", "tau_d", "rs_d"):
+        rel = abs(float(getattr(th, q)) / ref[q] - 1.0)
+        bar = DRAG_EPOCH_BARS[n][q]
+        print(f"{name} n={n}: {q} {float(getattr(th, q)):.6f} vs CLASS {ref[q]:.6f} rel {rel:.3e} (bar {bar:.0e})")
+        if rel > bar:
+            failures.append(f"ERROR {q} {rel:.3e} > {bar:.0e} ({name}, n={n})")
+    assert not failures, "; ".join(failures)
+
+
+@pytest.mark.parametrize("n", GRIDS)
+def test_visibility_peak_scalars_match_class(recomb_cosmology, n):
+    """z_star, tau_star, rs_star against CLASS's parabolic visibility peak. The
+    grid-point values the code took until #44 were off by up to one thermodynamics
+    step (5e-4 in z on 20000 points, 3e-3 on 3000) and piecewise constant in the
+    parameters; tau_star sets the perturbation save grid, so that was a primal jump."""
+    name, p = recomb_cosmology
+    th = _thermo(name, p, n)
+    ref = load_drag(name)
+    failures = []
+    for q, rq in (("z_star", "z_rec"), ("tau_star", "tau_rec"), ("rs_star", "rs_rec")):
+        rel = abs(float(getattr(th, q)) / ref[rq] - 1.0)
+        bar = VISIBILITY_PEAK_BARS[n][q]
+        print(f"{name} n={n}: {q} {float(getattr(th, q)):.6f} vs CLASS {rq} {ref[rq]:.6f} rel {rel:.3e} (bar {bar:.0e})")
+        if rel > bar:
+            failures.append(f"ERROR {q} {rel:.3e} > {bar:.0e} ({name}, n={n})")
+    assert not failures, "; ".join(failures)
 
 
 # ---- Opacity tables: kappa_dot, exp(-kappa), g, dkappa_dot/dlna, g' (smsharma/clax#55) ----

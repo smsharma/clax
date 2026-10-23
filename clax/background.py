@@ -788,12 +788,16 @@ def luminosity_distance(bg: BackgroundResult, z: float) -> float:
 
 
 def sound_horizon_drag(params: CosmoParams) -> float:
-    """Sound horizon at baryon drag epoch r_s(z_drag) in Mpc.
-
-    Aubourg et al. 2015 (arXiv:1411.1074) Eq. (17), the Neff-aware variant.
-    Quoted accuracy 0.119% across 0 < sum m_nu < 0.6 eV, 3 < N_eff < 5.
-    Cross-checked against CLASS pth->rs_d at Planck 2018 fiducial: 0.002%.
-    Mirrors ps_1loop_jax sound_horizon_drag_aubourg2014_neff.
+    """Sound horizon at the baryon drag epoch r_s(z_drag) in Mpc, by the
+    Aubourg et al. 2015 (arXiv:1411.1074) Eq. (17) FITTING FORMULA, the
+    Neff-aware variant. Quoted accuracy 0.119% across 0 < sum m_nu < 0.6 eV,
+    3 < N_eff < 5; against CLASS it is 0.013% off at the Planck 2018 fiducial
+    point and 0.150% at omega_b +20% (smsharma/clax#44). The integrated value,
+    r_s at kappa_b = 1 from the thermodynamics and background tables, is
+    ``ThermoResult.rs_d`` (within 1e-4 of CLASS at 11 cosmologies); the
+    pipeline uses that. This function remains for callers without a
+    ThermoResult and for ps_1loop_jax compatibility
+    (sound_horizon_drag_aubourg2014_neff).
 
     The hardcoded literal `99.0` in clax/ept.py corresponded to r_s_drag * h
     at fiducial Planck 2018 (147.05 Mpc * 0.6736 = 99.05). This function

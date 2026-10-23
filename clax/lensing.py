@@ -315,7 +315,7 @@ def _ept_modulator(
     # total-matter field: the ratio below divides by the matter P_lin (C0)
     # Numerator AND denominator from pt_mpk: splitting them across solves
     # would turn the old second-order residual into a first-order one.
-    ept = compute_ept_from_clax(params, bg, pt_mpk, z=0.0, field="m")
+    ept = compute_ept_from_clax(params, bg, pt_mpk, z=0.0, th=th, field="m")
     pk_mm_h = pk_mm_real(ept)                  # (Mpc/h)^3 on EPT k-grid (h/Mpc)
     k_h = ept_kgrid()                           # h/Mpc
     k_ept_mpc = jnp.array(k_h) * h              # Mpc^-1

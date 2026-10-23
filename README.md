@@ -142,6 +142,7 @@ remaining residual is from photon-hierarchy and IC corrections at next order.
 | Module | Accuracy | Notes |
 |--------|----------|-------|
 | Background (H, D_A, r_s) | < 0.01% | 6+ significant digits |
+| Derived epochs (z_d, r_s(z_d); z_star, tau_star, r_s(z_star)) | 2e-6 (20000-point grid) / 4e-5 (`fit_cl`, 3000 points) vs CLASS RECFAST, 11 cosmologies | kappa_b = 1 and the visibility peak located sub-grid; differentiable (#44) |
 | Thermodynamics (x_e, T_b) | x_e 2e-5 (20000-point grid) / 1.1e-4 (`fit_cl`, 3000 points) over z 800-5000, and x_e 2e-5 / 7.4e-5 with T_b 6e-5 / 1.7e-4 over z 100-700, vs CLASS RECFAST (Heswitch=1), 11 cosmologies | CLASS's Saha -> ODE staging, advanced by an L-stable ROS2 step; 2.4e-4 above z = 5000 (HeIII stage) |
 | Visibility function g(tau) | **0.04%** | Bisection reionization, corrected kappa |
 | Perturbation ODE (Phi, Psi) | 0.01-0.25% | Gauge-corrected at recombination |

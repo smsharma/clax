@@ -216,6 +216,18 @@ class ThermoResult:
     carries no gradient (``stop_gradient``): like CLASS's table point, the
     switch location is not differentiated (the dropped term is <= 3e-5 on
     d ln C_l / d ln theta; see the comment where it is computed).
+
+    Derived epochs, all sub-grid and differentiable (smsharma/clax#44):
+    ``z_star``, ``tau_star`` [Mpc], ``rs_star`` [Mpc] at the maximum of the
+    visibility g by a three-point parabola in ln a (CLASS's ``z_rec`` /
+    ``tau_rec`` / ``rs_rec``, thermodynamics.c
+    thermodynamics_calculate_recombination_quantities); ``z_rec`` where the
+    optical depth crosses one, kappa(z_rec) = 1, by linear interpolation (no
+    CLASS counterpart); ``z_d``, ``tau_d`` [Mpc], ``rs_d`` [Mpc] at the baryon
+    drag epoch, kappa_b(tau_d) = 1 with dkappa_b/dtau = kappa'/R and
+    R = 3 rho_b / 4 rho_gamma, by linear interpolation (CLASS's ``z_d`` /
+    ``tau_d`` / ``rs_d``, thermodynamics_calculate_drag_quantities). rs_d is
+    the BAO ruler and the EPT IR-resummation damping scale.
     """
     xe_of_loga: CubicSpline
     Tb_of_loga: CubicSpline
@@ -231,6 +243,9 @@ class ThermoResult:
     rs_star: float
     z_reio: float
     tau_free_streaming: float
+    z_d: float
+    tau_d: float
+    rs_d: float
 
     def tree_flatten(self):
         return [
@@ -239,7 +254,7 @@ class ThermoResult:
             self.exp_m_kappa_of_loga,
             self.g_of_loga, self.g_prime_of_loga, self.cs2_of_loga,
             self.z_star, self.z_rec, self.tau_star, self.rs_star, self.z_reio,
-            self.tau_free_streaming,
+            self.tau_free_streaming, self.z_d, self.tau_d, self.rs_d,
         ], None
 
     @classmethod
@@ -1001,14 +1016,52 @@ def thermodynamics_solve(
     exp_m_kappa_grid = jnp.exp(-kappa_grid)
     g_grid = kappa_dot_grid * exp_m_kappa_grid
 
-    # --- Find z_star and z_rec ---
+    # --- Derived epochs (smsharma/clax#44): sub-grid, so they are continuous
+    # and differentiable in the parameters. Until #44 all four were grid-point
+    # values, piecewise constant in theta (one 20000-point step is 5e-4 in z at
+    # recombination), and tau_star sets the perturbation save grid.
+    #
+    # z_star: maximum of g by a three-point parabola through the knots around
+    # argmax g, in ln a (CLASS, thermodynamics.c
+    # thermodynamics_calculate_recombination_quantities, does the same in z on
+    # its equally spaced table). The vertex of the parabola through
+    # (x0, g0), (x1, g1), (x2, g2) with unequal spacing.
     idx_star = jnp.argmax(g_grid)
-    z_star = z_grid[idx_star]
-    tau_star = bg.tau_of_loga.evaluate(loga_grid[idx_star])
-    rs_star = bg.rs_of_loga.evaluate(loga_grid[idx_star])
+    i1 = jnp.clip(idx_star, 1, loga_grid.shape[0] - 2)
+    x0, x1, x2 = loga_grid[i1 - 1], loga_grid[i1], loga_grid[i1 + 1]
+    g0, g1, g2 = g_grid[i1 - 1], g_grid[i1], g_grid[i1 + 1]
+    _num = (x1 - x0) ** 2 * (g1 - g2) - (x1 - x2) ** 2 * (g1 - g0)
+    _den = (x1 - x0) * (g1 - g2) - (x1 - x2) * (g1 - g0)
+    loga_star = x1 - 0.5 * _num / jnp.where(_den == 0.0, 1.0, _den)
+    z_star = 1.0 / jnp.exp(loga_star) - 1.0
+    tau_star = bg.tau_of_loga.evaluate(loga_star)
+    rs_star = bg.rs_of_loga.evaluate(loga_star)
 
-    idx_rec = jnp.argmin(jnp.abs(kappa_grid - 1.0))
-    z_rec = z_grid[idx_rec]
+    def _crossing_loga(f_grid, level):
+        """ln a where the decreasing table f_grid crosses `level`, linearly
+        interpolated between the two bracketing knots (CLASS's recipe for z_d)."""
+        j = jnp.argmax(f_grid < level)                  # first knot below the level
+        j = jnp.clip(j, 1, f_grid.shape[0] - 1)
+        f0, f1 = f_grid[j - 1], f_grid[j]
+        w = (level - f0) / jnp.where(f1 == f0, 1.0, f1 - f0)
+        return loga_grid[j - 1] + w * (loga_grid[j] - loga_grid[j - 1])
+
+    # z_rec: optical depth one, kappa(z_rec) = 1.
+    z_rec = 1.0 / jnp.exp(_crossing_loga(kappa_grid, 1.0)) - 1.0
+
+    # Baryon drag epoch: kappa_b(tau_d) = 1 with -dkappa_b/dtau = kappa'/R,
+    # R = 3 rho_b / 4 rho_gamma (thermodynamics.c, thermodynamics_calculate_
+    # drag_quantities); integrated backwards from today like kappa, then z_d by
+    # linear interpolation, tau_d and rs_d from the background at z_d.
+    _R_grid = 0.75 * jax.vmap(bg.rho_b_of_loga.evaluate)(loga_grid) \
+        / jax.vmap(bg.rho_g_of_loga.evaluate)(loga_grid)
+    _kappa_b_dot_grid = kappa_dot_grid / _R_grid
+    _kappa_b_integrand = 0.5 * (_kappa_b_dot_grid[:-1] + _kappa_b_dot_grid[1:]) * dtau_grid
+    kappa_b_grid = jnp.concatenate([jnp.cumsum(_kappa_b_integrand[::-1])[::-1], jnp.array([0.0])])
+    loga_d = _crossing_loga(kappa_b_grid, 1.0)
+    z_d = 1.0 / jnp.exp(loga_d) - 1.0
+    tau_d = bg.tau_of_loga.evaluate(loga_d)
+    rs_d = bg.rs_of_loga.evaluate(loga_d)
 
     # --- Build splines on loga grid ---
     # Every table, the opacity ones included, is a spline on the live ln a knots
@@ -1090,6 +1143,9 @@ def thermodynamics_solve(
         rs_star=rs_star,
         z_reio=z_reio,
         tau_free_streaming=tau_free_streaming,
+        z_d=z_d,
+        tau_d=tau_d,
+        rs_d=rs_d,
     )
 
 

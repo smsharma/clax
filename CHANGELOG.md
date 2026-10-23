@@ -117,6 +117,77 @@ quadrature tolerances tightened by two orders of magnitude.
   CLAUDE.md's performance table still shows the Mar 2026 presets (not edited by
   agents).
 
+### Oct 23, 2026: r_s(z_d) by integration; the derived epochs are sub-grid and differentiable (#44)
+
+**Bug (smsharma/clax#44).** `clax.background.sound_horizon_drag` returned the
+Aubourg et al. 2015 fitting formula for the drag sound horizon, 0.119% accurate
+by its own account and 0.150% off CLASS at omega_b +20%, while CLAUDE.md and
+README promise r_s to < 0.01%; the EPT IR resummation took its BAO damping scale
+from it. Independently (the #54 session's finding), z_star, tau_star, rs_star and
+z_rec were grid-point values of the thermodynamics table (argmax g, argmin
+|kappa - 1|): off CLASS by up to one grid step (5e-4 in z on 20000 points, 3e-3 on
+3000) and piecewise constant in the parameters, and tau_star sets the perturbation
+save grid, so F(theta) carried small jumps that finite differences amplify and AD
+does not see.
+
+**Fix.** `ThermoResult` gains `z_d`, `tau_d`, `rs_d`: the baryon drag epoch where
+kappa_b = 1, with -dkappa_b/dtau = kappa'/R and R = 3 rho_b / 4 rho_gamma,
+integrated backwards from today like kappa and located by linear interpolation
+between the bracketing knots, as CLASS does (thermodynamics.c,
+thermodynamics_calculate_drag_quantities); tau_d and rs_d from the background at
+z_d. z_star / tau_star / rs_star come from a three-point parabola through the
+knots around the visibility maximum, in ln a (CLASS does the same in z); z_rec
+from the linear interpolation of kappa = 1. All are differentiable.
+`compute_ept_from_clax(..., th=)` uses `th.rs_d` and `clax.lensing` passes it; the
+fitting formula stays, with its ceiling stated, for callers without a
+ThermoResult.
+
+**Oracle.** `scripts/generate_class_reference.py --recfast-hesw1-drag` writes
+`reference_data/<name>/drag_recfast_hesw1.json` (z_d, tau_d, rs_d; CLASS's
+parabolic z_rec, tau_rec, rs_rec) for the 11 recombination cosmologies with the
+RECFAST Heswitch = 1 setup of the x_e references; at fiducial these agree with the
+HyRec-default `derived.json` values to 3e-6.
+
+**Measured against that oracle, 11 cosmologies, worst case (job 28139).**
+
+| | 20000 points | 3000 points (`fit_cl`) | before |
+|---|---|---|---|
+| r_s(z_d) | 8.6e-7 | 2.4e-5 | fit: 1.3e-4 at fiducial, 1.5e-3 at omega_b +20% |
+| z_d | 1.5e-6 | 3.6e-5 | (no clax value) |
+| tau_d | 1.0e-6 | 2.7e-5 | (no clax value) |
+| z_star | 1.1e-6 | 2.9e-5 | grid point: 1.8e-4 / 1.1e-3 |
+| tau_star | 6.7e-7 | 2.1e-5 | grid point: 1.3e-4 / 1.0e-3 |
+| rs_star | 5.8e-7 | 1.8e-5 | grid point: 1.2e-4 / 9e-4 |
+
+Reverse-mode gradients of rs_d, tau_d, z_d, tau_star, rs_star and z_star along
+omega_b and omega_cdm match finite differences to 3.2e-6 or better, and along h,
+where these epochs move only through Lambda (derivatives 1e-3 of the others), to
+4.6e-5 (job 28147; `tests/test_thermodynamics.py` bars 1e-4).
+The primal shift at `fit_cl` from the sub-grid tau_star (which sets the
+perturbation save grid): C_l^TT, EE, TE at the fiducial cosmology move by at
+most 1.4e-6 in every band from l = 2 to 1500 (jobs 28137, 28142).
+
+**Tests (red first, then green).** `test_drag_epoch_matches_class` and
+`test_visibility_peak_scalars_match_class` (11 cosmologies, both grids, bars twice
+the worst above): 32 of 44 red on main even against provisional bars ten times
+looser, all 44 green (jobs 28134, 28139). `TestThermoScalars`: z_star against
+CLASS's parabolic peak at 1e-4 (was a 1% bar against a grid-point reference),
+z_rec as exp(-kappa(z_rec)) = e^-1 at 1e-4 (the old test compared the kappa = 1
+epoch with CLASS's visibility peak at a 2% bar that hid the 0.4% difference of
+the two definitions; 3.3e-3 off at the grid point), z_d / tau_d / rs_d at 1e-4;
+`TestThermoGradients`: rs_d, tau_star, z_d against FD at 1e-3; 7 of 40 red on
+main (job 28135), 40 of 40 green (job 28140). `test_ept_from_clax.py::test_th_rs_d_wiring`:
+with `th` the damping scale is `th.rs_d`; 5 red on main, 16 of 16 green (jobs
+28136, 28141).
+
+**Test pass rates on the final tree (CPU, 12 cores unless noted).** Full mode of
+`tests/test_recomb_thermo.py` and `tests/test_thermodynamics.py` at the 11
+recombination cosmologies: 998 passed (job 28148, 44 min; 945 before this
+change). `tests/ --fast -q`: 496 passed, 1113 skipped, 1 failed, the pre-existing
+`test_pk_rosenbrock_vs_kvaerno5` max_steps failure identical on main (job 28149,
+1:32). GPU (V100): `tests/test_recomb_downstream.py` 12 passed (job 28150, 2:34);
+`tests/test_recomb_gpu.py` CPU vs GPU tangents 9 passed (job 28151).
+
 ### Oct 22, 2026: The baryon-temperature update loses its Taylor switch; T_b and x_e below z ~ 700 move onto CLASS (ADR 0003 follow-up)
 
 **Bug.** The MB95 baryon-temperature step `a^2 T_b' = a^2 (T_b - T_g) e^{-x} - T_cmb (1 - e^{-x}) / thomc`,
