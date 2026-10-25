@@ -923,8 +923,9 @@ def compute_cls_all_fast(
     forward mode by 2e-4 to 7.2e-3 (h, omega_b, omega_cdm at three cosmologies),
     and the matter-power derivative by 1.3% at omega_b + 20% (ADR 0005,
     Consequences). Until that is fixed, forward mode (jax.jvp, jax.jacfwd) or
-    ode_adjoint="direct" (2.6x the time, 0.86 GiB per gradient) gives the
-    correct gradient.
+    ode_adjoint="direct" gives the correct gradient. The direct adjoint costs 2.6x
+    the time and 0.86 GiB on one matter-power d/dh (job 27916); the C_l reverse
+    program under it alone compiles in ~25 min per case (job 27802).
 
     Architecture:
     1. Interpolate smooth source functions S(k,τ) to fine k-grid

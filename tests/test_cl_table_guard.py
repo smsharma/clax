@@ -1,5 +1,9 @@
 """Guards of the fixed-range Bessel table in compute_cls_all_fast (#54).
-Cosmology-independent plumbing: exempt from the multi-cosmology rule."""
+Cosmology-independent plumbing: exempt from the multi-cosmology rule. That the guards
+stay silent across the cosmology grid is shown by the tests that call
+compute_cls_all_fast with prec= and would raise otherwise: the C_l-versus-CLASS gate
+(tests/test_cl_vs_class.py, five cosmologies, two presets) and the gradient gates
+(tests/test_cl_gradients.py, three cosmologies)."""
 from dataclasses import replace
 
 import jax

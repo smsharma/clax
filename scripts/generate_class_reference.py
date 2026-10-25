@@ -438,8 +438,9 @@ def generate_recfast_hesw1_thermo(name, overrides, outdir_base):
     print(f"  {name}: x_e(z=2500)={np.interp(2500.0, z_out, on_grid('x_e')):.6f}")
 
 
-# C_l differentiability gates (smsharma/clax#54): unlensed C_l^phiphi on the same
-# CLASS base as the cls.npz references (FIDUCIAL_PARAMS + the multipoint overrides).
+# C_l differentiability gates (smsharma/clax#54): unlensed C_l^phiphi for the same
+# parameter set as the cls.npz references (FIDUCIAL_PARAMS + the multipoint overrides),
+# not necessarily the same CLASS build (three of the five cls.npz predate it).
 CL_PP_GRID = {
     "lcdm_fiducial": {},
     "omega_b_high": {"omega_b": 0.02237 * 1.20},

@@ -387,7 +387,8 @@ class TestPtMpk:
         under jit the eager support check cannot read the traced pt_mpk grid, so the
         modulators' guard on the queried k (eqx.error_if) must raise at run time;
         without it the P_lin spline clamps at pt_mpk's k_max and R(k) is silently
-        wrong."""
+        wrong. Cosmology-independent plumbing (a guard on array shapes and ranges):
+        exempt from the multi-cosmology rule."""
         from clax.lensing import compute_cl_pp
         params, bg, th, pt, _ = pipeline
         prec = _pipeline_prec()
@@ -399,7 +400,8 @@ class TestPtMpk:
     def test_mismatched_prec_raises(self, pipeline):
         """A prec whose pt_k_max_cl is not pt.k_grid[-1] would silently resize the
         Halofit k-extension (it is sized from prec but starts at pt.k_grid[-1]);
-        compute_cl_pp raises, eagerly and under jit (smsharma/clax#54)."""
+        compute_cl_pp raises, eagerly and under jit (smsharma/clax#54).
+        Cosmology-independent plumbing: exempt from the multi-cosmology rule."""
         from clax.lensing import compute_cl_pp
         params, bg, th, pt, pt_mpk = pipeline
         wrong = _replace(_pipeline_prec(), pt_k_max_cl=1.0)

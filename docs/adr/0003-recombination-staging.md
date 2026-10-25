@@ -518,8 +518,8 @@ static shape. The ADR 0001 caveat (forward mode needs
 
 The S4 item above is done in ADR 0005: `compute_cls_all_fast` and the lensing
 corrections are differentiable at `fit_cl` (fixed-range Bessel table, cubic
-Hermite lookup, 20000 fine k points). Forward-mode dC_l/dtheta along h, omega_b
-and omega_cdm matches finite differences to <= 6.2e-4 at three cosmologies (at
+Hermite lookup, 20000 fine k points). Forward-mode d(sum ln C_l^TT)/dtheta along h,
+omega_b and omega_cdm matches finite differences to <= 6.2e-4 at three cosmologies (at
 100x tighter perturbation tolerance; at `fit_cl`'s own, AD sits within 2.8e-4 of
 that), and dF/dh is smooth along h to <= 7.4e-6, a smoothness that rests on this
 ADR's staging. Reverse mode through Rodas5 at `fit_cl` still needs a separate NaN fix,

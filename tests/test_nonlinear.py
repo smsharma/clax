@@ -237,7 +237,7 @@ class TestHaloFitDifferentiable:
 
 # halofit_parameters(ln k, P_lin) = (k_sigma [Mpc^-1], n_eff, C) on the CLASS linear P(k) at
 # z = 0, reference_data/<name>/pk.npz["pk_lin_z0"], from the bisection as it was before the
-# implicit-function tangent (clax/nonlinear.py at b9e240d; CPU, eager, job 28763). The
+# implicit-function tangent (clax/nonlinear.py before #54, main 5ac3df3; CPU, eager, job 28763). The
 # tangent leaves these values bit-identical on CPU (smsharma/clax#54).
 HALOFIT_PARAMS_REF = {
     "lcdm_fiducial": (0.24570584575996515, -1.7411794478559754, 0.3411749812387166),

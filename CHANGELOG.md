@@ -11,8 +11,10 @@ power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 ### Oct 25, 2026: C_l, C_l^phiphi and lensed C_l are differentiable at fit_cl (#54)
 
 Design record: ADR 0005. Every number is measured on main at 5ac3df3, before #58
-(which gives fit_cl a massive-neutrino hierarchy) and the open #60/#61; V100 and
-JAX 0.9.2 unless a CPU job is named. F = sum_{l=30}^{1200} ln C_l (TT unless named).
+(which gives fit_cl a massive-neutrino hierarchy), #60 and #61. Main is now at
+6ff1303 with all three merged (Oct 25, 2026) and nothing here is re-measured on it
+(Not done). V100 and JAX 0.9.2 unless a CPU job is named. F = sum_{l=30}^{1200}
+ln C_l (TT unless named).
 
 **Bug (smsharma/clax#54).** No C_l gradient existed at fit_cl.
 `compute_cls_all_fast` sized its Bessel table j_l(k chi) from float(k_max tau_0),
@@ -38,6 +40,9 @@ float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
   prec. EPT's R = P_NL/P_lin is splined over the fixed EPT nodes and read at the
   exact perturbation k, R = 1 at the last node (one-loop EFT invalid at 1.48 h/Mpc;
   <= 8.7e-6 from the old spectra for h in [0.62, 0.72]); its IR grid follows h.
+- Under jit the lensing path keeps its eager k-range checks as run-time guards (main
+  could not jit it at all): a narrower pt_mpk or a mismatched prec raises instead of
+  silently clamping P_lin or resizing Halofit.
 
 **Fixed on the way (pre-existing).**
 - Every Halofit gradient, P_NL included, missed the response of the nonlinear scale
@@ -47,8 +52,6 @@ float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
 - The EPT h-derivative lacked the motion of the IR-resummation grid, frozen at a
   concrete h. Per-k dP/dh matches FD to a median 1.4e-5 (max 2.6e-4), against
   1.9e-3 with the frozen grid; EPT P(k) moves by <= 1.6e-12 (CPU 28628/30245/28536).
-- Under jit, a narrower pt_mpk or a mismatched prec silently clamped P_lin or
-  resized Halofit; both now raise.
 
 **Measured** (at fiducial, omega_b + 20% and Y_He = 0.28 unless stated).
 - Lookup (fiducial). Smoothness of dF/dh over h = 0.64-0.70 (cubic residual, bar
@@ -87,25 +90,38 @@ float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
   C_l^phiphi cases pass, pytest reports an error, and their marks must go.
 - Rodas5's steps differ between compilations (primals 4.7e-6 apart, 2.5e-11 on
   Kvaerno5): F wobbles by 1e-8 at fit_cl tolerance; FD along omega_b floors at 1e-3.
+  Follow-up drafted.
 - z_rec is a thermodynamics grid knot: dF_pp/dh misses FD by 0.55-2.9% (4.9e-5
-  with z_rec frozen). 18 cases marked to fail pass on a #61 overlay.
+  with z_rec frozen). 18 cases marked to fail pass on a #61 overlay (#61 is merged in
+  main 6ff1303; the rebase removes the marks).
 - The gradient costs 4.8x a forward evaluation, against a 3x budget (waived): the
   reverse pass through the perturbation solve alone takes 33.7 s. Follow-ups drafted.
 
-**Not done.** fit_cl's neutrino hybrid (#57; massive_nu_015 TT 4.9% off CLASS);
-regenerating the three old references. The generator of
+**Not done.** The rebase onto main 6ff1303 (#58, #60 and #61 merged): it re-measures
+every fit_cl number (the neutrino hierarchy takes the perturbation state from 61 to
+106 variables: forward time, the 4.8x gradient cost, the 6.2 GiB peak, G1-G5),
+regenerates the C_l-vs-CLASS baseline with the generator (to be committed), and removes
+the 18 z_rec expected-fail markers (#61 is in). fit_cl's neutrino hybrid (#57;
+massive_nu_015 TT 4.9% off CLASS at 5ac3df3; #58 changes it); regenerating the three old
+references; the memory and time of the lensed gradients (the overlay reverse jobs
+28549-28553 and 28769-28771 ran to completion on V100-32GB, no per-case figure was
+recorded). The generator of
 tests/data/cl_vs_class_baseline.* is not committed (path and sha1 in its
-`_provenance`); regenerating it after #58/#60 needs it. The origin of a Kvaerno5
+`_provenance`); regenerating it after #58/#60/#61 needs it. The origin of a Kvaerno5
 reverse-vs-forward floor, 1.6-7.2e-6 (1.5-2.7e-6 at 100x tighter tolerance), while
 the perturbation solve alone is an exact transpose (6e-15, job 27848). Out of
 scope: #56, planck_cl's absolute accuracy, fit_cl at l < 30, slow C_l paths,
 tensor B-modes, CLAUDE.md's stale figures.
 
-**Tests.** New: tests of the Bessel lookup, table guards, C_l and lensing gradients,
-C_l vs CLASS (baseline in tests/data/), TestHaloFitTangent, jitted guards in
-test_cl_pp.py; CLASS cl_pp.npz at five cosmologies. --fast shares one Bessel-table
-build (-47 s on CPU) and one narrow lensing solve (-12 min). Gate (CPU): --fast 519
-passed, 1 failed, 1271 skipped in 1:22:36 (job 30250; 1:34:04 before, job 30160).
+**Tests.** New: tests/test_cl_bessel_lookup.py (the lookup against direct j_l),
+test_cl_table_guard.py (guards and the n_k_fine rule), test_cl_gradients.py (G1-G4,
+RF1/RF4), test_cl_lensing_gradients.py (G5), test_cl_vs_class.py (C_l vs CLASS,
+baseline in tests/data/), test_cl_reference.py (the cl_pp.npz references, five
+cosmologies); TestHaloFitTangent in test_nonlinear.py; jitted guards in test_cl_pp.py.
+--fast shares one Bessel-table
+build (-47 s on CPU) and one narrow lensing solve (-12 min). Gate (CPU): --fast 521
+passed, 1 failed, 1271 skipped in 1:24:14 (job 30276, on 6e9810d with the two
+n_k_fine tests; 519 passed in 1:22:36 before them, job 30250).
 Failing on the base too: `test_pk_rosenbrock_vs_kvaerno5` (max_steps) and, in full
 mode, `test_cls_chebyshev_path_matches_spline_path` (ratio 1.0170).
 

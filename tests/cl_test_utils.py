@@ -38,10 +38,12 @@ G4_PT_RTOL, G4_PT_ATOL, G4_MAX_STEPS = 1e-6, 1e-8, 65536
 
 def g4_prec(solver, th_n_points, tight=True):
     """fwd settings, the given perturbation solver, the 8000-point background (the
-    800-point floor of clax-72 is not what limits the FD along h, Task 4b), optionally
-    a denser thermodynamics grid (th_n_points; None keeps fit_cl's), and, if `tight`,
+    800-point background-table AD noise, smsharma/clax#56, is not what limits the FD
+    along h: at 8000 points the FD steps 1e-3 and 3e-3 still differ by 6.9e-4, job
+    27227), optionally a denser thermodynamics grid (th_n_points; None keeps
+    fit_cl's), and, if `tight`,
     the perturbation ODE tolerance 100x below fit_cl's (G4_PT_RTOL, G4_PT_ATOL;
-    ode_max_steps G4_MAX_STEPS so no mode starves). The G4 tests and the Task 6 lensing
+    ode_max_steps G4_MAX_STEPS so no mode starves). The G4 tests and the lensing
     FD tests build their finite-difference precision here: tight=True for the gated AD
     and the FD stencil, tight=False (fit_cl's own tolerance and step cap) for the
     printed AD record."""
@@ -109,8 +111,9 @@ def F_harm(inputs, theta):
 
 
 def _cl_pp(p, prec, bg, th, pt, nonlinear):
-    # F_pp and F_ltt serve the Task 6 lensing tests (tests/test_cl_lensing_gradients.py).
-    # They pass prec= to compute_cl_pp, a keyword Task 6 adds; the Task 5 tests never call them.
+    # F_pp and F_ltt serve the lensing tests (tests/test_cl_lensing_gradients.py);
+    # the unlensed-C_l tests (tests/test_cl_gradients.py) never call them.
+    # prec= is passed to compute_cl_pp, which needs it to jit or differentiate.
     pt_mpk = None if nonlinear == "none" else perturbations_solve_mpk(p, prec, bg, th)
     return compute_cl_pp(pt, p, bg, th, CL_LMAX, nonlinear=nonlinear, pt_mpk=pt_mpk, prec=prec)
 
@@ -172,7 +175,7 @@ def fd_agree(fd1, fd3, tol=1e-4):
 def converged_fd(F, x0):
     """Central FD at relative steps 1e-3 and 3e-3; converged if they agree to 1e-4.
     Returns (the 1e-3-step FD, converged flag); use fd_pair for both FD values.
-    Kept for the Task 6 lensing tests; the Task 5 G4 tests use stencil_fd, because
+    No test calls it now: the G4 tests (unlensed and lensed) use stencil_fd, because
     the two-step agreement test cannot be met at fit_cl (see test_g4_ad_matches_converged_fd).
     """
     fd1, fd3 = fd_pair(F, x0)

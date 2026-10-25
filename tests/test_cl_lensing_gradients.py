@@ -24,32 +24,34 @@ AD gave d R_nl / d theta = 0 and every Halofit derivative here missed FD by 11-3
 (C_l^phiphi) and 0.1-2.3% (lensed TT) (jobs 28542-28547; primal bit-identical, job
 28762; unit test tests/test_nonlinear.py::TestHaloFitTangent).
 
-Three tests, split so that one failing check cannot hide the others (ruling R24):
+Three tests, split so that one failing check cannot hide the others:
 1. test_g5_forward_matches_fd_kvaerno5 -- the gate. Forward-mode AD against a stencil
    finite difference on Kvaerno5, whose step sequence reproduces between
-   compilations (primals to ~1e-9, Task 5).
+   compilations (primals to ~1e-9, job 27726).
 2. test_g5_forward_matches_fd_rodas5 -- companion on fit_cl's production solver,
    Rodas5, whose accepted-step sequence can change between two compilations of the
    same function (jobs 27675/27676: primals 4.7e-6 apart), so its bar adds the FD
    estimate's own spread to the spec bar.
 3. test_g5_production_reverse_matches_forward -- production reverse mode against
    forward mode. Every reverse-mode gradient through Rodas5 at fit_cl is NaN on main
-   (vmapped k-batches run masked dt = 0 steps; Task 4, job 26946); the fix is its own
+   (vmapped k-batches run masked dt = 0 steps; job 26946); the fix is its own
    PR (fix/rodas5-reverse-nan-v2), so this test is xfail(strict=True) here (XFAIL_REV).
    On the branch all 36 cases are NaN in reverse and xfail (jobs 28548/28550/28552,
-   28690/28692/28694). With that fix (scratch overlay, --runxfail, jobs listed in
-   XFAIL_REV) the 18 pp cases pass (1.9e-9 to 5.9e-5) and will XPASS, the strict
-   signal to drop their marker; the 18 lensed_tt cases miss by 3.4e-4 to 6.4e-3
-   because the production RecursiveCheckpointAdjoint through Rodas5 differs from
-   forward mode (Task 5's G2-production defect), so their marker stays.
+   28690/28692/28694). With that fix (a local overlay on this branch, not committed;
+   --runxfail, jobs listed in XFAIL_REV) the 18 pp cases pass (1.9e-9 to 5.9e-5) and
+   will XPASS, the strict signal to drop their marker; the 18 lensed_tt cases miss by
+   3.4e-4 to 6.4e-3 because the production RecursiveCheckpointAdjoint through Rodas5
+   differs from forward mode, the same defect the unlensed C_l functional shows
+   (tests/test_cl_gradients.py, test_g2_production_reverse_matches_forward; jobs
+   27742-27744), so their marker stays.
 
-Finite-difference anchor (rulings R38, R43; Task 5's G4). At fit_cl tolerance
-(rtol 1e-4, atol 1e-6) sum ln C_l wobbles along omega_b at ~1e-8 relative (and
-~2e-9 along h) because the Rodas5 solve's accepted-step sequence changes with the
-parameters (scan report taustar-scan-report.md: residual RMS 1.9e-8 at rtol 1e-4,
-1.6e-9 at rtol 1e-6). A 1% stencil turns that into ~1e-3 in the derivative, the
-size of the bar. Therefore AD and FD alike are evaluated at g4_prec: perturbation
-tolerance tightened 100x (rtol 1e-6, atol 1e-8, ode_max_steps 65536),
+Finite-difference anchor (the same as the unlensed G4 test in tests/test_cl_gradients.py).
+At fit_cl tolerance (rtol 1e-4, atol 1e-6) sum ln C_l wobbles along omega_b at ~1e-8
+relative (and ~2e-9 along h) because the Rodas5 solve's accepted-step sequence changes
+with the parameters (scan jobs 28117, 28245, 28262-28265: residual RMS about a cubic
+1.9e-8 at rtol 1e-4, 1.6e-9 at rtol 1e-6). A 1% stencil turns that into ~1e-3 in the
+derivative, the size of the bar. Therefore AD and FD alike are evaluated at g4_prec:
+perturbation tolerance tightened 100x (rtol 1e-6, atol 1e-8, ode_max_steps 65536),
 bg_n_points 8000 and, for omega_b, th_n_points 20000 (G4_TH; fit_cl's 3000-point
 recombination grid makes F(omega_b) a staircase, PR #59 ADR 0004). The FD is
 stencil_fd: a least-squares cubic through 9 evaluations at x0 (1 + s), |s| <= 0.01;
@@ -71,12 +73,12 @@ knot moves smoothly inside the 1% stencil at omega_b_high (job 28610), but at
 lcdm_fiducial it jumps by one index at s = -1% (z_rec +0.54 against a -0.035 trend
 per step, job 28698), so the FD spread is 2.2e-3; with z_rec frozen, AD/fd9 - 1 =
 -2.3e-4, unc 4.8e-5. The cases this makes fail are xfail(strict) per cosmology
-(ZREC_K5, ZREC_R5, applied at run time with request.applymarker, ruling R52) until PR
+(ZREC_K5, ZREC_R5, applied at run time with request.applymarker) until PR
 smsharma/clax#61 (z_rec by linear interpolation of kappa = 1). A case not listed
 passes as it is: the Rodas5 companion at lcdm_fiducial, for instance, because the
 knot's FD spread also widens its allowance. Lensed TT dilutes the channel below the
 bar. th.tau_star, also a knot, sets the perturbation save grid; its effect on
-unlensed TT was +4.6e-9 (Task 5 scan).
+unlensed TT was a single step of +4.6e-9 of |F| along h (scan job 28168).
 """
 import jax
 import jax.numpy as jnp
@@ -96,8 +98,8 @@ XFAIL_REV = pytest.mark.xfail(
            "fix/rodas5-reverse-nan-v2, own PR). With that fix (overlay jobs 28549/28551/28553/"
            "28696, 28691/28693/28695, 28769-28771) pp passes (1.9e-9 to 5.9e-5, 18 cases) and "
            "lensed_tt still misses by 3.4e-4 to 6.4e-3 (18 cases): the "
-           "RecursiveCheckpointAdjoint through Rodas5 differs from forward mode (Task 5's "
-           "production-adjoint defect)")
+           "RecursiveCheckpointAdjoint through Rodas5 differs from forward mode (the "
+           "production-adjoint defect of the unlensed C_l functional, jobs 27742-27744)")
 ZREC_REASON = ("th.z_rec is a thermodynamics grid knot (thermodynamics.py:1004); continuous "
                "in PR #61")
 NONLINEAR = ("none", "halofit", "ept")
@@ -138,7 +140,7 @@ ZREC_R5 = {
 
 
 def _xfail_if_zrec(request, cases, name, theta, func, nonlinear):
-    """Mark this case xfail(strict, AssertionError) if `cases` lists it (ruling R52)."""
+    """Mark this case xfail(strict, AssertionError) if `cases` lists it."""
     miss = cases.get((name, theta, func, nonlinear))
     if miss is not None:
         request.applymarker(pytest.mark.xfail(

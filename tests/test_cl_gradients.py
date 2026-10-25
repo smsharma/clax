@@ -40,16 +40,19 @@ step-sequence sensitivity (scan jobs 28117, 28245, 28262-28265: residual RMS abo
 cubic 1.9e-8 at fit_cl, 1.6e-9 at 100x tighter, 1.5e-9 at 10^4x tighter), and a 1% stencil
 turns that into ~1e-3 in the derivative, the size of the bar. The tolerance is a
 precision setting of the reference, like the 8000-point background grid used by G3 and
-G4; neither bar moves. G1-G3 stay at fit_cl tolerance. Scan report: taustar-scan-report.md
-in .superpowers/sdd/2026-10-18-cl-differentiability/ (local scratch, not in the repo).
+G4; neither bar moves. G1-G3 stay at fit_cl tolerance. The wobble is not the
+recombination epoch tau_star: holding tau_star fixed changes F by <= 9e-10 and leaves the
+residual unchanged, and the background solve is excluded too (scan jobs 28117, 28133,
+28168, 28190).
 
 Reverse-mode tests (G2, RF1 companion) and which one to read. Every reverse-mode
 gradient at fit_cl is NaN on main's Rodas5, because vmapped k-batches run masked
 dt = 0 steps (smsharma/clax#54, job 26946); the fix is in its own PR
 (fix/rodas5-reverse-nan-v2). All reverse-mode tests below are therefore
 xfail(strict=True) on this branch, strict so that the fix landing flips them to a
-hard XPASS failure, the signal to drop the marker. With that fix and PR #59 on a
-scratch tree (jobs 27742/27743/27744, 27802/27861; direct adjoint 27924-27926):
+hard XPASS failure, the signal to drop the marker. With that fix and PR #59 applied as
+a local overlay on this branch (not committed; jobs 27742/27743/27744, 27802/27861;
+direct adjoint 27924-27926):
 - test_g2_direct_adjoint_reverse_matches_forward is the gate to read: jax.grad under
   the direct adjoint equals the forward-mode derivative, the statement that the
   C_l pipeline's reverse mode is correct (the thermodynamics gradient mode, stable
@@ -61,12 +64,17 @@ scratch tree (jobs 27742/27743/27744, 27802/27861; direct adjoint 27924-27926):
   xfail records it; the RF1 Rodas5 companion records its eager-vs-jit scatter.
 
 When the Rodas5 NaN fix merges, three of the strict production-adjoint cases are expected
-to XPASS, because they sit under the 3e-4 bar on the scratch tree (jobs 27742-27744):
+to XPASS, because they sit under the 3e-4 bar on that overlay (jobs 27742-27744):
 test_g2_production_reverse_matches_forward[lcdm_fiducial-omega_cdm] (2.1e-4) and
 [omega_b_high-omega_cdm] (1.9e-4), and
 test_rf1_jit_of_grad_equals_grad_rodas5_companion[omega_b_high] (1.4e-4). The strict
 markers then fail the run loudly; they become per-case (applied only to the cases that
-still miss the bar), and the NaN markers on G2-direct are dropped.
+still miss the bar), and the NaN markers on G2-direct are dropped. The two h cases of
+test_g2_production_reverse_matches_forward at lcdm_fiducial (3.078e-4) and omega_b_high
+(3.095e-4) sit within 3% of the 3e-4 bar, and Rodas5's scatter between compilations of
+one derivative is ~1e-5 (job 27675): a strict per-case mark there can alternate between
+XFAIL and XPASS(strict) from run to run, so mark those two non-strict, or measure
+several compilations first.
 """
 from dataclasses import replace
 
@@ -169,7 +177,7 @@ def test_g2_production_reverse_matches_forward(recomb_downstream_cosmology, thet
 def test_g3_smooth_along_h(recomb_downstream_cosmology):
     name, base = recomb_downstream_cosmology
     hs = np.linspace(0.64, 0.70, 7)
-    prec = replace(fwd(FIT), bg_n_points=8000)    # 800-point background floor (clax-72)
+    prec = replace(fwd(FIT), bg_n_points=8000)    # 800-point background-table AD noise (smsharma/clax#56)
     d = [jvp_scalar(F_tt(prec, replace(base, h=float(h)), "h"), float(h)) for h in hs]
     r = cubic_residual(hs, d)
     print(f"G3 {name}: dF/dh along h {d} cubic residual {r:.3e}")
@@ -196,9 +204,9 @@ def test_g4_ad_matches_converged_fd(recomb_downstream_cosmology, theta):
     in dF/domega_b, the size of the bar, so the 9-point FD along omega_b had uncertainty
     3.9e-4 / 3.4e-4 / 1.9e-3 (lcdm_fiducial / omega_b_high / YHe_028, jobs 27966-27968)
     and could not anchor AD. The tolerance is a precision setting of the reference, like
-    the 8000-point background grid; the bars are unchanged. Scan report:
-    taustar-scan-report.md in .superpowers/sdd/2026-10-18-cl-differentiability/ (local
-    scratch, not in the repo).
+    the 8000-point background grid; the bars are unchanged. The wobble is not the
+    recombination epoch tau_star (holding it fixed changes F by <= 9e-10; scan jobs
+    28117, 28133, 28168, 28190).
 
     Why a stencil rather than two central differences that must agree to 1e-4: along h
     the two-step scatter did not move with the ODE tolerance (probe job 27869: 5.5e-4 at

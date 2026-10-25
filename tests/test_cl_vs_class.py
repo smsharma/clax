@@ -2,6 +2,12 @@
 at fit_cl and planck_cl against CLASS is no worse than the pre-#54 code (5ac3df3)
 in any l band. GPU. Multi-cosmology: cl_value_cosmology.
 
+This is an acceptance gate tied to the stored baseline's _provenance.base_commit
+(5ac3df3), not a standing regression gate: it compares live spectra with spectra
+stored from that commit, so once upstream physics changes the fit_cl or planck_cl spectra
+(#58, #60 and #61 have, since) it measures those changes, not this branch. Regenerate
+the baseline on the new base (or retire the test) at that point.
+
 The criterion (the slack 1e-4 is the plan's; docs/adr/0005-cl-differentiability.md,
 Decision 8). At a multipole (or, for the band-maximum form below, over a band) the
 fix passes if EITHER
@@ -34,7 +40,7 @@ alone would flag the removed bias; branch (2) passes it. The TT 30-100 margin
 is about 1e-6 by construction (the slack equals the removed bias): the tightest
 band of each case has 0.75-2.3e-6 left on its better branch (3.8e-6 at
 massive_nu_015 fit_cl, on branch (2)), least at planck_cl omega_b_high l = 47
-(7.5e-7; GPU jobs 30237-30241). So a rebase onto #58/#60 re-measures it; so does
+(7.5e-7; GPU jobs 30237-30241). So a rebase onto #58/#60/#61 re-measures it; so does
 a JAX/XLA upgrade
 (measured with JAX 0.9.2 on a V100) or a CPU run, because Rodas5 step sequences
 depend on compile order (job 27675).

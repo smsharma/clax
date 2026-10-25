@@ -1,6 +1,7 @@
 # C_ℓ differentiability at `fit_cl` — design (smsharma/clax#54)
 
 - **Date:** Oct 18, 2026
+- **Note (Oct 25, 2026):** this design record is superseded by `docs/adr/0005-cl-differentiability.md` (the ADR number moved from 0004 to 0005, and the draft issue cited below as clax-72's is smsharma/clax#56). The text is kept as written.
 - **Branch:** `fix/cl-differentiability`, worktree `/home/n2minh/clax-cl`, stacked on #53's head `2717b5c`.
 - **Issue:** #54.
 - **Related:** #48/#53 (smooth recombination; prerequisite), #55 (P(k) gradient biases; out of scope), clax-72's unposted draft on 800-point background-table AD noise (`/lustre/work/n2minh/clax-probes/recomb/issue-bg-resolution-ad-noise.md`; out of scope).

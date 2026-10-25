@@ -7,12 +7,13 @@ Issue: https://github.com/smsharma/clax/issues/54 (related: #53 / ADR 0003,
 
 Every number below was measured on the branch's base, upstream main at 5ac3df3
 (after #53, #49-#51 and #59; before #58, which gives `fit_cl` a massive-neutrino
-hierarchy, and before the open #60 and #61), on V100-32GB GPUs with JAX 0.9.2
-unless a CPU job is named. The lookup comparison of Decision 2 and some value
-measurements ran on 99b62fe, just before #59; #59 changes derivatives through
-the thermodynamics but leaves every value bit-identical (ADR 0004), and the
-lookup comparison sets two lookups against each other on one and the same
-solve. A rebase onto a later main re-measures the C_l-versus-CLASS baseline
+hierarchy, and before #60 and #61), on V100-32GB GPUs with JAX 0.9.2 unless a CPU
+job is named. Main has since moved to 6ff1303 with #58, #60 and #61 merged
+(Oct 25, 2026); nothing here has been re-measured on it (Not done). The lookup
+comparison of Decision 2 and some value measurements ran on 99b62fe, just before
+#59; #59 changes derivatives through the thermodynamics but leaves every value
+bit-identical (ADR 0004), and the lookup comparison sets two lookups against each
+other on one and the same solve. A rebase onto a later main re-measures the C_l-versus-CLASS baseline
 (Consequences).
 
 F_TT, F_pp and F_lTT below are sum_{l=30}^{1200} of ln C_l^TT (unlensed),
@@ -183,12 +184,15 @@ every P_NL gradient through `compute_pk_nonlinear`, lensing or not.
        (k_sigma, n_eff, C along the amplitude of P_lin and along a shift of
        ln k), worst 2.3e-4 against a bar of 1e-3. All 30 derivative cases fail
        on the old code (job 30067).
-   - **Two guards replace silent clamps under jit.**
+   - **Two guards keep the eager k-range checks as run-time checks under jit.**
+     Main's lensing path could not be jitted at all. Reading P_lin with
+     `validate=False` (the eager support check needs concrete arrays) would have
+     let a bad input pass silently, so each check is repeated as a run-time guard:
      - A P_lin query outside the k-range that pt_mpk was solved on raises.
-       Before, the spline clamped at pt_mpk's k_max, and R(k), C_l^phiphi and
-       lensed TT came out silently wrong.
-     - A `prec` whose `pt_k_max_cl` differs from `pt.k_grid[-1]` raises. Before,
-       it silently resized the Halofit k-extension.
+       Without the guard the spline clamps at pt_mpk's k_max, and R(k),
+       C_l^phiphi and lensed TT come out silently wrong.
+     - A `prec` whose `pt_k_max_cl` differs from `pt.k_grid[-1]` raises. Without
+       the guard it silently resizes the Halofit k-extension.
      - The guards change no formula, but they change the compiled program: the
        Halofit and EPT C_l^phiphi and lensed TT move by <= 1.4e-15, and their
        d/dh by <= 4.7e-14, deterministically (jobs 30065/30072). The compiled
@@ -304,7 +308,7 @@ every P_NL gradient through `compute_pk_nonlinear`, lensing or not.
   - The margins in TT 30-100 are about 1e-6: the tightest band of each case
     keeps 0.75-2.3e-6 to the 1e-4 slack on its better branch (3.8e-6 at
     massive_nu_015 `fit_cl`). They are small by construction, because the slack
-    equals the removed bias. A rebase onto #58 or #60, a JAX/XLA upgrade or a
+    equals the removed bias. A rebase onto #58, #60 or #61, a JAX/XLA upgrade or a
     CPU run re-measures them.
 - **Two documented exceptions: `fit_cl` TE and lensed TE at l = 2-30.**
   - They grow by +2.50e-3 (massive_nu_015), +3.65e-3 (h_high), +4.01e-3
@@ -387,7 +391,8 @@ tolerance unless stated).
     smooth motion, while finite differences also see its one-index jumps.
     dF_pp/dh therefore misses finite differences by 0.55-2.9%; with z_rec held
     fixed it matches to 4.9e-5 (job 28583).
-  - PR #61 makes z_rec continuous. On a #61 overlay all 24 affected cases
+  - PR #61 (merged in main 6ff1303, Oct 24, 2026) makes z_rec continuous. On a
+    #61 overlay all 24 affected cases
     pass: <= 2.7e-4 against finite differences on Kvaerno5, <= 4.8e-4 in the
     Rodas5 companion (jobs 28623-28625, 28772-28777).
   - On this base the 18 affected cases are marked, per cosmology, as expected
@@ -453,11 +458,22 @@ tolerance unless stated).
     per case.
   - `tests/test_cl_lensing_gradients.py`: the 18 C_l^phiphi reverse-mode
     cases. The 18 lensed-TT cases stay marked.
-- **z_rec, tau_star and the other epochs** are grid values of the
-  thermodynamics table; #61 makes them continuous. A rebase onto #61 removes
-  the 18 z_rec markers.
-- **The massless-neutrino treatment of `fit_cl`** (#57), and #58, which changes
-  it; every `fit_cl` number above predates #58.
+- **The rebase onto main 6ff1303.** #58, #60 and #61 are merged there (Oct 25,
+  2026), and every number in this record was measured at 5ac3df3, before them.
+  The rebase has to:
+  - re-measure every `fit_cl` number: #58's neutrino hierarchy takes the
+    perturbation state from 61 to 106 variables, which moves the forward time,
+    the 4.8x gradient cost, the 6.2 GiB peak and the G1-G5 values;
+  - regenerate the C_l-versus-CLASS baseline with the generator (to be
+    committed, next bullet) and re-derive the TE allowances;
+  - remove the 18 z_rec expected-fail markers: #61 makes z_rec, tau_star and
+    the other epochs continuous, so they pass (pytest reports an error until
+    the markers go).
+- **The massless-neutrino treatment of `fit_cl`** (#57), which #58 changes; every
+  `fit_cl` number above predates #58.
+- **Memory and time of the lensed gradients** (Decision 6 asks for them). The
+  overlay reverse jobs of C_l^phiphi and lensed TT (28549-28553, 28769-28771)
+  ran to completion on V100-32GB; no per-case time or peak memory was recorded.
 - **The unlensed and lensed CLASS references** of lcdm_fiducial, omega_b_high
   and h_high are not regenerated on the current CLASS build.
 - **The generator of the C_l-versus-CLASS baseline**
@@ -481,7 +497,9 @@ tolerance unless stated).
 
 ## Status
 
-Accepted on branch `fix/cl-differentiability`, on main 5ac3df3. It closes #54.
+Accepted on branch `fix/cl-differentiability`, on main 5ac3df3. Main is now at
+6ff1303 with #58, #60 and #61 merged (Oct 25, 2026); every number here was
+measured at 5ac3df3, before them (Not done: the rebase). It closes #54.
 
 Depends on:
 - **ADR 0003** (#53, recombination staging). The h-gradient smoothness this ADR
@@ -494,8 +512,8 @@ Depends on:
 
 Interacts with:
 - the Rodas5 reverse-NaN PR, which removes the NaN expected failures;
-- #61, which removes the z_rec ones;
-- #58 and #60, which move `fit_cl`'s spectra and require
+- #61 (merged in main), which removes the z_rec ones;
+- #58 and #60 (merged in main), which move `fit_cl`'s spectra and, with #61, require
   `tests/data/cl_vs_class_baseline.{json,npz}` (whose generator is not yet
   committed, Not done) to be regenerated before the
   C_l-versus-CLASS gate means anything.
