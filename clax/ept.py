@@ -769,7 +769,7 @@ def _ir_resummation_jax(
     pk_lin_h: Float[Array, "N"],
     k_h_static: np.ndarray,
     rs_h: Float[Array, ""],
-    h_conc: float,
+    h: Array | float,
 ) -> tuple[Float[Array, "N"], Float[Array, "N"], Float[Array, ""], Float[Array, ""]]:
     """Traced JAX counterpart of :func:`_ir_resummation_numpy`.
 
@@ -810,26 +810,24 @@ def _ir_resummation_jax(
     ln10A_s-class residual (job 13132): pk_nw structurally dropping
     d(pk_nw)/d(pk_lin_h) is exactly the derivative this function restores;
     `test_pk_nw_gradient_exists_and_matches_fd` in
-    tests/test_ir_resummation_jax.py checks it directly against FD. TWO
-    frozen channels survive this closure, consistent with
-    `compute_ept_from_clax`'s docstring (~2221-2231): (1) THIS function's
-    own DST grid endpoints (k_min2/k_max2 above, built from a concrete
-    h_conc) and the static `in_range` mask derived from them -- now the
-    leading suspect for the measured h end-to-end residual (see the CAVEAT
-    on the ENDPOINTS DELIBERATELY STATIC comment below, and the h FINDING
-    in tests/test_ept_gradients.py); and (2) the RSD FFTLog basis (phase 2,
-    pinned explicitly at compute_ept's `_ir_precomputed` RSD consumption) --
-    unaffected by this function, which sits one level upstream of that
-    split.
+    tests/test_ir_resummation_jax.py checks it directly against FD. ONE
+    frozen channel survives, consistent with `compute_ept_from_clax`'s
+    docstring: the RSD FFTLog basis (phase 2, pinned explicitly at
+    compute_ept's `_ir_precomputed` RSD consumption), one level downstream
+    of this function. The DST grid (k_min2 = 7e-5/h .. k_max2 = 7/h) and the
+    `in_range` mask follow the traced h since smsharma/clax#54; before, they
+    were built from a concrete stop_gradient(h) (zero AD gradient by
+    construction, the channel the h FINDING in tests/test_ept_gradients.py
+    discusses), which also kept the EPT stage out of jit.
 
     Args:
         pk_lin_h:   P_lin(k) in (Mpc/h)^3, shape (N,), TRACED
         k_h_static: k in h/Mpc, shape (N,), static numpy (grid, not traced)
         rs_h:       r_s(z_d) * h in Mpc*h (see `_ir_resummation_numpy`
                     docstring for the exact convention), TRACED
-        h_conc:     Hubble parameter h = H0/100, Python float, STATIC
-                    (fixes the DST grid endpoints only -- see the freeze
-                    comment below)
+        h:          Hubble parameter h = H0/100, traced or float; sets the
+                    DST grid endpoints 7e-5/h and 7/h (the grid's SHAPE,
+                    N_IR, is static)
 
     Returns:
         pk_nw:        no-wiggle (broadband) P(k), same shape as input, jnp
@@ -847,21 +845,15 @@ def _ir_resummation_jax(
     # BAO oscillation is n_BAO ≈ kmax2/BAO_period, so a 4% kmax2 difference
     # shifts the BAO mode by 4%, causing different Pnw extraction.
     N_IR = 65536
-    k_min2 = 7e-5 / h_conc   # 0.00007 1/Mpc in h/Mpc (CLASS-PT kmin2)
-    k_max2 = 7.0 / h_conc    # 7 1/Mpc in h/Mpc (CLASS-PT kmax2)
-    # ENDPOINTS DELIBERATELY STATIC: CLASS-PT-hardcoded cuts (nonlinear_pt.c:2748);
-    # their h-derivative is a boundary term with negligible content (P·k weight
-    # ~0 at both cuts). Everything BETWEEN the cuts is traced.
-    # CAVEAT (measured, not closed by the above): this "negligible content"
-    # argument covers only the boundary VALUES. The h-derivative of the GRID
-    # ITSELF -- not just its endpoints -- shifts the whole interior
-    # discretization that pk_nw is extracted on under central FD (h_conc is a
-    # genuinely different float at h0+eps vs h0-eps), while under AD at fixed
-    # h this snapshot is a constant with zero gradient by construction. That
-    # mismatch measured a 1.3831e-02 residual on the h end-to-end gradient
-    # (job 14146); this is the concrete phase-2 item -- see the h FINDING in
-    # tests/test_ept_gradients.py.
-    k_ir = np.linspace(k_min2, k_max2, N_IR)
+    k_min2 = 7e-5 / h   # 0.00007 1/Mpc in h/Mpc (CLASS-PT kmin2)
+    k_max2 = 7.0 / h    # 7 1/Mpc in h/Mpc (CLASS-PT kmax2)
+    # The grid follows the traced h (static shape N_IR; smsharma/clax#54): jit needs
+    # no concrete h, and AD differentiates the grid's motion with h as central FD
+    # sees it. Built from a concrete stop_gradient(h) before #54 (zero AD gradient by
+    # construction; see the h FINDING in tests/test_ept_gradients.py). Primal change
+    # from computing the grid in jnp instead of numpy: EPT P_mm(k) <= 1.6e-12,
+    # C_l^phiphi-ept <= 7.2e-16 at fiducial (reordered arithmetic; #54 Task 6).
+    k_ir = jnp.linspace(k_min2, k_max2, N_IR)
 
     # --- DST input: ln(k P) on the linear grid ---------------------------------
     # Line for line with `_ir_resummation_numpy`; see the long block comment
@@ -870,11 +862,11 @@ def _ir_resummation_jax(
     # required. The knots (`lnk_src`) are static grid arithmetic; the values
     # (`lnpk_src`) are traced, so clax.interpolation.CubicSpline carries the
     # derivative through, as it already does for the mode-removal spline below.
-    ln_h2 = 2.0 * np.log(h_conc)
+    ln_h2 = 2.0 * jnp.log(h)
     lnk_src = np.log(k_h_static)
     lnpk_src = jnp.log(jnp.clip(pk_lin_h, 1e-300, None))
-    lnk_ir = np.log(k_ir)
-    lnpk_ir = CubicSpline(jnp.asarray(lnk_src), lnpk_src).evaluate(jnp.asarray(lnk_ir))
+    lnk_ir = jnp.log(k_ir)
+    lnpk_ir = CubicSpline(jnp.asarray(lnk_src), lnpk_src).evaluate(lnk_ir)
     # Power-law extrapolation outside the source table (nonlinear_pt.c:2779 with
     # ppm->n_s, :2788 with the last local slope); unreachable for every clax
     # grid, and stated explicitly so the two twins cannot drift on the
@@ -950,9 +942,9 @@ def _ir_resummation_jax(
     f_nw_ir = idst2_ortho(f_dst_nw)
     pk_nw_ir = jnp.exp(jnp.clip(f_nw_ir + ln_h2, -700, 700)) / k_ir
 
-    # Map back to input k-grid; outside [k_min2, k_max2] set Pnw = Plin
+    # Map back to input k-grid; outside [k_min2, k_max2] set Pnw = Plin. The mask
+    # follows the traced h (no assert: a traced value cannot be tested in Python).
     in_range = (k_h_static >= k_min2) & (k_h_static <= k_max2)
-    assert in_range.sum() > 1
     pk_nw = jnp.where(
         in_range,
         jnp.exp(
@@ -970,18 +962,18 @@ def _ir_resummation_jax(
     # IntegrandBAO = P_nw × [1 - 3sin(qr)/(qr) + 6(sin(qr)/(qr)³ - cos(qr)/(qr)²)]
     # cf. nonlinear_pt.c:2926: ks = 0.2 * pba->h (1/Mpc) = 0.2 h/Mpc
     k_s = 0.2  # h/Mpc
-    k_int = np.geomspace(k_min2, k_s, 1000)
+    k_int = jnp.geomspace(k_min2, k_s, 1000)
     pk_nw_int = jnp.exp(
         jnp.interp(jnp.log(k_int), jnp.log(k_ir), jnp.log(jnp.clip(pk_nw_ir, 1e-300, None)))
     )
-    x_bao = jnp.asarray(k_int) * rs_h
+    x_bao = k_int * rs_h
     bao_filter = (
         1.0
         - 3.0 * jnp.sin(x_bao) / x_bao
         + 6.0 * (jnp.sin(x_bao) / x_bao ** 3 - jnp.cos(x_bao) / x_bao ** 2)
     )
     sigma2_bao = (
-        jnp.trapezoid(pk_nw_int * bao_filter * k_int, x=np.log(k_int)) / (6.0 * jnp.pi ** 2)
+        jnp.trapezoid(pk_nw_int * bao_filter * k_int, x=jnp.log(k_int)) / (6.0 * jnp.pi ** 2)
     )
 
     # δΣ_BAO² (anisotropic second damping scale):
@@ -991,7 +983,7 @@ def _ir_resummation_jax(
         3.0 * jnp.cos(x_bao) * x_bao + (-3.0 + x_bao ** 2) * jnp.sin(x_bao)
     ) / x_bao ** 3
     delta_sigma2_bao = (
-        jnp.trapezoid(pk_nw_int * bao_filter2 * k_int, x=np.log(k_int)) / (2.0 * jnp.pi ** 2)
+        jnp.trapezoid(pk_nw_int * bao_filter2 * k_int, x=jnp.log(k_int)) / (2.0 * jnp.pi ** 2)
     )
 
     return pk_nw, pk_w, sigma2_bao, delta_sigma2_bao
@@ -2677,11 +2669,10 @@ def compute_ept_from_clax(
     the two channels that used to be stop_gradient'd here: the 1.39%-class
     pk_nw/ln10A_s residual (job 13132) and the rs_h (sound-horizon) channel
     (previously bounded below -1.0e2 of the stage h-gradient, GPU job
-    13313). Two channels remain deliberately frozen:
-      - the DST grid endpoints inside `_ir_resummation_jax` itself, built
-        from a concrete h_conc = stop_gradient(h) (np.linspace(7e-5/h,
-        7/h, ...) needs a fixed shape, not a differentiability choice --
-        see that function's docstring);
+    13313). The DST grid endpoints inside `_ir_resummation_jax` follow the
+    traced h since smsharma/clax#54 (they were built from a concrete
+    stop_gradient(h), which also kept this function out of jit). One channel
+    remains deliberately frozen:
       - the RSD FFTLog basis (`_pk_nw_np_rsd`/`_pk_w_np_rsd` at
         compute_ept's `_ir_precomputed` RSD consumption): PHASE-2 FREEZE,
         deferred by this PR -- see the inline comment there and
@@ -2695,14 +2686,7 @@ def compute_ept_from_clax(
 
     from clax.background import sound_horizon_drag
 
-    h = params.h  # traced: carries d(pk_h)/dh AND the k-resampling channel
-    # Concrete copy EXISTS ONLY for the DST grid endpoints inside
-    # _ir_resummation_jax below (7e-5/h .. 7/h feeding np.linspace, which
-    # must stay concrete -- see that function's docstring). Do NOT reuse
-    # h_conc anywhere else: reusing it for k_mpc was the frozen resampling
-    # channel measured at -9.48e4 of the stage h-gradient (GPU job 13313,
-    # issue #30 item 4).
-    h_conc = float(jax.lax.stop_gradient(h))
+    h = params.h  # traced: carries d(pk_h)/dh, the k-resampling channel and the IR grid
 
     # Alcock-Paczynski ratios (nonlinear_pt.c:1245-1296). The branch is on the
     # STATIC omfid, never on a traced value; ap_ratios itself is differentiable
@@ -2721,10 +2705,9 @@ def compute_ept_from_clax(
 
     # Traced IR resummation: d(pk_nw)/d(params) and d(Sigma^2)/d(params)
     # now flow (closes the 1.39% ln10A_s / 1.19% h structural residual,
-    # issue #30). Only the DST grid endpoints stay pinned (see
-    # _ir_resummation_jax) and the RSD FFTLog basis (phase 2, below).
+    # issue #30). Only the RSD FFTLog basis stays pinned (phase 2, below).
     rs_h_traced = sound_horizon_drag(params) * params.h
-    ir_pre = _ir_resummation_jax(pk_h, k_h, rs_h_traced, h_conc)
+    ir_pre = _ir_resummation_jax(pk_h, k_h, rs_h_traced, h)
     return compute_ept(pk_h, jnp.array(k_h), h=h, f=f, prec=prec,
                         # rs_h is a dead argument on the _ir_precomputed path
                         # (audit 2026-08-31: only reaches the untaken numpy
