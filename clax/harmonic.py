@@ -889,9 +889,24 @@ def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab):
             _hermite(jp0, jp1, jpp0, jpp1, t, dx_tab))
 
 
+# Fine k-grid size of compute_cls_all_fast when neither n_k_fine nor prec is
+# given (the eager, no-prec path); with prec the preset's hr_n_k_fine is used.
+_N_K_FINE_NO_PREC = 5000
+
+
+def _resolve_n_k_fine(n_k_fine, prec):
+    """Fine k-grid size of compute_cls_all_fast: an explicit n_k_fine wins; else
+    prec.hr_n_k_fine when prec is given; else 5000 (the eager no-prec path)."""
+    if n_k_fine is not None:
+        return n_k_fine
+    if prec is not None:
+        return prec.hr_n_k_fine
+    return _N_K_FINE_NO_PREC
+
+
 def compute_cls_all_fast(
     pt, params, bg, l_max=1500,
-    n_k_fine=5000, tt_mode=None,
+    n_k_fine=None, tt_mode=None,
     k_interp_method="spline",
     x_per_unit=JL_TABLE_X_PER_UNIT,
     *, prec=None,
@@ -945,11 +960,14 @@ def compute_cls_all_fast(
         params: CosmoParams for primordial spectrum
         bg: BackgroundResult for conformal age
         l_max: maximum multipole (default 1500)
-        n_k_fine: fine k-grid points for source interpolation (default 5000).
-            Pass prec.hr_n_k_fine (20000 at fit_cl, planck_cl, planck_fast):
-            at 5000 the trapezoid over ln k samples |T_l(k)|^2 about once per
-            oscillation near l ~ 1200, and at fit_cl dC_l/dh changes sign
-            along h (#54). The default is not taken from prec.
+        n_k_fine: fine k-grid points for source interpolation. Default None:
+            with ``prec`` the grid follows the preset (prec.hr_n_k_fine, 20000
+            at fit_cl, planck_cl, planck_fast); without ``prec`` (the eager
+            path) it is 5000, the value before #54. It matters because at 5000
+            the trapezoid over ln k samples |T_l(k)|^2 about once per
+            oscillation near l ~ 1200: at fit_cl dF/dh (F = sum ln C_l^TT)
+            came out -1492.5 against the converged -251.5, and changed sign
+            along h. An explicit n_k_fine overrides both.
         tt_mode: unused (always uses T0+T1+T2)
         k_interp_method: "spline" (default) or "chebyshev" -- passed
             through to _interp_sources_to_fine_k. "chebyshev" requires
@@ -987,6 +1005,8 @@ def compute_cls_all_fast(
     Returns:
         dict with 'ell', 'tt', 'ee', 'te' (arrays of length l_max+1)
     """
+    n_k_fine = _resolve_n_k_fine(n_k_fine, prec)
+
     # 1. Source interpolation to fine k-grid
     log_k_coarse = jnp.log(pt.k_grid)
     log_k_fine = _fine_log_k_grid(log_k_coarse, n_k_fine)

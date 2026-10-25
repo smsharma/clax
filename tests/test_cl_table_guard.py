@@ -5,7 +5,8 @@ from dataclasses import replace
 import jax
 import pytest
 
-from clax.harmonic import compute_cls_all_fast
+from clax import PrecisionParams, harmonic
+from clax.harmonic import _resolve_n_k_fine, compute_cls_all_fast
 
 
 def test_tau0_beyond_bound_raises(pipeline_fast_cl):
@@ -33,3 +34,35 @@ def test_guard_silent_at_fiducial(pipeline_fast_cl):
     params, prec, bg, th, pt = pipeline_fast_cl
     tt = compute_cls_all_fast(pt, params, bg, l_max=50, prec=prec)["tt"]
     assert float(tt[10]) > 0, "ERROR C_l not positive with prec given"
+
+
+def test_resolve_n_k_fine():
+    """The fine k-grid of compute_cls_all_fast follows the preset when prec is
+    given and n_k_fine is not (at fit_cl 5000 points sample |T_l|^2 about once
+    per oscillation near l ~ 1200 and dF/dh is 6x off, #54); an explicit
+    n_k_fine wins; the eager no-prec path keeps 5000. Pure resolver, no solve."""
+    fit = PrecisionParams.fit_cl()
+    assert fit.hr_n_k_fine == 20000
+    assert _resolve_n_k_fine(None, fit) == fit.hr_n_k_fine
+    assert _resolve_n_k_fine(None, replace(fit, hr_n_k_fine=777)) == 777
+    assert _resolve_n_k_fine(1234, fit) == 1234
+    assert _resolve_n_k_fine(None, None) == 5000
+    assert _resolve_n_k_fine(1234, None) == 1234
+
+
+def test_default_k_grid_follows_prec(pipeline_fast_cl, monkeypatch):
+    """compute_cls_all_fast hands the resolved size to the fine k-grid builder:
+    prec.hr_n_k_fine when n_k_fine is not passed, the explicit value otherwise."""
+    params, prec, bg, th, pt = pipeline_fast_cl
+    seen = []
+    real = harmonic._fine_log_k_grid
+
+    def spy(log_k_coarse, n_k_fine):
+        seen.append(n_k_fine)
+        return real(log_k_coarse, n_k_fine)
+
+    monkeypatch.setattr(harmonic, "_fine_log_k_grid", spy)
+    custom = replace(prec, hr_n_k_fine=777)
+    jax.block_until_ready(compute_cls_all_fast(pt, params, bg, l_max=50, prec=custom)["tt"])
+    jax.block_until_ready(compute_cls_all_fast(pt, params, bg, l_max=50, prec=custom, n_k_fine=555)["tt"])
+    assert seen == [777, 555], f"ERROR fine k-grid sizes {seen}, expected [777, 555]"

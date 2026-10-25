@@ -31,8 +31,9 @@ float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
   `compute_cls_all_fast` and `compute_cl_pp` take `prec=`, required to jit or grad.
 - j_l, j_l' come from a cubic Hermite lookup of the stored values and slopes at 3
   points per unit x (`JL_TABLE_X_PER_UNIT` 30 -> 3); reverse mode recomputes each
-  multipole's lookups. fit_cl `hr_n_k_fine` 5000 -> 20000: callers pass
-  `n_k_fine=prec.hr_n_k_fine` (the function default is still 5000).
+  multipole's lookups. fit_cl `hr_n_k_fine` 5000 -> 20000;
+  `compute_cls_all_fast(n_k_fine=None)` follows `prec.hr_n_k_fine` when `prec` is
+  given (5000 only on the eager no-prec path; an explicit value wins).
 - Lensing: Halofit's z-grid follows the traced z_rec, its k-extension is sized from
   prec. EPT's R = P_NL/P_lin is splined over the fixed EPT nodes and read at the
   exact perturbation k, R = 1 at the last node (one-loop EFT invalid at 1.48 h/Mpc;
@@ -92,7 +93,7 @@ float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
   reverse pass through the perturbation solve alone takes 33.7 s. Follow-ups drafted.
 
 **Not done.** fit_cl's neutrino hybrid (#57; massive_nu_015 TT 4.9% off CLASS);
-regenerating the three old references; tying `n_k_fine` to prec. The generator of
+regenerating the three old references. The generator of
 tests/data/cl_vs_class_baseline.* is not committed (path and sha1 in its
 `_provenance`); regenerating it after #58/#60 needs it. The origin of a Kvaerno5
 reverse-vs-forward floor, 1.6-7.2e-6 (1.5-2.7e-6 at 100x tighter tolerance), while

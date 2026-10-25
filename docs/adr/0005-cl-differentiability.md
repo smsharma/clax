@@ -131,8 +131,10 @@ every P_NL gradient through `compute_pk_nonlinear`, lensing or not.
    - Without it dF_TT/dh changes sign along h for any lookup. With it the
      derivative is smooth (Decision 2).
    - Cost: +3.7% of eager forward time (job 27208).
-   - The default `n_k_fine=5000` of `compute_cls_all_fast` itself is unchanged.
-     Only callers that pass `n_k_fine=prec.hr_n_k_fine` get the preset's 20000.
+   - `compute_cls_all_fast` takes `n_k_fine=None`: with `prec` the grid follows
+     `prec.hr_n_k_fine`, so a caller that passes `prec` and forgets `n_k_fine`
+     no longer integrates on 5000 points (dF/dh 6x off, sign-changing). Without
+     `prec` (the eager path) the default stays 5000. An explicit `n_k_fine` wins.
 
 5. **Lensing traces everything that depends on cosmology, on fixed shapes.**
    - **Halofit.**
@@ -424,7 +426,8 @@ tolerance unless stated).
 
 **Interface.**
 - To jit or differentiate, callers pass `prec=` to `compute_cls_all_fast` and
-  `compute_cl_pp`, and `n_k_fine=prec.hr_n_k_fine` to `compute_cls_all_fast`.
+  `compute_cl_pp`; `compute_cls_all_fast` then takes its fine k-grid from
+  `prec.hr_n_k_fine`.
 - A cosmology with tau_0 > `hr_tau0_max` (20000 Mpc) raises instead of reading
   past the table. Raise the bound to serve it.
 - The EPT C_l^phiphi correction is built differently (Decision 5). It agrees
@@ -457,8 +460,6 @@ tolerance unless stated).
   it; every `fit_cl` number above predates #58.
 - **The unlensed and lensed CLASS references** of lcdm_fiducial, omega_b_high
   and h_high are not regenerated on the current CLASS build.
-- **The default `n_k_fine=5000` of `compute_cls_all_fast`** is not tied to
-  `prec.hr_n_k_fine` when `prec` is given.
 - **The generator of the C_l-versus-CLASS baseline**
   (`tests/data/cl_vs_class_baseline.{json,npz}`) is not in the repository. It
   is a scratch script, recorded in the JSON's `_provenance` by path and sha1,
