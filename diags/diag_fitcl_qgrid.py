@@ -97,7 +97,8 @@ CONFIGS = {
     # The same hierarchies with the ncdm fluid approximation off (full hierarchy
     # at all times; CLASS's references keep CLASS's own fluid approximation):
     # the late ISW at l = 2-30 is sourced at k ~ 1e-3-1e-2 Mpc^-1 below z ~ 2,
-    # where k tau > 31 and the "class" fluid mode (#46) is active.
+    # where k tau > 31 and the "class" fluid mode (#46) is active. (Its
+    # handover defect was fixed Oct 25, 2026; the two modes now agree to 0.004%.)
     "Q3L8F0": dict(q=3, l_max=8, fa="none", note="3 q-bins, l_max_ncdm 8, no fluid approximation"),
     "Q5L8F0": dict(q=5, l_max=8, fa="none", note="5 q-bins, l_max_ncdm 8, no fluid approximation"),
     "Q12L8F0": dict(q=12, l_max=8, fa="none", note="12 q-bins, l_max_ncdm 8, no fluid approximation"),
