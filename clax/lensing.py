@@ -378,8 +378,8 @@ def _ept_modulator(
     log_q = jnp.log(pt.k_grid) - jnp.log(h)        # pt k in h/Mpc, log
     # The last pt node (k = prec.pt_k_max_cl; static index) keeps R0 = 1: one-loop
     # EFT is not valid there (1 Mpc^-1 = 1.48 h/Mpc at fit_cl), and the base never
-    # applied the ratio at that node (<= 8.7e-6 in C_l^pp vs base at every h,
-    # Task 6 jobs 28562/28571/28576).
+    # applied the ratio at that node (<= 8.7e-6 in C_l^pp vs base at every h in
+    # [0.62, 0.72], jobs 28562/28571/28576).
     not_last = jnp.arange(pt.k_grid.shape[0]) < pt.k_grid.shape[0] - 1
     inside = (log_q >= log_k_h[0]) & (log_q <= log_k_h[-1]) & not_last
     log_q_c = jnp.clip(log_q, log_k_h[0], log_k_h[-1])

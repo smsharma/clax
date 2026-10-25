@@ -200,11 +200,16 @@ def build_jl_table(l_max, n_x=30000, x_max=15000.0):
     recurrence (accurate for x >= l) at a hard switch at x = l.
 
     The tables are built for a sparse l-grid (from ``sparse_l_grid``) on a
-    uniform x-grid.  Callers interpolate the table at query x-values using
-    ``searchsorted`` + linear weights.
+    uniform x-grid.  The caller, ``harmonic.compute_cls_all_fast``, looks
+    them up with a cubic Hermite interpolant in x from the stored j_l and
+    j_l' at the two neighbouring nodes (``harmonic._lookup_jl``; j_l'' from
+    Bessel's equation), not with linear weights: a linear lookup biases the
+    amplitude by about -h^2/12 at spacing h and its AD derivative is the
+    chord slope, constant on each interval (smsharma/clax#54,
+    docs/adr/0005-cl-differentiability.md).
 
-    j_l' is needed for TT transfer functions (T1 ISW dipole term).
-    Lensing only uses j_l but the derivative cost is marginal.
+    j_l' is needed for TT transfer functions (T1 ISW dipole term) and is the
+    slope of the Hermite lookup.
 
     Args:
         l_max: maximum l value
@@ -217,8 +222,10 @@ def build_jl_table(l_max, n_x=30000, x_max=15000.0):
         jlp_table: (n_l, n_x) blended j_l'(x) values
 
     See also:
-        ``harmonic.compute_cls_all_fast`` and ``lensing.compute_cl_pp_vmap``
-        which consume these tables.
+        ``harmonic.compute_cls_all_fast``, which consumes these tables through
+        ``harmonic._jl_tables``: one build per (l_max, n_x, x_max) in a
+        process, on the fixed range x_max = 1.05 pt_k_max_cl hr_tau0_max
+        (fit_cl: 63000 points at 3 per unit x, 85 rows, 82 MiB).
     """
     l_sparse = sparse_l_grid(l_max)
     n_l = len(l_sparse)

@@ -8,6 +8,106 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
 power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 `compute_cl_pp(... nonlinear="ept")`.**
 
+### Oct 25, 2026: C_l, C_l^phiphi and lensed C_l are differentiable at fit_cl (#54)
+
+Design record: ADR 0005. Every number is measured on main at 5ac3df3, before #58
+(which gives fit_cl a massive-neutrino hierarchy) and the open #60/#61; V100 and
+JAX 0.9.2 unless a CPU job is named. F = sum_{l=30}^{1200} ln C_l (TT unless named).
+
+**Bug (smsharma/clax#54).** No C_l gradient existed at fit_cl.
+`compute_cls_all_fast` sized its Bessel table j_l(k chi) from float(k_max tau_0),
+so jvp, grad and jit raised for every parameter that moves the conformal age;
+reverse mode would have stored ~46 GB. The linear table lookup made AD's dj_l/dx
+the chord slope, a staircase: dF/dh came out 1.7% low and rough (1.4e-2 about its
+trend along h). 5000 fine k points sampled |T_l(k)|^2 once per oscillation near
+l ~ 1200, so dF/dh changed sign along h (-1492.5 at fiducial against the converged
+-251.5). The Halofit and EPT lensing corrections branched on float(z_rec),
+float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
+
+**Fix.**
+- The Bessel table covers a fixed x-range, 1.05 pt_k_max_cl hr_tau0_max (new field
+  `PrecisionParams.hr_tau0_max` = 20000 Mpc), built once per process (82 MiB at
+  fit_cl); it raises if tau_0 exceeds the bound or k chi the table.
+  `compute_cls_all_fast` and `compute_cl_pp` take `prec=`, required to jit or grad.
+- j_l, j_l' come from a cubic Hermite lookup of the stored values and slopes at 3
+  points per unit x (`JL_TABLE_X_PER_UNIT` 30 -> 3); reverse mode recomputes each
+  multipole's lookups. fit_cl `hr_n_k_fine` 5000 -> 20000: callers pass
+  `n_k_fine=prec.hr_n_k_fine` (the function default is still 5000).
+- Lensing: Halofit's z-grid follows the traced z_rec, its k-extension is sized from
+  prec. EPT's R = P_NL/P_lin is splined over the fixed EPT nodes and read at the
+  exact perturbation k, R = 1 at the last node (one-loop EFT invalid at 1.48 h/Mpc;
+  <= 8.7e-6 from the old spectra for h in [0.62, 0.72]); its IR grid follows h.
+
+**Fixed on the way (pre-existing).**
+- Every Halofit gradient, P_NL included, missed the response of the nonlinear scale
+  R_nl (a bisection with zero AD tangent): d k_sigma/dA_s 0 against -0.195 by FD,
+  dF_pp/dtheta 11-31% and lensed dF/dtheta 0.1-2.3% off. R_nl now carries the
+  implicit-function tangent (primal bit-identical at five cosmologies; FD to 8.5e-5).
+- The EPT h-derivative lacked the motion of the IR-resummation grid, frozen at a
+  concrete h. Per-k dP/dh matches FD to a median 1.4e-5 (max 2.6e-4), against
+  1.9e-3 with the frozen grid; EPT P(k) moves by <= 1.6e-12 (CPU 28628/30245/28536).
+- Under jit, a narrower pt_mpk or a mismatched prec silently clamped P_lin or
+  resized Halofit; both now raise.
+
+**Measured** (at fiducial, omega_b + 20% and Y_He = 0.28 unless stated).
+- Lookup (fiducial). Smoothness of dF/dh over h = 0.64-0.70 (cubic residual, bar
+  3e-4): Hermite at 3 points per unit x 5.6e-6, at 30 5.9e-6, linear at 30 1.36e-2.
+  Hermite 3 vs 30: gradients <= 6e-6, C_l^TT <= 1.6e-5; 82 MiB vs 0.80 GiB.
+- A 0.1% rtol jitter times jit/eager moves dF/dtheta by <= 6.5e-6 (h), 1.65e-4
+  (omega_b), 1.3e-5 (omega_cdm); bar 3e-4. dF/dh is smooth along h to <= 7.4e-6.
+- AD vs a 9-point FD stencil at 100x tighter perturbation tolerance (Kvaerno5):
+  <= 3.3e-4 (h), 6.2e-4 (omega_b), 3.5e-5 (omega_cdm); bar 1e-3. AD at fit_cl
+  tolerance is within 2.8e-4 of it; the harmonic stage alone: jit(grad) = grad to
+  3.7e-14. Lensed dF vs FD <= 8.7e-4; dF_pp/d omega_b <= 2.0e-4 (not at fiducial).
+- C_l vs CLASS against the old code at equal k-grid (five cosmologies; fit_cl and
+  planck_cl; TT/EE/TE, C_l^phiphi, lensed TT/EE/TE/BB): every band passes, its
+  error grown by <= 1e-4 or the spectrum moved by <= 1e-4 (l by l from l = 30).
+  planck_cl EE l = 2-4: 0.596% -> 0.151%. Hermite raises TT near l ~ 45 by
+  9.6-9.9e-5: the linear table's bias -(dx)^2/12 at spacing dx = 1/30, removed
+  (margins ~1e-6).
+  Documented: fit_cl TE and lensed TE l = 2-30 +2.5e-3 to +4.5e-3 (allowance 5e-3);
+  fit_cl EE at l = 2 0.74-0.88% further from CLASS, under a band maximum at
+  l = 10-15. The k-grid change alone moves fit_cl TT l = 100-1200 up to 1.6% toward
+  CLASS, EE/TE l = 500-1200 2.2e-3/6.5e-3 away (job 27208).
+- The lcdm_fiducial, omega_b_high and h_high cls.npz / cls_lensed.npz predate the
+  CLASS build (v3.3.4) of the new cl_pp.npz: up to 2.5e-3 of reference noise (job
+  26859). Both codes use the same files; the printed old-vs-new shift is primary.
+- Cost: eager forward 0.70x the old code at equal k-grid (0.72x vs the old 5000);
+  gradient over 20 parameters 31.8 s = 4.8x the 6.7 s jitted forward; peak 6.2 GiB.
+
+**Uncovered, not fixed.**
+- Production reverse mode is silently wrong: through batched Rodas5 the default
+  `ode_adjoint="recursive_checkpoint"` misses forward mode by 3.1e-4-2.0e-3 (h),
+  1.2e-3-7.2e-3 (omega_b), 1.9e-4-1.5e-3 (omega_cdm); the direct adjoint is right
+  to 1.2e-5 at 2.6x the time. Mechanism open; issue to be filed.
+- Reverse mode through Rodas5 at fit_cl is NaN on main (masked dt = 0 steps); the
+  fix is its own PR, so those tests are marked as expected to fail, strictly. When
+  it merges, 9 direct-adjoint, 2 production-adjoint, 1 jit-of-grad and 18
+  C_l^phiphi cases pass, pytest reports an error, and their marks must go.
+- Rodas5's steps differ between compilations (primals 4.7e-6 apart, 2.5e-11 on
+  Kvaerno5): F wobbles by 1e-8 at fit_cl tolerance; FD along omega_b floors at 1e-3.
+- z_rec is a thermodynamics grid knot: dF_pp/dh misses FD by 0.55-2.9% (4.9e-5
+  with z_rec frozen). 18 cases marked to fail pass on a #61 overlay.
+- The gradient costs 4.8x a forward evaluation, against a 3x budget (waived): the
+  reverse pass through the perturbation solve alone takes 33.7 s. Follow-ups drafted.
+
+**Not done.** fit_cl's neutrino hybrid (#57; massive_nu_015 TT 4.9% off CLASS);
+regenerating the three old references; tying `n_k_fine` to prec. The generator of
+tests/data/cl_vs_class_baseline.* is not committed (path and sha1 in its
+`_provenance`); regenerating it after #58/#60 needs it. The origin of a Kvaerno5
+reverse-vs-forward floor, 1.6-7.2e-6 (1.5-2.7e-6 at 100x tighter tolerance), while
+the perturbation solve alone is an exact transpose (6e-15, job 27848). Out of
+scope: #56, planck_cl's absolute accuracy, fit_cl at l < 30, slow C_l paths,
+tensor B-modes, CLAUDE.md's stale figures.
+
+**Tests.** New: tests of the Bessel lookup, table guards, C_l and lensing gradients,
+C_l vs CLASS (baseline in tests/data/), TestHaloFitTangent, jitted guards in
+test_cl_pp.py; CLASS cl_pp.npz at five cosmologies. --fast shares one Bessel-table
+build (-47 s on CPU) and one narrow lensing solve (-12 min). Gate (CPU): --fast 519
+passed, 1 failed, 1271 skipped in 1:22:36 (job 30250; 1:34:04 before, job 30160).
+Failing on the base too: `test_pk_rosenbrock_vs_kvaerno5` (max_steps) and, in full
+mode, `test_cls_chebyshev_path_matches_spline_path` (ratio 1.0170).
+
 ### Oct 20, 2026: The opacity tables carry their full tangents; dP(k)/d omega_b and d omega_cdm follow finite differences (#55, #45)
 
 **Bug (smsharma/clax#55, #45).** The five opacity tables perturbations.py reads

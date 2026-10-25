@@ -84,7 +84,16 @@ def test_stage_grad_h_matches_fd_per_k(fast_mode, request):
     ``tests/test_ept_gradients.py`` for the mechanism) remain a candidate, as
     for that test's residual, but nothing measured so far singles it out.
 
-    Ratchet arithmetic: 2x the largest of the current measurements
+    UPDATE (Oct 25, 2026, smsharma/clax#54): that candidate was the residual.
+    The DST grid endpoints and the ``in_range`` mask now follow the traced h
+    (static shape; no concrete ``h_conc``), so AD differentiates the grid's
+    motion as central FD sees it. On CPU this test reads median 1.879e-03 (max
+    1.324e-02) on main 5ac3df3 with the frozen grid (job 30245; #48's
+    recombination change is already in that tree) and median 1.423e-05 (max
+    2.559e-04) with the traced grid (job 28628). The 0.004 bar below is left as
+    it was; the paragraphs above and below describe the frozen grid.
+
+    Ratchet arithmetic: 2x the largest of the frozen-grid measurements
     (1.930e-03 CPU upstream; 1.926e-03 CPU and 1.924e-03 GPU on this
     branch) is 3.86e-03, rounded up to one significant figure is 4e-3. The
     bound is tightened from 0.02 (2x the stale 9.825e-03) to 0.004. The GPU

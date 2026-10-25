@@ -358,34 +358,38 @@ class TestPtMpk:
         assert ("ept", True) in seen and ("lin", True) in seen, seen
         assert all(ok for _, ok in seen), seen
 
-    def test_pt_mpk_with_narrower_k_range_raises(self, pipeline):
+    @pytest.fixture(scope="class")
+    def pt_narrow(self, pipeline):
+        """The tau0-complete matter solve on a NARROWER k-range than the pipeline's
+        (fast_cl at pt_k_max_cl = 1 instead of 5), solved once for the three
+        narrow-range tests below. Each of them used to solve it itself: about
+        360-420 s of CPU apiece, most of this file's --fast time after the pipeline
+        fixture (job 30244)."""
+        from dataclasses import replace
+        from clax import PrecisionParams
+        from clax.perturbations import perturbations_solve_mpk
+        params, bg, th, _, _ = pipeline
+        narrow = replace(PrecisionParams.fast_cl(), pt_k_max_cl=1.0, pt_k_chunk_size=20)
+        return perturbations_solve_mpk(params, narrow, bg, th)
+
+    def test_pt_mpk_with_narrower_k_range_raises(self, pipeline, pt_narrow):
         """A pt_mpk solved at another precision must not silently misalign:
         P_lin is evaluated at explicit k, and k outside pt_mpk's support is
         rejected."""
-        from dataclasses import replace
-        from clax import PrecisionParams
         from clax.lensing import compute_cl_pp
-        from clax.perturbations import perturbations_solve_mpk
         params, bg, th, pt, _ = pipeline
-        narrow = replace(PrecisionParams.fast_cl(), pt_k_max_cl=1.0, pt_k_chunk_size=20)
-        pt_narrow = perturbations_solve_mpk(params, narrow, bg, th)
         with pytest.raises(ValueError, match="solved perturbation grid"):
             compute_cl_pp(pt, params, bg, th, l_max=10, nonlinear="halofit", pt_mpk=pt_narrow)
 
     @pytest.mark.parametrize("nl", ["halofit", "ept"])
-    def test_pt_mpk_with_narrower_k_range_raises_under_jit(self, pipeline, nl):
+    def test_pt_mpk_with_narrower_k_range_raises_under_jit(self, pipeline, pt_narrow, nl):
         """Jitted twin of test_pt_mpk_with_narrower_k_range_raises (smsharma/clax#54):
         under jit the eager support check cannot read the traced pt_mpk grid, so the
         modulators' guard on the queried k (eqx.error_if) must raise at run time;
         without it the P_lin spline clamps at pt_mpk's k_max and R(k) is silently
         wrong."""
-        from dataclasses import replace
-        from clax import PrecisionParams
         from clax.lensing import compute_cl_pp
-        from clax.perturbations import perturbations_solve_mpk
         params, bg, th, pt, _ = pipeline
-        narrow = replace(PrecisionParams.fast_cl(), pt_k_max_cl=1.0, pt_k_chunk_size=20)
-        pt_narrow = perturbations_solve_mpk(params, narrow, bg, th)
         prec = _pipeline_prec()
         f = jax.jit(lambda pm: compute_cl_pp(pt, params, bg, th, l_max=10, nonlinear=nl,
                                              pt_mpk=pm, prec=prec))

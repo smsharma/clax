@@ -852,7 +852,7 @@ def _ir_resummation_jax(
     # sees it. Built from a concrete stop_gradient(h) before #54 (zero AD gradient by
     # construction; see the h FINDING in tests/test_ept_gradients.py). Primal change
     # from computing the grid in jnp instead of numpy: EPT P_mm(k) <= 1.6e-12,
-    # C_l^phiphi-ept <= 7.2e-16 at fiducial (reordered arithmetic; #54 Task 6).
+    # C_l^phiphi-ept <= 7.2e-16 at fiducial (reordered arithmetic; #54, job 28536).
     k_ir = jnp.linspace(k_min2, k_max2, N_IR)
 
     # --- DST input: ln(k P) on the linear grid ---------------------------------

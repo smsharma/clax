@@ -1119,6 +1119,18 @@ j_l(x) ≈ cos(x - (l+1)π/2) / x  for x >> l
 
 These smooth approximations are differentiable.
 
+**Tabulated j_l for the fast C_l path** (`harmonic.compute_cls_all_fast`,
+`bessel.build_jl_table`): j_l and j_l' are tabulated for the sparse l grid on a
+uniform x grid at 3 points per unit x (`JL_TABLE_X_PER_UNIT`) over a fixed range
+x ∈ [0, 1.05 · pt_k_max_cl · hr_tau0_max], built once per process and reused for
+every cosmology. They are looked up with a cubic Hermite interpolant from the
+tabulated values and slopes (j_l'' from Bessel's equation). The reason: a linear
+lookup biases the amplitude by -(Δx)²/12 at table spacing Δx and its AD
+derivative is the chord slope, a staircase in x; Hermite's error falls as (Δx)⁴
+and its derivative is smooth. So C_l is at least as accurate at 3 points per
+unit x as the linear lookup was at 30, and dC_l/dθ is smooth, which the linear
+lookup's chord-slope derivative is not at any density measured (ADR 0005, #54).
+
 ### 4.14 ODE Solver Utilities
 
 **Files**: `ode.py`, `rosenbrock.py`

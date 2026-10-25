@@ -17,8 +17,10 @@ reference and the step sequence, not about the physics:
   is an exact transpose (job 27848), so the floor arises upstream of it; its origin is
   not established.
 - Rodas5 (linearly implicit; fit_cl's production solver) accepts or rejects steps
-  by comparisons that compile-order roundoff can flip (Task 4 jobs 27675/27641:
-  primals 4.7e-6 apart between two compilations of the same function). G1 and G3
+  by comparisons that compile-order roundoff can flip (jobs 27675/27676: primals
+  4.7e-6 apart between two compilations of the same function; job 27641: an
+  algebraically exact rewrite of the step flipped the decisions in 31 of 100
+  k-modes). G1 and G3
   (forward mode) stay on it, and G4 and the full-pipeline RF1/RF4 each have a
   Rodas5 companion with a bar that includes that noise.
 
@@ -43,7 +45,7 @@ in .superpowers/sdd/2026-10-18-cl-differentiability/ (local scratch, not in the 
 
 Reverse-mode tests (G2, RF1 companion) and which one to read. Every reverse-mode
 gradient at fit_cl is NaN on main's Rodas5, because vmapped k-batches run masked
-dt = 0 steps (smsharma/clax#54, Task 4, job 26946); the fix is in its own PR
+dt = 0 steps (smsharma/clax#54, job 26946); the fix is in its own PR
 (fix/rodas5-reverse-nan-v2). All reverse-mode tests below are therefore
 xfail(strict=True) on this branch, strict so that the fix landing flips them to a
 hard XPASS failure, the signal to drop the marker. With that fix and PR #59 on a
@@ -115,8 +117,15 @@ def test_g1_step_placement(recomb_downstream_cosmology, theta):
     |median|. The k-mode chunk size is not an axis: each k-mode keeps its own adaptive
     step sequence inside a vmapped batch, so pt_k_chunk_size 8 and 64 give bit-identical
     derivatives in the C_l path (all 9 cases of jobs 27739-27741). A 0.1% tolerance
-    jitter changes the accepted-step sequence (Rodas5 re-integrates a different sequence
-    after any such change, jobs 27675/27641) while leaving the accuracy of F unchanged."""
+    jitter does change the accepted-step sequence while leaving the accuracy of F
+    unchanged: with it the four derivatives are no longer bit-identical, and their
+    spreads are 3.0e-7 / 6.5e-6 / 5.4e-7 (h), 1.65e-4 / 1.2e-5 / 8.0e-6 (omega_b) and
+    1.3e-5 / 2.8e-6 / 4.4e-6 (omega_cdm) at lcdm_fiducial / omega_b_high / YHe_028
+    (jobs 28454, 28487). The largest, dF/domega_b at lcdm_fiducial at 55% of the bar,
+    is how that derivative depends on the fit_cl tolerance itself (690.198 at rtol x 1.0
+    against 690.31 at x 1.001, jit and eager agreeing to <= 4.1e-6 at each), consistent
+    with the G4 convergence record: AD at fit_cl tolerance and at 100x tighter tolerance
+    differ by <= 2.8e-4 along omega_b (jobs 28321-28323)."""
     name, base = recomb_downstream_cosmology
     x0 = float(getattr(base, theta))
     v = [jvp_scalar(F_tt(replace(fwd(FIT), pt_ode_rtol=FIT.pt_ode_rtol * f), base, theta),
@@ -220,7 +229,7 @@ def test_g4_rodas5_companion(recomb_downstream_cosmology, theta):
     that motivates it was measured on Rodas5, see the gate's docstring) and the same
     stencil_fd. Asserts |AD - fd9| <= 1e-3 |AD| + unc |fd9|: the spec bar plus the FD
     estimate's own spread, kept because Rodas5's accepted-step sequence is not
-    reproducible (jobs 27675/27641: primals 4.7e-6 apart between compilations). Prints
+    reproducible (jobs 27675/27676: primals 4.7e-6 apart between compilations). Prints
     AD at fit_cl's own tolerance next to AD at the tight one (not gated), fd9, fd7 and
     unc."""
     name, base = recomb_downstream_cosmology

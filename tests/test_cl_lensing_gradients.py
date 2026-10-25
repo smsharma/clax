@@ -30,7 +30,7 @@ Three tests, split so that one failing check cannot hide the others (ruling R24)
    compilations (primals to ~1e-9, Task 5).
 2. test_g5_forward_matches_fd_rodas5 -- companion on fit_cl's production solver,
    Rodas5, whose accepted-step sequence can change between two compilations of the
-   same function (jobs 27675/27641: primals 4.7e-6 apart), so its bar adds the FD
+   same function (jobs 27675/27676: primals 4.7e-6 apart), so its bar adds the FD
    estimate's own spread to the spec bar.
 3. test_g5_production_reverse_matches_forward -- production reverse mode against
    forward mode. Every reverse-mode gradient through Rodas5 at fit_cl is NaN on main
@@ -179,7 +179,7 @@ def test_g5_forward_matches_fd_rodas5(request, recomb_downstream_cosmology, func
     stencil_fd. Asserts AD and FD finite and |AD - fd9| <= 1e-3 |AD| + unc |fd9|:
     the spec bar plus the FD estimate's own spread, kept because Rodas5's
     accepted-step sequence is not reproducible between compilations (jobs
-    27675/27641: primals 4.7e-6 apart), so the FD reference carries that noise."""
+    27675/27676: primals 4.7e-6 apart), so the FD reference carries that noise."""
     name, base = recomb_downstream_cosmology
     _xfail_if_zrec(request, ZREC_R5, name, theta, func, nonlinear)
     x0 = float(getattr(base, theta))

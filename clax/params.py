@@ -195,7 +195,12 @@ class PrecisionParams:
     hr_n_k_fine: int = 5000          # fine k-grid for source interpolation
     hr_l_max: int = 2500             # max multipole for C_l computation
     hr_l_limber: int = 0             # use Limber approx for l >= this (0=disabled)
-    hr_tau0_max: float = 20000.0     # Mpc; upper bound on tau_0 fixing the Bessel-table x-range (#54)
+    # Mpc; upper bound on the conformal age tau_0 that fixes the fast path's
+    # Bessel-table range, x_max = 1.05 pt_k_max_cl hr_tau0_max, independent of
+    # cosmology so the table is built once (#54, ADR 0005). Fiducial tau_0 is
+    # ~14100 Mpc; compute_cls_all_fast raises (also under jit) if tau_0 exceeds
+    # this bound. Raising it widens the table proportionally (82 MiB at fit_cl).
+    hr_tau0_max: float = 20000.0
 
     # Lensing
     le_l_max: int = 2500
@@ -293,7 +298,9 @@ class PrecisionParams:
 
     @staticmethod
     def planck_cl():
-        """Science preset, measured as shipped (rodas5; job 24668, before #53;
+        """Science preset, measured as shipped before #54, i.e. with the fast
+        path's LINEAR Bessel lookup at 30 points per unit x, rebuilt on every
+        call (rodas5; job 24668, before #53;
         V100, compute_cls_all_fast at n_k_fine 20000) against CLASS with a
         massless neutrino and RECFAST: TT within 0.086% (l <= 30), 0.233%
         (l <= 500), 0.262% (l <= 1000); EE within 0.60% (l = 2-4), 0.46%
@@ -311,7 +318,15 @@ class PrecisionParams:
         Oct 20, 2026): TT 0.086 / 0.238 / 0.271%, EE 0.596 / 0.455 / 0.981%,
         TE/sqrt(TT EE) 0.327%, within 0.01 pp of the above; stages
         thermodynamics 59.6 s, perturbations 27.8 s, harmonic 13.5 s,
-        101.5 s end to end.
+        101.5 s end to end. With #54's cubic Hermite lookup at 3 points per
+        unit x (table built once per process), against the same tree without
+        it (main 5ac3df3, which has the CLASS radiation-streaming trigger;
+        tests/test_preset_accuracy.py::TestPlanckClPreset, V100, jobs 30151 /
+        30152): EE at l = 2-4 0.596% -> 0.151%, the linear table's l = 2 bias
+        removed; every other band within 0.04 percentage points (TT 0.086 ->
+        0.079 / 0.238 -> 0.245 / 0.370 -> 0.375%, EE 5-500 0.455 -> 0.450%,
+        5-1000 0.981 -> 0.986%, TE/sqrt(TT EE) 0.327 -> 0.287%). The stage
+        timings above were not re-measured with it.
 
         Retuned Oct 2026 (docs/precision_sweep_2026-10-10.md). The previous
         values (Kvaerno5, l_max 50, rtol 1e-6, atol 1e-11, max_steps 131072)
@@ -323,7 +338,8 @@ class PrecisionParams:
         (12/10/17 gives 0.18%). hr_n_k_fine 20000 together with the fast
         path's 30-point-per-unit-x linear Bessel table (since #54 the default
         is the cubic Hermite lookup at 3 points per unit x, which agrees with
-        the Hermite lookup at 30 to 1.6e-5 in TT) removes the former -1% TT
+        the Hermite lookup at 30 to 1.6e-5 in TT at fit_cl, jobs
+        27208-27214) removes the former -1% TT
         offset at l < 50 and the +20% EE error at l=2. Above l ~ 1000 the
         C_l stage is percent-level (TT rms 1.7-2% at l = 1000-2000, EE 3-8%,
         common to the exact-j_l and table paths: perturbation k sampling /
@@ -461,7 +477,7 @@ class PrecisionParams:
         with the number). The timings and CLASS accuracies below were
         measured at n_k_fine 5000, before it was raised to 20000 (+3.7%
         forward time; TT at l = 100-1200 moves by up to 1.6% toward CLASS,
-        EE/TE at l = 500-1200 by 2e-3 / 6e-3 away, Task 4b), and before #54's
+        EE/TE at l = 500-1200 by 2e-3 / 6e-3 away, job 27208), and before #54's
         fixed-range Bessel table (built once per process and reused) and
         Hermite lookup: diags/diag_preset_solver_choice.py (job 24652,
         config E; C_l to l_max 1500 with n_k_fine 5000): BG 0.7 s, TH 2.4 s,

@@ -788,15 +788,19 @@ def _sparse_l_padded(l_max):
 # linear density to 30 (table ~0.7 GB at l_max 2500, harmonic stage ~12 s
 # instead of ~4 s on a V100), measured on the then cosmology-dependent range
 # x_max = 1.05 k_max tau_0 (~14800 at k_max 1/Mpc); #54 replaced the lookup
-# by the Hermite one, which needs only 3. Measured at fit_cl (Task 4b of #54,
-# jobs 27208-27214, V100): Hermite at 3 agrees with Hermite at 30 to <= 1.6e-5
-# in C_l^TT and to <= 6e-6 in the h, omega_b and omega_cdm gradients, with a
-# table of 82 MiB instead of 0.8 GiB, and dC_l/dh along h is smooth to 5.6e-6
-# (the linear lookup at 30 gives 1.4e-2: its derivative is the piecewise
-# constant chord slope). On the fixed x-range of #54, x_max = 1.05
-# pt_k_max_cl hr_tau0_max = 21000, the table is 2 x 105 x 63000 doubles =
-# 106 MB at l_max 2500 (2 x 85 x 63000 = 86 MB at 1500), built once per process
-# and kept (see _jl_tables).
+# by the Hermite one, which needs only 3. Measured at fit_cl with n_k_fine
+# 20000 (#54, jobs 27208-27214, V100): Hermite at 3 agrees with Hermite at 30
+# to <= 1.6e-5 in C_l^TT and to <= 6e-6 in the h, omega_b and omega_cdm
+# gradients, with a table of 82 MiB instead of 0.80 GiB, and dC_l/dh along h
+# is smooth to 5.6e-6 (cubic-fit residual over h = 0.64-0.70; the linear
+# lookup at 30 gives 1.4e-2, because its derivative is the chord slope,
+# constant on each table interval). At n_k_fine 5000 the k-integral itself
+# makes dC_l/dh change sign along h for any lookup (cubic-fit residual 1.26,
+# against 5.6e-6 at 20000). On the fixed x-range of #54, x_max = 1.05
+# pt_k_max_cl hr_tau0_max = 21000 at pt_k_max_cl = 1/Mpc, the table is
+# 2 x 85 x 63000 doubles = 82 MiB at l_max 1500 (2 x 105 x 63000 = 101 MiB at
+# 2500), built once per process and kept (see _jl_tables). Design record:
+# docs/adr/0005-cl-differentiability.md.
 JL_TABLE_X_PER_UNIT = 3.0
 
 
@@ -894,12 +898,37 @@ def compute_cls_all_fast(
 ):
     """Fast C_l computation using precomputed j_l/j_l' tables + source interpolation.
 
+    Differentiable in every CosmoParams field (jax.jit, jax.jvp, jax.grad) when
+    ``prec`` is passed; see docs/adr/0005-cl-differentiability.md (#54). A
+    reverse-mode gradient through a whole fit_cl pipeline also needs the
+    Rodas5 reverse-mode fix (its own PR): without it the perturbation solve,
+    upstream of this function, returns NaN in reverse mode. Even with that fix
+    the default ode_adjoint="recursive_checkpoint" is silently off whenever
+    Rodas5 runs in vmapped k-batches: d(sum ln C_l^TT)/dtheta differs from
+    forward mode by 2e-4 to 7.2e-3 (h, omega_b, omega_cdm at three cosmologies),
+    and the matter-power derivative by 1.3% at omega_b + 20% (ADR 0005,
+    Consequences). Until that is fixed, forward mode (jax.jvp, jax.jacfwd) or
+    ode_adjoint="direct" (2.6x the time, 0.86 GiB per gradient) gives the
+    correct gradient.
+
     Architecture:
     1. Interpolate smooth source functions S(k,τ) to fine k-grid
-    2. Build j_l(x) and j_l'(x) lookup tables (backward+upward, one JIT)
-    3. For each l: interpolate tables at x = k*χ, compute radial_T2 on-the-fly,
-       integrate over τ → T_l(k) with all 3 transfer types (T0+T1+T2)
+    2. j_l(x) and j_l'(x) tables (backward+upward recurrence) on a FIXED
+       x-range [0, 1.05 k_bound hr_tau0_max] that depends on precision
+       settings only, so they are built once per (l_max, n_x, x_max) in a
+       process and reused across cosmologies and calls (_jl_tables)
+    3. For each l: cubic Hermite lookup of j_l and j_l' at x = k*χ from the
+       tabulated values and slopes (j_l'' from Bessel's equation), so the
+       lookup and its AD derivative are smooth in x; radial_T2 on the fly;
+       integrate over τ → T_l(k) with all 3 transfer types (T0+T1+T2). The
+       l-step is wrapped in jax.checkpoint: reverse mode recomputes each l's
+       lookups instead of storing them (~46 GB otherwise at fit_cl)
     4. Integrate C_l = 4π ∫ dlnk P_R |T_l|² for all l at once
+
+    Guards (eqx.error_if, raise at run time, also under jit): the conformal
+    age tau_0 exceeds hr_tau0_max (raise hr_tau0_max for such a cosmology);
+    k*χ exceeds the table (prec.pt_k_max_cl smaller than the perturbation
+    grid's k_max: pass the prec of the perturbation solve).
 
     Full TT transfer function (cf. CLASS harmonic.c:962):
         T_l(k) = ∫ dτ [S_T0*j_l + S_T1*j_l' + (S_T2/8)*radial_T2]
@@ -908,14 +937,19 @@ def compute_cls_all_fast(
     T1 (ISW dipole * j_l') is the dominant correction at low l (~20% at l=20).
     T2 (polarization quadrupole) contributes ~0.2-0.8% at all l.
 
-    Performance: ~3-5s harmonic (vs ~800s per-l approach) on V100.
+    Performance: harmonic stage 1.8 s at fit_cl (l_max 1500, n_k_fine 20000;
+    eager, after the first call, V100, job 30153), vs ~800s per-l approach.
 
     Args:
         pt: PerturbationResult with source functions
         params: CosmoParams for primordial spectrum
         bg: BackgroundResult for conformal age
         l_max: maximum multipole (default 1500)
-        n_k_fine: fine k-grid points for source interpolation (default 5000)
+        n_k_fine: fine k-grid points for source interpolation (default 5000).
+            Pass prec.hr_n_k_fine (20000 at fit_cl, planck_cl, planck_fast):
+            at 5000 the trapezoid over ln k samples |T_l(k)|^2 about once per
+            oscillation near l ~ 1200, and at fit_cl dC_l/dh changes sign
+            along h (#54). The default is not taken from prec.
         tt_mode: unused (always uses T0+T1+T2)
         k_interp_method: "spline" (default) or "chebyshev" -- passed
             through to _interp_sources_to_fine_k. "chebyshev" requires
@@ -926,13 +960,15 @@ def compute_cls_all_fast(
             JL_TABLE_X_PER_UNIT = 3) on the table's fixed x-range
             [0, 1.05 k_bound hr_tau0_max] (#54). The lookup is cubic Hermite,
             so 3 is converged: 30 agrees to <= 1.6e-5 in C_l^TT and <= 6e-6 in
-            the gradients (fit_cl, Task 4b) at ten times the table memory
-            (0.8 GiB vs 82 MiB) and a longer compile (harmonic stage alone
-            19.3 s vs 3.3 s, Task 4a). Larger values add both with no
-            measurable gain; see the module constant.
+            the gradients (fit_cl at n_k_fine 20000, jobs 27208-27214) at ten
+            times the table memory (0.80 GiB vs 82 MiB) and a longer compile
+            (harmonic stage alone 19.3 s vs 3.3 s, jobs 27156/27157). Larger
+            values add both with no measurable gain; see the module constant.
         prec: PrecisionParams of the perturbation solve; required to jit or
             differentiate (fixes the Bessel table's x-range from pt_k_max_cl
-            and hr_tau0_max).
+            and hr_tau0_max, both static). Without prec, eager calls work
+            (k_bound read from pt.k_grid, the default hr_tau0_max), and a
+            traced call raises a TypeError asking for prec.
 
     Accuracy (Oct 2026 sweep, massless RECFAST reference, planck_cl-class
     perturbations, measured with the earlier LINEAR lookup at 30 points per
@@ -940,7 +976,13 @@ def compute_cls_all_fast(
     (compute_cls_all_interp) to 0.011% for l <= 500, 0.024% for l <= 1000,
     0.17% for l <= 2000; n_k_fine 5000 is percent-level above l ~ 500. The
     Hermite lookup at 3 points per unit x moves C_l^TT by <= 1e-4 relative
-    to that linear lookup at fit_cl (it removes its ~1e-4 chord bias; Task 4b).
+    to that linear lookup at fit_cl (it removes the linear lookup's amplitude
+    bias -(dx)^2/12 ~ -9.3e-5 at table spacing dx = 1/30), and C_l^EE at l = 2
+    by -0.80% (C_l^TE by
+    -0.40% of sqrt(TT EE)), which removes the linear table's +0.76% l = 2 EE
+    residual against the exact-j_l path (precision sweep finding 6; jobs
+    27208-27214). planck_cl EE at l = 2-4 against CLASS: 0.596% -> 0.151%
+    (jobs 30151/30152).
 
     Returns:
         dict with 'ell', 'tt', 'ee', 'te' (arrays of length l_max+1)

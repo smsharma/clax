@@ -762,6 +762,18 @@ def test_grad_h_end_to_end_from_cosmoparams_matches_fd(fast_mode):
     the +1.32% and +3.18% spreads were that chatter. The bar (0.03) is
     unchanged.
 
+    UPDATE (Oct 25, 2026, smsharma/clax#54): the frozen DST grid described above
+    is gone. ``k_min2 = 7e-5/h``, ``k_max2 = 7/h`` and the ``in_range`` mask of
+    ``_ir_resummation_jax`` now follow the traced h (static shape), so there is
+    no concrete ``h_conc`` and AD differentiates the grid's motion, which central
+    FD always saw. EPT P(k) itself moves by <= 1.6e-12 (reordered arithmetic, job
+    28536). This test on CPU (job 28628) reads AD=4.022200e6, FD=4.022595e6,
+    rel_err=9.8022e-05 (job 24318 above was on the #48 branch, before the later
+    changes on main). The stage-level companion
+    ``test_stage_grad_h_matches_fd_per_k`` (``tests/test_ept_h_channels.py``)
+    drops from a median 1.879e-03 with the frozen grid (main 5ac3df3, CPU job
+    30245) to 1.423e-05 (job 28628): the frozen grid was that residual.
+
     History on the C_l solve (``perturbations_solve``, not the matter solve):
     GPU-allocated job 14146 (actual JAX platform unverified: this file's
     import-time CPU pin) gave rel_err=1.3831e-02 (AD=4.046783e6,
