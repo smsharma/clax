@@ -8,6 +8,111 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
 power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 `compute_cl_pp(... nonlinear="ept")`.**
 
+### Nov 17, 2026: The perturbation solves store every ODE step for the backward pass; the recursive-checkpoint adjoint at the default checkpoint count was 1% off
+
+All numbers at fit_cl as of 6ff1303 (#58's 5-bin neutrino hierarchy) on a V100,
+F = sum_k ln delta_m(k, tau_end)^2 from `perturbations_solve`, d/dh, relative
+|reverse - forward| with forward = jax.jvp under native thermodynamics + direct adjoint.
+
+**Bug.** `jax.grad` through the vmapped Rodas5 perturbation solve with the production
+adjoint (`RecursiveCheckpointAdjoint()`, equinox's default checkpoint count) was 1.159e-2
+(fiducial), 1.108e-2 (omega_b + 20%) and 1.030e-2 (Y_He = 0.28) off forward mode (jobs
+38683, 38691), where the direct adjoint is 5e-6 to 1.4e-5 off (job 38682). Before #58
+(ncdm_q_size 0) the same quantity was 2.2e-4 / 1.28e-2 / 2.4e-4 (job 27787). The
+primals of the two programs agree to 1e-8. Every reverse-mode C_l or P(k) gradient at
+fit_cl went through this; the NaN of the Oct 23 entry had hidden it.
+
+**Measured, one setting at a time** (omega_b + 20%; jobs 38553, 38691, 38731):
+
+| setting | |reverse/forward - 1| | d/dh cached (s) |
+|---|---|---|
+| production: default checkpoint count (127 for `ode_max_steps` 8192) | 1.108e-2 (d/dh 1.50 too negative) | 43.1 |
+| 127 checkpoints, explicit | 1.108e-2 (bitwise = the default) | 44.0 |
+| 8 checkpoints | 4.2e-5 | |
+| 32 checkpoints | 1.8e-5 | 48.6 |
+| 64 checkpoints | 1.004e-2 (1.36 too negative) | 46.2 |
+| 150 checkpoints | 1.606e-3 (0.22 too positive) | 43.4 |
+| 200 checkpoints | 7.866e-3 (1.07 too positive) | 41.3 |
+| 300 and 310 checkpoints | 8.674e-6 (bitwise = store every step) | 37.5 |
+| 512 checkpoints | 8.7e-6 (bitwise = the row below) | 36.7 |
+| 8192 checkpoints = one stored state per step of the budget | 8.7e-6 | 35.5 |
+| direct adjoint | 1.4e-5 | 102.8 |
+| Kvaerno5, default count | 4.1e-7 | 182.5 |
+| k-chunks of 2 or 10 modes, default count | 6.4e-6 (bitwise equal to each other) | 674.7 / 156.8 |
+| FSAL reuse off (f0 re-evaluated every step), default count | 1.104e-2 | |
+| 24-member stiff-oscillator toy, Rodas5 / Rodas5Batched / Kvaerno5, counts 8..8192 and default | 0 (every count gives the same gradient) | |
+
+The 100 k-modes take 26 to 309 Rodas5 steps each (4 to 52 rejected), 106 state
+variables, 2000 saved times, one vmapped batch (job 38691).
+
+**Equinox's schedule.** `checkpointed_while_loop` with the default count c =
+floor(-1.5 + sqrt(2 max_steps + 0.25)) + 1 = 127 runs Stumm-Walther's Algorithm I for every
+step (so does c = 32 here: Wang-Moin would start at step 560). For c = 127 and 309 steps
+the forward pass ends with the states of steps {0, 128, 182..252, 255..308} stored, so the
+backward pass recomputes steps 1..127 from step 0 in one segment and 129..181 from step
+128; for c = 32 the recomputed segments are about 30 steps long; for c >= 309 every state
+is stored and nothing is recomputed (the direct adjoint stores everything too).
+
+**Mechanism.** Three measured facts fix it.
+1. The forward pass is reproducible: the plain forward loop and the checkpoint-saving
+   loop that the backward pass runs give the same step sequence in all 100 modes and the
+   same delta_cdm(tau_end) to the bit, as does the same program run twice (job 38733).
+2. The recomputed steps are not: 8, 32 and 64 checkpoints each give a different gradient
+   from one stored state per step (4.2e-5, 1.8e-5, 1.0e-2 off), while in the toy every
+   count gives the same gradient to the bit. The recomputed body is a differently
+   compiled program (it runs inside jax.vjp), and a Rodas5 step is sensitive to its
+   rounding: an algebraically equivalent rewrite of the stage system flipped
+   accept/reject decisions in 31 of 100 modes (Oct 23 entry). Kvaerno5's Newton
+   iteration corrects such differences, and it is unaffected.
+3. The whole error sits in k-modes 40-49: the slice 40-60 is off by -1.505 of the
+   -1.503 total, the slices 0-20, 20-40 and 50-100 by at most 2e-3 (job 38733). Those
+   ten modes finish between step 98 and step 149, inside the recomputed segments
+   1..127 and 129..181; the forty slowest modes, which finish inside stored territory,
+   are off by 3e-7 and 6e-9.
+Put together: the backward pass meets a stored state at the end of every recomputed
+segment. When the recomputed trajectory of a mode needs more steps than the stored one,
+a mode that had finished just before that stored state has not finished in the
+recomputation, and the cotangent of its saved end state, which waits in the save buffer
+for the step that wrote it, meets no such step: that mode's contribution to the gradient
+is lost. The error is therefore one mode's contribution, with a size and sign set by
+which modes straddle a boundary (-1.50, -1.36, +0.22, +1.07 for 127, 64, 150 and 200
+checkpoints), it needs a batch whose modes finish at different steps (k-chunks of 10
+modes finish close together and are immune), and a bit-reproducible recomputation
+(Kvaerno5, the toy) loses nothing. The recomputed trajectory's lag is the one link not
+observed directly; a per-step log of the backward pass (adjoint_bisect5.py, jobs 38756,
+38757) is queued and this entry will carry its result. Any recomputation-based
+checkpointing of this solve has the problem; storing every step is the fix, not a
+work-around.
+
+**Fix.** The perturbation solves ask for one checkpoint per step of the budget:
+`_get_adjoint(adjoint, *, checkpoints=None)` in clax/ode.py passes the count to
+`RecursiveCheckpointAdjoint`, and the four perturbation solves (sources, batched
+delta_m, per-mode delta_m, tensors) pass `checkpoints=prec.ode_max_steps`. Equinox
+then stores the loop state after every step and the backward pass recomputes nothing.
+The forward pass does not depend on the count. The background and thermodynamics
+solves keep diffrax's default (they were adjoint-independent to 4e-6, job 27916).
+
+- Cost per d/dh at omega_b + 20% (cached): 43.1 -> 35.5 s (-18%); peak device memory
+  0.95 -> 2.95 GiB (job 38691). The store is `ode_max_steps` states per k-mode of a
+  batch, about 3 n_eq + 32 doubles each (2.1 GiB predicted for the fit_cl batch vs 2.0
+  measured); `_pt_checkpoint_store_bytes_per_mode` adds it to the automatic k-chunk
+  size. The presets' chunking does not change (fit_cl: one chunk of 100 modes; the
+  128-mode GPU cap binds before memory elsewhere). Lower `ode_max_steps` to trim it.
+- Not changed: `_solve_mpk_batched_rosenbrock` (hard-coded direct adjoint).
+
+**Tests.** `test_fit_cl_production_reverse_matches_forward` is a hard pass again:
+7.587e-6 (fiducial), 8.674e-6 (omega_b + 20%), 7.337e-6 (Y_He = 0.28) off forward
+mode, the same-settings floor (job 38735; bar 3e-4). `test_k_batch_size_counts_the_reverse_pass_checkpoint_store` (CPU) pins
+the store accounting. Fast suite: 505 passed, the pre-existing `test_pk_rosenbrock_vs_kvaerno5` failure (step
+budget), 1188 skipped (job 38736; 504 passed on the base, job 38552). C_l-level gradients cannot be taken on this
+tree (the fast C_l path's Bessel-table range is a Python float of the cosmology; #54's
+branch makes it traceable) and are re-measured there (jobs 38737, 38738 failed for that
+reason on both trees).
+
+**Open.** A toy that reproduces the defect (the 24-member oscillator does not); whether
+to report the finding upstream (equinox/diffrax); the planck_cl gradient's memory with
+the store (not measured; the chunking accounts for it).
+
 ### Oct 23, 2026: Reverse mode through Rodas5 is finite at fit_cl; it uncovers a 1.3% error of the recursive-checkpoint adjoint in the perturbation solve
 
 All numbers are at fit_cl as of 5ac3df3, before #58 (which gives fit_cl a
