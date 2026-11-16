@@ -33,17 +33,12 @@ Three tests, split so that one failing check cannot hide the others:
    same function (jobs 27675/27676: primals 4.7e-6 apart), so its bar adds the FD
    estimate's own spread to the spec bar.
 3. test_g5_production_reverse_matches_forward -- production reverse mode against
-   forward mode. Every reverse-mode gradient through Rodas5 at fit_cl is NaN on main
-   (vmapped k-batches run masked dt = 0 steps; job 26946); the fix is its own
-   PR (fix/rodas5-reverse-nan-v2), so this test is xfail(strict=True) here (XFAIL_REV).
-   On the branch all 36 cases are NaN in reverse and xfail (jobs 28548/28550/28552,
-   28690/28692/28694). With that fix (a local overlay on this branch, not committed;
-   --runxfail, jobs listed in XFAIL_REV) the 18 pp cases pass (1.9e-9 to 5.9e-5) and
-   will XPASS, the strict signal to drop their marker; the 18 lensed_tt cases miss by
-   3.4e-4 to 6.4e-3 because the production RecursiveCheckpointAdjoint through Rodas5
-   differs from forward mode, the same defect the unlensed C_l functional shows
-   (tests/test_cl_gradients.py, test_g2_production_reverse_matches_forward; jobs
-   27742-27744), so their marker stays.
+   forward mode, a hard pass on this tree. On the base of this branch every
+   reverse-mode gradient through Rodas5 at fit_cl was NaN (masked dt = 0 steps; job
+   26946) and, with that fixed, the lensed_tt cases missed the bar by 3.4e-4 to 6.4e-3
+   because the production RecursiveCheckpointAdjoint recomputed Rodas5 steps and lost a
+   k-mode's end-state cotangent (the pp cases passed, 1.9e-9 to 5.9e-5). Both are fixed
+   on main's side of this branch (smsharma/clax#63, #64). Measured here: TG5P_PENDING.
 
 Finite-difference anchor (the same as the unlensed G4 test in tests/test_cl_gradients.py).
 At fit_cl tolerance (rtol 1e-4, atol 1e-6) sum ln C_l wobbles along omega_b at ~1e-8
@@ -92,14 +87,6 @@ pytestmark = pytest.mark.slow
 FUNCS = {"pp": F_pp, "lensed_tt": F_ltt}
 THETAS = ("h", "omega_b")
 
-XFAIL_REV = pytest.mark.xfail(
-    raises=AssertionError, strict=True,
-    reason="reverse mode NaN through Rodas5 masked steps on main (fix: "
-           "fix/rodas5-reverse-nan-v2, own PR). With that fix (overlay jobs 28549/28551/28553/"
-           "28696, 28691/28693/28695, 28769-28771) pp passes (1.9e-9 to 5.9e-5, 18 cases) and "
-           "lensed_tt still misses by 3.4e-4 to 6.4e-3 (18 cases): the "
-           "RecursiveCheckpointAdjoint through Rodas5 differs from forward mode (the "
-           "production-adjoint defect of the unlensed C_l functional, jobs 27742-27744)")
 ZREC_REASON = ("th.z_rec is a thermodynamics grid knot (thermodynamics.py:1004); continuous "
                "in PR #61")
 NONLINEAR = ("none", "halofit", "ept")
@@ -203,15 +190,14 @@ def test_g5_forward_matches_fd_rodas5(request, recomb_downstream_cosmology, func
                             f"{allowed / abs(ad):.3e} ({name}, {func}, {nonlinear}, {theta})")
 
 
-@XFAIL_REV
 @pytest.mark.parametrize("nonlinear", NONLINEAR)
 @pytest.mark.parametrize("func", list(FUNCS))
 @pytest.mark.parametrize("theta", THETAS)
 def test_g5_production_reverse_matches_forward(recomb_downstream_cosmology, func, nonlinear,
                                                theta):
     """Production reverse mode (jax.grad under FIT: Rodas5, recursive-checkpoint
-    adjoint) equals forward mode (jvp under fwd(FIT)), bar 3e-4. xfail(strict) on
-    this branch: see the module docstring."""
+    adjoint storing every step) equals forward mode (jvp under fwd(FIT)), bar 3e-4.
+    Hard pass on this tree: see the module docstring."""
     name, base = recomb_downstream_cosmology
     x0 = float(getattr(base, theta))
     f = jvp_scalar(FUNCS[func](fwd(FIT), base, theta, nonlinear), x0)

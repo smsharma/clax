@@ -45,36 +45,23 @@ recombination epoch tau_star: holding tau_star fixed changes F by <= 9e-10 and l
 residual unchanged, and the background solve is excluded too (scan jobs 28117, 28133,
 28168, 28190).
 
-Reverse-mode tests (G2, RF1 companion) and which one to read. Every reverse-mode
-gradient at fit_cl is NaN on main's Rodas5, because vmapped k-batches run masked
-dt = 0 steps (smsharma/clax#54, job 26946); the fix is in its own PR
-(fix/rodas5-reverse-nan-v2). All reverse-mode tests below are therefore
-xfail(strict=True) on this branch, strict so that the fix landing flips them to a
-hard XPASS failure, the signal to drop the marker. With that fix and PR #59 applied as
-a local overlay on this branch (not committed; jobs 27742/27743/27744, 27802/27861;
-direct adjoint 27924-27926):
-- test_g2_direct_adjoint_reverse_matches_forward is the gate to read: jax.grad under
-  the direct adjoint equals the forward-mode derivative, the statement that the
-  C_l pipeline's reverse mode is correct (the thermodynamics gradient mode, stable
-  or native, does not matter).
-- test_g2_production_reverse_matches_forward (production recursive-checkpoint
-  adjoint) does not pass even then: RecursiveCheckpointAdjoint through Rodas5 differs
-  from the direct adjoint and from forward mode. That is a defect of the adjoint
-  through Rodas5, pre-existing and unrelated to #54 and #59, hidden by the NaN. Its
-  xfail records it; the RF1 Rodas5 companion records its eager-vs-jit scatter.
-
-When the Rodas5 NaN fix merges, three of the strict production-adjoint cases are expected
-to XPASS, because they sit under the 3e-4 bar on that overlay (jobs 27742-27744):
-test_g2_production_reverse_matches_forward[lcdm_fiducial-omega_cdm] (2.1e-4) and
-[omega_b_high-omega_cdm] (1.9e-4), and
-test_rf1_jit_of_grad_equals_grad_rodas5_companion[omega_b_high] (1.4e-4). The strict
-markers then fail the run loudly; they become per-case (applied only to the cases that
-still miss the bar), and the NaN markers on G2-direct are dropped. The two h cases of
-test_g2_production_reverse_matches_forward at lcdm_fiducial (3.078e-4) and omega_b_high
-(3.095e-4) sit within 3% of the 3e-4 bar, and Rodas5's scatter between compilations of
-one derivative is ~1e-5 (job 27675): a strict per-case mark there can alternate between
-XFAIL and XPASS(strict) from run to run, so mark those two non-strict, or measure
-several compilations first.
+Reverse-mode tests (G2, RF1 companion). On the base of this branch every reverse-mode
+gradient at fit_cl was NaN (vmapped k-batches run masked dt = 0 steps through Rodas5)
+and, with that fixed, the production adjoint was 1% off (RecursiveCheckpointAdjoint at
+diffrax's default checkpoint count recomputes steps whose Rodas5 trajectory does not
+reproduce, and drops the end-state cotangent of a k-mode that finishes just before a
+stored checkpoint). Both are fixed on main's side of this branch: smsharma/clax#63
+(the 1/dt guard) and #64 (one checkpoint per step of the budget). The reverse-mode
+tests below are therefore hard passes, measured on this tree:
+- test_g2_direct_adjoint_reverse_matches_forward: jax.grad under the direct adjoint
+  equals the forward-mode derivative, the statement that the C_l pipeline's reverse
+  mode is correct (the thermodynamics gradient mode, stable or native, does not
+  matter). Measured: TG2D_PENDING.
+- test_g2_production_reverse_matches_forward: the production configuration (stable
+  thermodynamics mode, recursive-checkpoint adjoint storing every step) against
+  forward mode. Measured: TG2P_PENDING.
+- test_rf1_jit_of_grad_equals_grad_rodas5_companion: eager and jitted reverse mode
+  agree. Measured: TRF1R_PENDING.
 """
 from dataclasses import replace
 
@@ -97,23 +84,6 @@ THETAS = ("h", "omega_b", "omega_cdm")
 RF_THETAS = ("n_s", "tau_0")
 RF_SCALES = {"n_s": (0.99, 1.0, 1.01), "tau_0": (1.0, 1.005, 1.01)}
 
-XFAIL_NAN = pytest.mark.xfail(
-    raises=AssertionError, strict=True,
-    reason="reverse mode NaN through Rodas5 masked steps on main; "
-           "fixed by fix/rodas5-reverse-nan-v2 (own PR)")
-XFAIL_G2 = pytest.mark.xfail(
-    raises=AssertionError, strict=True,
-    reason="RecursiveCheckpointAdjoint through Rodas5 differs from the direct adjoint and "
-           "from forward mode: 3.1e-4 (h), 1.2-1.6e-3 (omega_b), 1.9-2.1e-4 (omega_cdm) at "
-           "fit_cl on lcdm_fiducial / omega_b_high, up to 7.2e-3 (omega_b) at YHe_028, "
-           "jobs 27742/27743/27744/27802/27861; pre-existing, hidden by the reverse-mode NaN "
-           "on main (fix in own PR); issue to be filed")
-XFAIL_RF1_RODAS5 = pytest.mark.xfail(
-    raises=AssertionError, strict=True,
-    reason="reverse mode NaN through Rodas5 masked steps on main (fix in own PR); once "
-           "fixed it records the same RecursiveCheckpointAdjoint defect as the production "
-           "G2 (eager vs jit(grad) scatter 5.3e-4 lcdm_fiducial, 1.4e-4 omega_b_high, "
-           "5.3e-3 YHe_028; jobs 27742/27743/27744)")
 
 
 @pytest.mark.parametrize("theta", THETAS)
@@ -144,7 +114,6 @@ def test_g1_step_placement(recomb_downstream_cosmology, theta):
     assert s < 3e-4, f"ERROR C_l step-placement spread {s:.3e} ({name}, {theta})"
 
 
-@XFAIL_NAN
 @pytest.mark.parametrize("theta", THETAS)
 def test_g2_direct_adjoint_reverse_matches_forward(recomb_downstream_cosmology, theta):
     """Reverse mode under the direct adjoint (production thermodynamics mode kept)
@@ -159,12 +128,10 @@ def test_g2_direct_adjoint_reverse_matches_forward(recomb_downstream_cosmology, 
     assert np.isfinite(r) and rel < 3e-4, f"ERROR reverse vs forward {rel:.3e} ({name}, {theta})"
 
 
-@XFAIL_G2
 @pytest.mark.parametrize("theta", THETAS)
 def test_g2_production_reverse_matches_forward(recomb_downstream_cosmology, theta):
-    """Production reverse mode (recursive-checkpoint adjoint) against forward mode,
-    bar 3e-4. See the module docstring: this does not pass even with the Rodas5 NaN
-    fix, because of the adjoint, so it is an xfail record of that defect."""
+    """Production reverse mode (recursive-checkpoint adjoint storing every step, #64)
+    against forward mode, bar 3e-4. Hard pass on this tree; see the module docstring."""
     name, base = recomb_downstream_cosmology
     x0 = float(getattr(base, theta))
     f = jvp_scalar(F_tt(fwd(FIT), base, theta), x0)
@@ -284,7 +251,6 @@ def test_rf1_harmonic_jit_of_grad_equals_grad(recomb_downstream_cosmology, theta
     assert abs(a / b - 1.0) < 1e-10, f"ERROR jit(grad) differs from grad ({name}, {theta})"
 
 
-@XFAIL_RF1_RODAS5
 def test_rf1_jit_of_grad_equals_grad_rodas5_companion(recomb_downstream_cosmology):
     """Rodas5 companion of the RF1 gate: bar 3e-4 (Rodas5 re-integrates a different
     step sequence per compilation, 4.7e-6 in the primal), difference printed."""
