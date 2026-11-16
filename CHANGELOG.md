@@ -22,7 +22,7 @@ adjoint (`RecursiveCheckpointAdjoint()`, equinox's default checkpoint count) was
 primals of the two programs agree to 1e-8. Every reverse-mode C_l or P(k) gradient at
 fit_cl went through this; the NaN of the Oct 23 entry had hidden it.
 
-**Measured, one setting at a time** (omega_b + 20%; jobs 38553, 38691, 38731):
+**Measured, one setting at a time** (omega_b + 20%; jobs 38553, 38691, 38731, 38775):
 
 | setting | |reverse/forward - 1| | d/dh cached (s) |
 |---|---|---|
@@ -39,6 +39,8 @@ fit_cl went through this; the NaN of the Oct 23 entry had hidden it.
 | direct adjoint | 1.4e-5 | 102.8 |
 | Kvaerno5, default count | 4.1e-7 | 182.5 |
 | k-chunks of 2 or 10 modes, default count | 6.4e-6 (bitwise equal to each other) | 674.7 / 156.8 |
+| the term of mode 47 alone (k = 0.0024 Mpc^-1, finishes at step 131), default count | 1.170 (reverse -2.944, forward -1.357: counted twice) | |
+| the terms of modes 48 and 49 alone, default count | 6.9e-2 and 8.9e-3 (3.7 steps behind and 13.8 ahead at the seam) | |
 | FSAL reuse off (f0 re-evaluated every step), default count | 1.104e-2 | |
 | 24-member stiff-oscillator toy, Rodas5 / Rodas5Batched / Kvaerno5, counts 8..8192 and default | 0 (every count gives the same gradient) | |
 
@@ -53,7 +55,7 @@ backward pass recomputes steps 1..127 from step 0 in one segment and 129..181 fr
 128; for c = 32 the recomputed segments are about 30 steps long; for c >= 309 every state
 is stored and nothing is recomputed (the direct adjoint stores everything too).
 
-**Mechanism.** Three measured facts fix it.
+**Mechanism.** Four measured facts fix it.
 1. The forward pass is reproducible: the plain forward loop and the checkpoint-saving
    loop that the backward pass runs give the same step sequence in all 100 modes and the
    same delta_cdm(tau_end) to the bit, as does the same program run twice (job 38733).
@@ -69,20 +71,48 @@ is stored and nothing is recomputed (the direct adjoint stores everything too).
    ten modes finish between step 98 and step 149, inside the recomputed segments
    1..127 and 129..181; the forty slowest modes, which finish inside stored territory,
    are off by 3e-7 and 6e-9.
-Put together: the backward pass meets a stored state at the end of every recomputed
-segment. When the recomputed trajectory of a mode needs more steps than the stored one,
-a mode that had finished just before that stored state has not finished in the
-recomputation, and the cotangent of its saved end state, which waits in the save buffer
-for the step that wrote it, meets no such step: that mode's contribution to the gradient
-is lost. The error is therefore one mode's contribution, with a size and sign set by
-which modes straddle a boundary (-1.50, -1.36, +0.22, +1.07 for 127, 64, 150 and 200
-checkpoints), it needs a batch whose modes finish at different steps (k-chunks of 10
-modes finish close together and are immune), and a bit-reproducible recomputation
-(Kvaerno5, the toy) loses nothing. The recomputed trajectory's lag is the one link not
-observed directly; a per-step log of the backward pass (adjoint_bisect5.py, jobs 38756,
-38757) is queued and this entry will carry its result. Any recomputation-based
-checkpointing of this solve has the problem; storing every step is the fix, not a
-work-around.
+4. A log of every Rodas5 step of the backward pass (adjoint_bisect5.py, jobs 38771 at the
+   default count and 38772 at 32 checkpoints, omega_b_high: the start time and step size of
+   every mode at every step, forward and recomputed; analysed with replay_boundary.py and
+   replay_detail.py) shows where the recomputation departs. From every stored state the
+   first recomputed step already differs from the forward step in nearly every
+   still-integrating mode, but only in the eleventh digit of the step size (median
+   |d(dt)/dt| 1e-11, worst 3e-6), and inside the mid-trajectory segments that never
+   changes a decision: at the end of the segments 128..181 and 252..254 (default count)
+   and of the eight mid-trajectory segments at 32 checkpoints, every still-integrating
+   mode sits at the forward trajectory's conformal time to the printed digit. The segment
+   that starts from the initial state is the exception. At tau < 1 Mpc the step controller
+   turns the 1e-11 difference into a rejected step or a 6% different step size by the
+   third or fourth step, the accept/reject sequence decorrelates from there, and 26 of the
+   modes 17-46 finish 1 to 9 iterations earlier or later than in the forward pass. Where
+   that segment meets the next stored forward state (the seam at step 128 for the default
+   count) the still-integrating modes are displaced along their own trajectories: modes
+   47-56 sit between 3.7 forward steps behind and 13.8 ahead, at tau = 5000-13900 Mpc,
+   and mode 47 (k = 0.0024 Mpc^-1) has already reached tau_0 (its last step is recomputed
+   step 126) while the stored state at 128 has it four steps short (forward finishing step
+   131). With 32 checkpoints that segment is 33 steps long, its seam lies at tau < 420 Mpc,
+   the 25 displaced modes are still outside the horizon (k tau < 0.7), and no mode is
+   finished on one side of the seam and not on the other.
+Put together: equinox writes each save slot once and transposes it as read-once
+(`_maybe_set_transpose` in equinox/internal/_loop/common.py leaves the buffer cotangent
+unchanged after a read, "write-once to each location"), which is exact along one
+trajectory but not across a seam. Mode 47's final delta_m is written by the forward-side
+step 131 and again by the recomputed step 126, both reads return the full cotangent, and
+the mode's contribution is counted twice: forward mode gives mode 47's term as -1.3567,
+the production reverse as -2.9442, 2.17 times (job 38775); the 17% beyond the doubling is
+the displacement, the forward side's cotangent of a mode four steps from tau_0 applied to
+a mode already there. A mode finished on the forward side of a seam but not on the
+recomputed side is written by neither and its contribution is lost. The error is therefore
+a whole contribution, with a size and sign set by which mode straddles a seam (-1.50,
+-1.36, +0.22, +1.07 for 127, 64, 150 and 200 checkpoints; dF/dh sums 100 terms averaging
+-1.36), it needs a batch whose modes finish at different steps (k-chunks of 10 modes
+finish close together and are immune), a bit-reproducible recomputation (Kvaerno5, the
+toy) has no seam mismatch, and the displacement by itself changes a term by up to 7% where
+the seam falls at late times (mode 48, 3.7 steps behind: reverse/forward 0.931; mode 49,
+13.8 steps ahead: 1.009; the three excesses sum to -1.506 of the -1.503; job 38775) and by
+2.5e-3 in total where it falls before horizon entry (32 checkpoints, 25 displaced modes).
+Any recomputation-based checkpointing of this solve has seams; storing every step has
+none, which is why it is the fix and not a work-around.
 
 **Fix.** The perturbation solves ask for one checkpoint per step of the budget:
 `_get_adjoint(adjoint, *, checkpoints=None)` in clax/ode.py passes the count to
