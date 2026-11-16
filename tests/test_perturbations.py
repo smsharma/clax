@@ -38,6 +38,7 @@ from clax.perturbations import (
     _ncdm_integrated_moments,
     _ncdm_observables_from_state,
     _perturbation_rhs,
+    _pt_checkpoint_store_bytes_per_mode,
     _pt_saved_output_count,
     _resolve_pt_k_batch_size,
     _rms_norm_safe,
@@ -247,6 +248,31 @@ class TestPerturbationIntegration:
             solve_kind="full",
         )
         assert batch_size == 200, f"Expected explicit full-vmap batch size 200, got {batch_size}"
+
+    def test_k_batch_size_counts_the_reverse_pass_checkpoint_store(self):
+        """Auto-batching counts the per-step checkpoint store of the reverse pass.
+
+        The perturbation solves ask ``RecursiveCheckpointAdjoint`` for ``ode_max_steps``
+        checkpoints (one stored loop state per step of the budget, for every mode of
+        the batch; see ``clax.ode._get_adjoint``), so the memory per mode grows with
+        ``ode_max_steps`` and ``n_eq``.  The direct adjoint is not described by this
+        term, and explicit chunk sizes are untouched.  Cosmology-independent numerics
+        (exempt from the multi-cosmology rule)."""
+        prec = dataclass_replace(PK_FAST_PREC, ode_adjoint="recursive_checkpoint")
+        per_mode = _pt_checkpoint_store_bytes_per_mode(prec, n_eq=106)
+        assert per_mode == prec.ode_max_steps * (3 * 106 + 32) * 8
+        assert _pt_checkpoint_store_bytes_per_mode(
+            dataclass_replace(prec, ode_adjoint="direct"), n_eq=106) == 0
+        kw = dict(n_k=200, n_tau=3000, n_outputs=_pt_saved_output_count(solve_kind="full"),
+                  solve_kind="full")
+        without = _resolve_pt_k_batch_size(prec, **kw)
+        with_store = _resolve_pt_k_batch_size(prec, n_eq=106, **kw)
+        assert 1 <= with_store <= without, (with_store, without)
+        # A budget so large that one mode's store alone exceeds the cap: one mode per chunk.
+        huge = dataclass_replace(prec, ode_max_steps=1 << 26)
+        assert _resolve_pt_k_batch_size(huge, n_eq=106, **kw) == 1
+        explicit = dataclass_replace(huge, pt_k_chunk_size=7)
+        assert _resolve_pt_k_batch_size(explicit, n_eq=106, **kw) == 7
 
 
 class TestPerturbationPkSpotChecks:
