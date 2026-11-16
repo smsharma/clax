@@ -58,11 +58,10 @@ Known limitations:
       moves with the parameters. Measured at omega_b - 20% (ADR 0003): no visible
       effect, because x_H sits at its equilibrium while C = 1, so the switch
       rescales a rate that is already ~0.
-    - The T_b update has a hard Taylor switch at f_e < 1e-3, where f_e is the
-      Compton-coupling electron fraction (1 - Y_He) x_e / (1 - 0.75 Y_He + (1 - Y_He) x_e),
-      so x_e < ~1.08e-3 at fiducial Y_He (spike ratio 20, i.e.
-      a derivative 20 times the median of its +-25 neighbours, at z ~ 624 on a
-      1500-point grid), and c_s^2 is 1.3% from CLASS's c_b^2 at z ~ 632.
+    - c_s^2 is 1.3% from CLASS's c_b^2 at z ~ 632 (the T_b update's former hard
+      Taylor switch at f_e < 1e-3, which put a spike of ratio 20 in the T_b
+      tangent at z ~ 624 on a 1500-point grid and a staircase in the primal's
+      omega_b dependence, is gone: the update uses the exact expm1 form).
     - Reverse mode through _ros2_advance needs a static Python-int sub-step count.
     - No test gates the C_l shift caused by this change; ADR 0003 records the
       measured planck_cl and fit_cl shifts against the unfixed code.
@@ -217,6 +216,18 @@ class ThermoResult:
     carries no gradient (``stop_gradient``): like CLASS's table point, the
     switch location is not differentiated (the dropped term is <= 3e-5 on
     d ln C_l / d ln theta; see the comment where it is computed).
+
+    Derived epochs, all sub-grid and differentiable (smsharma/clax#44):
+    ``z_star``, ``tau_star`` [Mpc], ``rs_star`` [Mpc] at the maximum of the
+    visibility g by a three-point parabola in ln a (CLASS's ``z_rec`` /
+    ``tau_rec`` / ``rs_rec``, thermodynamics.c
+    thermodynamics_calculate_recombination_quantities); ``z_rec`` where the
+    optical depth crosses one, kappa(z_rec) = 1, by linear interpolation (no
+    CLASS counterpart); ``z_d``, ``tau_d`` [Mpc], ``rs_d`` [Mpc] at the baryon
+    drag epoch, kappa_b(tau_d) = 1 with dkappa_b/dtau = kappa'/R and
+    R = 3 rho_b / 4 rho_gamma, by linear interpolation (CLASS's ``z_d`` /
+    ``tau_d`` / ``rs_d``, thermodynamics_calculate_drag_quantities). rs_d is
+    the BAO ruler and the EPT IR-resummation damping scale.
     """
     xe_of_loga: CubicSpline
     Tb_of_loga: CubicSpline
@@ -232,6 +243,9 @@ class ThermoResult:
     rs_star: float
     z_reio: float
     tau_free_streaming: float
+    z_d: float
+    tau_d: float
+    rs_d: float
 
     def tree_flatten(self):
         return [
@@ -240,7 +254,7 @@ class ThermoResult:
             self.exp_m_kappa_of_loga,
             self.g_of_loga, self.g_prime_of_loga, self.cs2_of_loga,
             self.z_star, self.z_rec, self.tau_star, self.rs_star, self.z_reio,
-            self.tau_free_streaming,
+            self.tau_free_streaming, self.z_d, self.tau_d, self.rs_d,
         ], None
 
     @classmethod
@@ -745,16 +759,24 @@ def thermodynamics_solve(
 
         fe = (1.0 - Y_He) * xe / (1.0 - 0.75 * Y_He + (1.0 - Y_He) * xe)
         thomc = thomc0 * fe / adothalf / jnp.maximum(ahalf**3, 1e-30)
-        etc = jnp.exp(-thomc * (new_a - a))
-        a2t = a**2 * (tb - tg0) * etc - T_cmb / jnp.maximum(thomc, 1e-30) * (1.0 - etc)
-
-        # Taylor expansion for small fe (avoid numerical issues)
-        a2t_expansion = (
-            (a - new_a) * T_cmb
-            + a**2 * (tb - tg0)
-            + (0.5 * (a - new_a)**2 * T_cmb + a**2 * (a - new_a) * (tb - tg0)) * thomc
-        )
-        a2t = jnp.where(fe < 1e-3, a2t_expansion, a2t)
+        da = new_a - a
+        x = thomc * da
+        # a^2 T_b' = a^2 (T_b - T_g) e^{-x} - T_cmb (1 - e^{-x}) / thomc, with
+        # (1 - e^{-x}) / thomc = da * phi(x), phi(x) = -expm1(-x) / x. expm1 keeps
+        # phi exact down to x ~ 1e-12, where the series 1 - x/2 equals it to
+        # 1e-24, so the jnp.where below carries no jump. Until Oct 22, 2026
+        # (CHANGELOG) the code switched to a first-order Taylor branch at
+        # f_e < 1e-3 to dodge the cancellation in 1 - e^{-x}. That branch was
+        # used where x is not small, so its truncation error grew with the grid
+        # step (T_b 2.7e-4 / 1.8e-3 from CLASS at z 300-700 on 20000 / 3000
+        # points, x_e 1.1e-4 / 8.7e-4 at z 100-500), and the switch moved with
+        # the parameters and crossed knots as they changed, which left the
+        # primal a staircase below z ~ 620 (ADR 0004: finite differences along
+        # omega_b biased by 1.7e-3 of the derivative on 10000 points) and a
+        # spike of ratio 20 in the T_b tangent at z ~ 624 on a 1500-point grid.
+        x_safe = jnp.maximum(x, 1e-12)
+        phi = jnp.where(x > 1e-12, -jnp.expm1(-x_safe) / x_safe, 1.0 - 0.5 * x)
+        a2t = a**2 * (tb - tg0) * jnp.exp(-x) - T_cmb * da * phi
 
         new_tb = T_cmb / new_a + a2t / new_a**2
 
@@ -994,14 +1016,52 @@ def thermodynamics_solve(
     exp_m_kappa_grid = jnp.exp(-kappa_grid)
     g_grid = kappa_dot_grid * exp_m_kappa_grid
 
-    # --- Find z_star and z_rec ---
+    # --- Derived epochs (smsharma/clax#44): sub-grid, so they are continuous
+    # and differentiable in the parameters. Until #44 all four were grid-point
+    # values, piecewise constant in theta (one 20000-point step is 5e-4 in z at
+    # recombination), and tau_star sets the perturbation save grid.
+    #
+    # z_star: maximum of g by a three-point parabola through the knots around
+    # argmax g, in ln a (CLASS, thermodynamics.c
+    # thermodynamics_calculate_recombination_quantities, does the same in z on
+    # its equally spaced table). The vertex of the parabola through
+    # (x0, g0), (x1, g1), (x2, g2) with unequal spacing.
     idx_star = jnp.argmax(g_grid)
-    z_star = z_grid[idx_star]
-    tau_star = bg.tau_of_loga.evaluate(loga_grid[idx_star])
-    rs_star = bg.rs_of_loga.evaluate(loga_grid[idx_star])
+    i1 = jnp.clip(idx_star, 1, loga_grid.shape[0] - 2)
+    x0, x1, x2 = loga_grid[i1 - 1], loga_grid[i1], loga_grid[i1 + 1]
+    g0, g1, g2 = g_grid[i1 - 1], g_grid[i1], g_grid[i1 + 1]
+    _num = (x1 - x0) ** 2 * (g1 - g2) - (x1 - x2) ** 2 * (g1 - g0)
+    _den = (x1 - x0) * (g1 - g2) - (x1 - x2) * (g1 - g0)
+    loga_star = x1 - 0.5 * _num / jnp.where(_den == 0.0, 1.0, _den)
+    z_star = 1.0 / jnp.exp(loga_star) - 1.0
+    tau_star = bg.tau_of_loga.evaluate(loga_star)
+    rs_star = bg.rs_of_loga.evaluate(loga_star)
 
-    idx_rec = jnp.argmin(jnp.abs(kappa_grid - 1.0))
-    z_rec = z_grid[idx_rec]
+    def _crossing_loga(f_grid, level):
+        """ln a where the decreasing table f_grid crosses `level`, linearly
+        interpolated between the two bracketing knots (CLASS's recipe for z_d)."""
+        j = jnp.argmax(f_grid < level)                  # first knot below the level
+        j = jnp.clip(j, 1, f_grid.shape[0] - 1)
+        f0, f1 = f_grid[j - 1], f_grid[j]
+        w = (level - f0) / jnp.where(f1 == f0, 1.0, f1 - f0)
+        return loga_grid[j - 1] + w * (loga_grid[j] - loga_grid[j - 1])
+
+    # z_rec: optical depth one, kappa(z_rec) = 1.
+    z_rec = 1.0 / jnp.exp(_crossing_loga(kappa_grid, 1.0)) - 1.0
+
+    # Baryon drag epoch: kappa_b(tau_d) = 1 with -dkappa_b/dtau = kappa'/R,
+    # R = 3 rho_b / 4 rho_gamma (thermodynamics.c, thermodynamics_calculate_
+    # drag_quantities); integrated backwards from today like kappa, then z_d by
+    # linear interpolation, tau_d and rs_d from the background at z_d.
+    _R_grid = 0.75 * jax.vmap(bg.rho_b_of_loga.evaluate)(loga_grid) \
+        / jax.vmap(bg.rho_g_of_loga.evaluate)(loga_grid)
+    _kappa_b_dot_grid = kappa_dot_grid / _R_grid
+    _kappa_b_integrand = 0.5 * (_kappa_b_dot_grid[:-1] + _kappa_b_dot_grid[1:]) * dtau_grid
+    kappa_b_grid = jnp.concatenate([jnp.cumsum(_kappa_b_integrand[::-1])[::-1], jnp.array([0.0])])
+    loga_d = _crossing_loga(kappa_b_grid, 1.0)
+    z_d = 1.0 / jnp.exp(loga_d) - 1.0
+    tau_d = bg.tau_of_loga.evaluate(loga_d)
+    rs_d = bg.rs_of_loga.evaluate(loga_d)
 
     # --- Build splines on loga grid ---
     # Every table, the opacity ones included, is a spline on the live ln a knots
@@ -1083,6 +1143,9 @@ def thermodynamics_solve(
         rs_star=rs_star,
         z_reio=z_reio,
         tau_free_streaming=tau_free_streaming,
+        z_d=z_d,
+        tau_d=tau_d,
+        rs_d=rs_d,
     )
 
 

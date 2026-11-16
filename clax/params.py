@@ -442,7 +442,8 @@ class PrecisionParams:
     @staticmethod
     def fit_cl():
         """Fast preset for fitting / HMC, targeting <2% C_l accuracy at l<600
-        with a massless neutrino (see the ncdm_q_size caveat below).
+        with the default massive neutrino (5 q-bins, l_max_ncdm 8, no fluid
+        approximation; #57).
 
         Reduces resolution everywhere for speed (planck_cl values in
         parentheses):
@@ -451,14 +452,47 @@ class PrecisionParams:
           which moved planck_cl from 50 and fit_cl from 25)
         - 2000 tau points (5000)
         - 3000 thermodynamics points (100000)
-        - ncdm_q_size 0: no massive-neutrino hierarchy, the 0.06 eV species
-          is followed as massless (~3x faster perturbations). Measured cost
-          (job 27008, Oct 20, 2026): against CLASS with the default 0.06 eV
-          neutrino, TT is 14.6-15.4% off at l <= 30 at every LCDM grid point
-          (EE 3-4%, TE/sqrt(TT EE) 17-19%), against 0.46% / 1.25% with
-          m_ncdm = 0. Until that treatment is changed this is a
-          massless-neutrino preset; tests/test_preset_accuracy.py records the
-          grid numbers as a strict expected failure.
+        - ncdm_q_size 5 (5), pt_l_max_ncdm 8 (17), ncdm_fluid_approximation
+          "none" ("class"): the massive-neutrino hierarchy at CLASS's q-bin
+          count, truncated at l = 8 and followed as a hierarchy to today (106
+          state variables; 61 without the hierarchy, 154 at l_max 17 with the
+          fluid variables). Until Oct 20, 2026 the preset set ncdm_q_size 0,
+          which paired the species' massive background density with the
+          massless-neutrino perturbations (#57): TT 14.6-15.4% off CLASS at
+          l <= 30 at every LCDM grid point (job 27008). Measured against CLASS
+          (HyRec) references (diags/diag_fitcl_qgrid.py, jobs 27173-27746,
+          Oct 20-22, 2026; docs/fitcl_qgrid_2026-10-20.md), as TT 2-30 /
+          TT 2-500 / EE 5-500 / TE/sqrt(TT EE) 2-500:
+            LCDM grid (0.06 eV)  0.47-0.54 / 0.56-0.69 / 1.20-1.65 / 0.87-1.13%
+            0.15 eV              0.48 / 0.52 / 1.18 / 0.87%
+            0.30 eV              0.52 / 0.64 / 1.16 / 0.86%
+            0.50 eV              0.53 / 0.63 / 1.19 / 0.85%
+            massless (RECFAST)   0.48 / 0.48 / 1.21%.
+          Why these three values. The Gauss-Laguerre q-grid is converged at 5
+          bins (8 and 12 bins reproduce it to 0.02%). With the "class" fluid
+          approximation TT at l <= 30 carries a deficit that grows with the
+          mass, 0.60 / 0.71 / 0.98 / 1.29% at 0.06 / 0.15 / 0.30 / 0.50 eV,
+          and P_m is 0.94% off CLASS at k = 4e-3 Mpc^-1 at 0.30 eV: the late
+          ISW is sourced at k ~ 1e-3-1e-2 Mpc^-1 below z ~ 2, where k tau > 31
+          and clax's implementation of that approximation (#46) is active;
+          with the hierarchy kept to today both read 0.5% and 0.1%, flat in
+          mass. 3 q-bins sit closer to CLASS with the approximation on
+          (0.47-0.61%) only because two errors cancel; with it off they read
+          0.93% at 0.50 eV. Cost: 18.5-21.6 s end to end on a V100 across two
+          nodes (jobs 27746, 27711; PT 8.9-11.0 s), against 19.8-20.3 s for 3
+          bins with the approximation and 19.1 s for the old preset (jobs
+          27173, 27711). l_max_ncdm 8 vs 17: with the approximation on the
+          C_l agree to 0.011% at l <= 500 at every measured point
+          (tests/test_preset_accuracy.py test_lmax_ncdm_truncation guards
+          0.1%, measured <= 0.010% with the approximation off); in linear P_m
+          the truncation raises the small-scale power by +0.06% at k = 0.05
+          rising to +0.9% at k = 1 Mpc^-1 (+0.6% with the approximation on),
+          the same at every mass and solver tolerance and with the batched
+          solver taking the same 324 steps:
+          the species' free streaming while still relativistic, not step
+          control (diags/diag_pk_batched_steps.py). fit_cl is a C_l preset;
+          its linear P_m is 1.2-1.5% off CLASS near k = 0.2 Mpc^-1 for every
+          hierarchy (the 20 k per decade), not changed here.
         - ode_max_steps 8192 (8192; was 1024)
         - rtol 1e-4 / atol 1e-6 (the same; Oct 2026): the converged rung of
           the tolerance ladder. The old 1e-3 / 1e-4 was never validated at
@@ -472,7 +506,17 @@ class PrecisionParams:
           along h; 20000 makes it monotone at +3.7% forward time (measured
           against 5000, eager, V100).
 
-        V100 timings, cached, rodas5 at rtol 1e-4 / atol 1e-6, from two
+        V100 timings with the shipped hierarchy (diags/diag_fitcl_qgrid.py,
+        cached medians): job 27746 (LCDM grid) BG 0.5 s, TH 1.7 s, PT 8.9 s,
+        HR 7.3 s, 18.5 s end to end; job 27711 (massive-neutrino grid, another
+        node) PT 11.0 s, 21.6 s; first call 85 s (compile + run). The same
+        script on job 27173's node: 19.1 s with the old ncdm_q_size 0 (PT
+        7.2 s), 19.8 s with 3 bins and the fluid approximation (PT 9.3 s),
+        21.1 s with 5 bins and the approximation (PT 11.0 s), 23.5 s at
+        l_max_ncdm 17 (PT 13.5 s).
+
+        Earlier records, all with ncdm_q_size 0. V100 timings, cached, rodas5
+        at rtol 1e-4 / atol 1e-6, from two
         scripts that time the harmonic stage differently (quote the script
         with the number). The timings and CLASS accuracies below were
         measured at n_k_fine 5000, before it was raised to 20000 (+3.7%
@@ -497,7 +541,9 @@ class PrecisionParams:
             pt_l_max_g=17,           # CLASS default hierarchy (59 vs 83 state vars at l_max=25)
             pt_l_max_pol_g=17,
             pt_l_max_ur=17,
-            ncdm_q_size=0,           # disable ncdm hierarchy (massless approx, ~3x faster)
+            ncdm_q_size=5,           # 0 until Oct 20, 2026 (#57: 15% TT at l<=30); converged (8, 12 bins agree)
+            pt_l_max_ncdm=8,         # vs 17: C_l identical to 0.011% at l<=500; +0.6% in P_m at k=1 (docstring)
+            ncdm_fluid_approximation="none",  # "class" mode (#46) costs 1% TT at l<=30 by 0.30 eV (docstring)
             pt_ode_rtol=1e-4,        # Oct 2026: converged rung of the tolerance ladder (was 1e-3)
             pt_ode_atol=1e-6,        # (was 1e-4)
             # was 1024; 4096 was sufficient with Kvaerno5 at rtol 1e-4 / atol

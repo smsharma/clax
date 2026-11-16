@@ -138,6 +138,27 @@ def test_omfid_wiring(lcdm_cosmology, monkeypatch, z):
         assert call["ir"] is not None                          # traced IR splitter still in use
 
 
+def test_th_rs_d_wiring(lcdm_cosmology, monkeypatch):
+    """With the thermodynamics result passed, the IR-resummation damping scale is
+    its integrated r_s(z_d) (smsharma/clax#44), not the Aubourg et al. fit the
+    function falls back to without it; and clax.lensing passes it."""
+    name, params = lcdm_cosmology
+    bg = background_solve(params, BG_PREC)
+    th = thermodynamics_solve(params, BG_PREC, bg)
+    pt = _synthetic_pt(bg)
+    calls = _record_compute_ept(monkeypatch)
+    compute_ept_from_clax(params, bg, pt, z=Z, th=th)
+    compute_ept_from_clax(params, bg, pt, z=Z)
+    with_th, without = calls
+    h = float(params.h)
+    assert np.isclose(float(with_th["rs_h"]), float(th.rs_d) * h, rtol=1e-12), name
+    assert np.isclose(float(without["rs_h"]), float(sound_horizon_drag(params)) * h, rtol=1e-12), name
+    # the fit and the integral differ at the 1e-4 to 1e-3 level (0.15% at omega_b +20%, #44)
+    assert abs(float(with_th["rs_h"]) / float(without["rs_h"]) - 1.0) > 1e-5, name
+    import clax.lensing
+    assert 'compute_ept_from_clax(params, bg, pt_mpk, z=0.0, th=th, field="m")' in inspect.getsource(clax.lensing)
+
+
 def test_defaults_and_lensing_field():
     sig = inspect.signature(compute_ept_from_clax)
     assert sig.parameters["field"].default == "cb"
@@ -146,9 +167,10 @@ def test_defaults_and_lensing_field():
     assert sig.parameters["omfid"].kind is inspect.Parameter.KEYWORD_ONLY
     import clax.lensing
     src = inspect.getsource(clax.lensing)
-    assert 'compute_ept_from_clax(params, bg, pt_mpk, z=0.0, field="m")' in src, (
-        "clax.lensing must request the total-matter field explicitly, and "
-        "the tau0-complete pt_mpk (smsharma/clax#42): "
+    assert 'compute_ept_from_clax(params, bg, pt_mpk, z=0.0, th=th, field="m")' in src, (
+        "clax.lensing must request the total-matter field explicitly, "
+        "the tau0-complete pt_mpk (smsharma/clax#42) and the thermodynamics "
+        "result for r_s(z_d) (smsharma/clax#44): "
         "the CMB-lensing nonlinear ratio is P_mm,NL / P_mm,lin")
 
 

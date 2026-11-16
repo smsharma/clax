@@ -96,10 +96,25 @@ def load_ref(name):
     return np.load(os.path.join(REF_DIR, name, "thermo_recfast_hesw1.npz"))
 
 
+def load_drag(name):
+    """CLASS RECFAST (Heswitch = 1) derived epochs for the cosmology `name`
+    (scripts/generate_class_reference.py --recfast-hesw1-drag): z_d, tau_d, rs_d
+    (baryon drag, kappa_b = 1) and z_rec, tau_rec, rs_rec (CLASS's visibility peak,
+    a three-point parabola on its table; clax calls that epoch z_star)."""
+    import json
+    with open(os.path.join(REF_DIR, name, "drag_recfast_hesw1.json")) as fh:
+        return json.load(fh)
+
+
 def xe_on_ref_grid(prim, ref_z):
     """clax x_e (CubicSpline in log a) evaluated at the reference redshifts."""
+    return table_on_ref_grid(prim, "xe", ref_z)
+
+
+def table_on_ref_grid(prim, q, ref_z):
+    """clax table q of `tables` (CubicSpline in log a) at the reference redshifts."""
     from clax.interpolation import CubicSpline
-    sp = CubicSpline(jnp.asarray(prim["loga"]), jnp.asarray(prim["xe"]))
+    sp = CubicSpline(jnp.asarray(prim["loga"]), jnp.asarray(prim[q]))
     return np.asarray(sp.evaluate(jnp.log(1.0 / (1.0 + jnp.asarray(ref_z)))))
 
 

@@ -1,6 +1,6 @@
 # clax Development Progress
 
-## Status: Retuned presets (fit_cl ~17-19 s, planck_cl ~124 s end to end on a V100, job 24668) + full accuracy pipeline + forward-mode AD + one-loop EPT (clax-pt)
+## Status: Retuned presets (fit_cl ~20 s with its massive-neutrino hierarchy, job 27173; planck_cl ~124 s end to end on a V100, job 24668) + full accuracy pipeline + forward-mode AD + one-loop EPT (clax-pt)
 
 **End-to-end differentiable pipeline from cosmological parameters to P(k),
 C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
@@ -124,6 +124,251 @@ passed, 1 failed, 1271 skipped in 1:24:14 (job 30276, on 6e9810d with the two
 n_k_fine tests; 519 passed in 1:22:36 before them, job 30250).
 Failing on the base too: `test_pk_rosenbrock_vs_kvaerno5` (max_steps) and, in full
 mode, `test_cls_chebyshev_path_matches_spline_path` (ratio 1.0170).
+
+### Oct 22, 2026: fit_cl gets a massive-neutrino hierarchy (5 q-bins, l_max_ncdm 8, no fluid approximation; #57)
+
+Branch `fix/fitcl-ncdm-qgrid` (PR #58). Sweep scripts `diags/diag_fitcl_qgrid.py` and
+`diags/diag_pk_batched_steps.py`; every report verbatim in
+`docs/fitcl_qgrid_2026-10-20.md` (jobs 27173, 27187, 27200, 27685, 27686, 27711, 27746,
+27762, V100; main 99b62fe, then 5ac3df3). New CLASS references:
+`reference_data/massive_nu_030` (checked in; `scripts/generate_class_reference.py
+--model <name>`, CLASS 3.3.4 defaults, HyRec, the file set of `massive_nu_015`), and
+three decision-only ones that are not checked in: `massive_nu_050`, and
+`massive_nu_030_ncdmtight` / `lcdm_fiducial_ncdmtight` with CLASS's own ncdm
+quadrature tolerances tightened by two orders of magnitude.
+
+- **Bug (#57).** `fit_cl` set `ncdm_q_size=0`. The background still integrates the
+  default 0.06 eV species as massive (`ncdm_bg_q_size` 30, `background.py`), but the
+  perturbation right-hand side, with no ncdm variables, substitutes the
+  massless-neutrino perturbations for it (`_perturbation_rhs`, the `n_q == 0` branch:
+  delta_ur, theta_ur, F_ur,2 / 2 and a radiation pressure perturbation delta_ur / 3),
+  so the Einstein equations saw a matter-like density with a free-streaming,
+  pressure-carrying perturbation. Against CLASS (HyRec, 0.06 eV) TT was 14.6-15.4%
+  off at l <= 30 at all five LCDM grid points (job 27008; EE 3-4%, TE/sqrt(TT EE)
+  17-19%).
+- **Fix.** `ncdm_q_size=5`, `pt_l_max_ncdm=8`, `ncdm_fluid_approximation="none"`:
+  61 -> 106 state variables (154 at CLASS's l_max 17 with the fluid variables).
+- **Measured against CLASS (HyRec)**, max |C_l / C_CLASS - 1| as TT 2-30 / TT 2-500 /
+  EE 5-500 / TEn 2-500, percent (LCDM grid: maximum over its five points; the other
+  columns at the fiducial cosmology with that mass):
+
+  | hierarchy (q, l_max, fluid approx.) | n_eq | PT / total, V100 | 0.06 eV (LCDM grid) | 0.15 eV | 0.30 eV | 0.50 eV |
+  |---|---|---|---|---|---|---|
+  | q 0, l_max 17, class (shipped until now) | 61 | 7.2 / 19.1 s | 15.4 / 15.4 / 4.09 / 19.4 | not run | not run | not run |
+  | **q 5, l_max 8, none (shipped now)** | 106 | 8.9-11.0 / 18.5-21.6 s | 0.54 / 0.69 / 1.65 / 1.13 | 0.48 / 0.52 / 1.18 / 0.87 | 0.52 / 0.64 / 1.16 / 0.86 | 0.53 / 0.63 / 1.19 / 0.85 |
+  | q 12, l_max 8, none | 169 | 12.4 / 23.1 s | 0.49 / 0.60 / 1.19 / 0.86 (fid.) | 0.48 / 0.50 / 1.17 / 0.87 | 0.50 / 0.64 / 1.14 / 0.85 | 0.50 / 0.63 / 1.18 / 0.84 |
+  | q 3, l_max 8, none | 88 | 9.5 / 20.3 s | 0.40 / 0.60 / 1.15 / 0.82 (fid.) | 0.33 / 0.49 / 1.13 / 0.75 | 0.52 / 0.63 / 1.11 / 0.93 | 0.93 / 0.93 / 1.11 / 1.38 |
+  | q 3, l_max 8, class | 91 | 9.3 / 19.8 s | 0.53 / 0.70 / 1.60 / 1.08 | 0.48 / 0.50 / 1.14 / 0.75 | 0.47 / 0.64 / 1.12 / 0.93 | 0.61 / 0.61 / 1.13 / 1.37 |
+  | q 5, l_max 8, class | 109 | 11.0 / 21.1 s | 0.62 / 0.70 / 1.65 / 1.13 | 0.71 / 0.71 / 1.19 / 0.86 | 0.98 / 0.98 / 1.17 / 0.84 | 1.29 / 1.29 / 1.21 / 0.82 |
+  | q 5, l_max 17, class (CLASS defaults) | 154 | 13.5 / 23.5 s | 0.62 / 0.69 / 1.65 / 1.13 | 0.71 / 0.71 / 1.19 / 0.86 | 0.98 / 0.98 / 1.17 / 0.84 | 1.29 / 1.29 / 1.21 / 0.82 |
+  | q 8 / q 12, l_max 8, class | 136 / 172 | 12.1 / 22.4, 14.4 / 25.0 s | 0.58 / 0.60 / 1.19 / 0.85 (fid.) | 0.70 / 0.70 / 1.17 / 0.86 | 0.96 / 0.96 / 1.16 / 0.83 | 1.26 / 1.26 / 1.20 / 0.81 |
+
+  Massless fiducial vs CLASS RECFAST with the shipped hierarchy: 0.48 / 0.48 / 1.21%.
+  Timings are cached medians; the shipped row spans two nodes (jobs 27746 and 27711),
+  the others are job 27173 (fluid on, q <= 5), 27686 (q 8, 12) and 27711 (fluid off).
+- **Why 5 q-bins.** The Gauss-Laguerre momentum grid is converged at 5: 8 and 12 bins
+  reproduce it to 0.02% at every mass (job 27686). 3 bins sit closer to CLASS *with*
+  the fluid approximation (0.53 / 0.48 / 0.47 / 0.61% at 0.06 / 0.15 / 0.30 / 0.50 eV)
+  only because two errors cancel: with it off they read 0.40 / 0.33 / 0.52 / 0.93%,
+  worse than 5 bins at 0.50 eV. The Oct 20 choice of 3 bins is withdrawn.
+- **Why the fluid approximation is off (finding; planck_cl shares it).** With
+  `ncdm_fluid_approximation="class"` TT at l <= 30 carries a deficit that grows with
+  the mass, 0.60 / 0.71 / 0.98 / 1.29% at 0.06 / 0.15 / 0.30 / 0.50 eV (-0.7 to -1.0% at
+  l = 2-10 at 0.30 eV), and linear P_m is -0.94% off CLASS at k = 4e-3 Mpc^-1 at
+  0.30 eV. With the hierarchy followed to today both read 0.5% (flat in mass) and
+  <= 0.1% across #46's band (job 27711). CLASS itself is converged here: references
+  with its ncdm tolerances tightened by two orders of magnitude move CLASS's TT by
+  <= 0.03% at l <= 30 and EE by <= 0.16% (jobs 27687 / 27688). The late ISW at l = 2-30
+  is sourced at k ~ 1e-3-1e-2 Mpc^-1 below z ~ 2, where k tau > 31 and the switch is
+  on, so this is #46's implementation discrepancy seen in the C_l. planck_cl uses
+  the "class" mode with 5 bins and carries the same deficit at heavy masses; the
+  follow-up is to fix the closure (#46) or measure the cost of "none" there. (The
+  Oct 20 statement that the approximation "never switches on at these k" was wrong.)
+- **Why l_max_ncdm 8.** C_l agree with l_max 17 to 0.011% at l <= 500 at every measured
+  point with the approximation on and to 0.010% with it off (job 27766,
+  `test_lmax_ncdm_truncation`); the saving is 2.1-2.4 s per solve. In linear P_m the
+  truncation raises the small-scale power by +0.04% at k = 0.05 rising to +0.6% at
+  k = 1 Mpc^-1 with the approximation on and +0.9% as shipped, the same at every mass
+  and solver tolerance (see next item).
+- **Finding settled: the batched P(k) does not move with the solver; it moves with
+  the hierarchy's relativistic-era physics.** The Oct 20 attribution to the batched
+  solver's shared step control was wrong. `diags/diag_pk_batched_steps.py` (jobs
+  27685, 27762, fiducial): the hierarchy-to-hierarchy P_m differences are identical to
+  three decimals at rtol 1e-4, 1e-5 and 1e-6; the batched solve, mirrored chunk by
+  chunk, takes exactly 324 steps (39 rejected) for state dimensions 61, 91, 109 and
+  154 (its filtered error norm holds eta, delta_cdm, delta_b, F_g_0, theta_b, F_g_1
+  and no ncdm variable); and against a per-mode Kvaerno5 reference (rtol 1e-6) the
+  batched run's own error is below 0.004% for the shipped hierarchy and 0.006% for the
+  old one. What remains is deterministic and mass-independent:
+  truncating the hierarchy at l = 8 (+0.9% at k = 1 as shipped, +0.6% with the
+  approximation on) or integrating it on 3 momenta (+1.0%) alters the species' free streaming while it is still relativistic, which
+  sets the small-scale matter transfer function and is finished before the mass
+  matters. The CMB sees <= 0.03% of it at l <= 500 because its k range ends where
+  this begins. The lensing spectra: the lensing potential's linear source is
+  `source_phi_plus_psi` from the C_l solve, and the batched solve enters only the
+  halofit / EPT modulator sqrt(P_NL / P_lin) when `nonlinear` is set (default
+  "none"); measured at fiducial (job 27762): between l_max_ncdm 8 and 17, both without the
+  approximation, C_l^phiphi differs by 0.23% at l = 1000 with the linear source and
+  0.12% with the halofit modulator, and the lensed TT and EE by <= 0.07%; between 3
+  and 5 q-bins by 0.46% / 0.41%, and the lensed spectra by <= 0.18%, which is the
+  low-l TT difference itself. Against CLASS the fit_cl lensing potential is limited
+  by the preset's own coarseness (10.6% at l = 2; lensed TT 4.4% at l = 1000 from the
+  k grid), far above these.
+- **Also recorded.** fit_cl's linear P_m is 1.2-1.5% off CLASS near k = 0.2 Mpc^-1 for
+  every hierarchy and both fluid settings (the 20 k per decade); not changed here.
+- **Tests.** `tests/test_preset_accuracy.py::TestFitClPreset`: the strict xfail
+  `test_lcdm_grid_massive` is a passing test with bars TT 0.9 / 1.1%, EE 2.5%, TEn 1.7%
+  (1.7x / 1.6x / 1.5x / 1.5x the maxima of jobs 27746 / 27711); `test_nulcdm_grid_massive`
+  runs fiducial, 0.15 and 0.30 eV against CLASS (the 0.06 eV duplicate of fiducial
+  skips); new `test_lmax_ncdm_truncation` holds fit_cl within 0.1% of the same preset
+  at l_max_ncdm 17 in TT and EE to l = 500 at every massive-neutrino point (measured
+  <= 0.010%); `test_low_l_within_fit_budget` re-measured 0.48 / 0.48 / 1.21% (bars
+  unchanged). Validation at the final tree: full-mode `TestFitClPreset` 13 passed,
+  1 skipped (job 27766); fast suite 484 passed, 1067 skipped, 1 failed (job 27767), the
+  failure being the pre-existing `TestRosenbrockPk::test_pk_rosenbrock_vs_kvaerno5`
+  step-limit failure that `slurm/*-v100.sbatch` deselect by name. `tests/conftest.py` note on
+  reference data updated; `scripts/generate_class_reference.py` gained `--model`.
+- **Cost.** 18.5-21.6 s end to end on a V100 across two nodes (PT 8.9-11.0 s), first
+  call 85 s; 19.1 s with the broken treatment, 19.8 s with 3 bins and the
+  approximation, 23.5 s at l_max_ncdm 17. README and the fit_cl docstring updated;
+  CLAUDE.md's performance table still shows the Mar 2026 presets (not edited by
+  agents).
+
+### Oct 23, 2026: r_s(z_d) by integration; the derived epochs are sub-grid and differentiable (#44)
+
+**Bug (smsharma/clax#44).** `clax.background.sound_horizon_drag` returned the
+Aubourg et al. 2015 fitting formula for the drag sound horizon, 0.119% accurate
+by its own account and 0.150% off CLASS at omega_b +20%, while CLAUDE.md and
+README promise r_s to < 0.01%; the EPT IR resummation took its BAO damping scale
+from it. Independently (the #54 session's finding), z_star, tau_star, rs_star and
+z_rec were grid-point values of the thermodynamics table (argmax g, argmin
+|kappa - 1|): off CLASS by up to one grid step (5e-4 in z on 20000 points, 3e-3 on
+3000) and piecewise constant in the parameters, and tau_star sets the perturbation
+save grid, so F(theta) carried small jumps that finite differences amplify and AD
+does not see.
+
+**Fix.** `ThermoResult` gains `z_d`, `tau_d`, `rs_d`: the baryon drag epoch where
+kappa_b = 1, with -dkappa_b/dtau = kappa'/R and R = 3 rho_b / 4 rho_gamma,
+integrated backwards from today like kappa and located by linear interpolation
+between the bracketing knots, as CLASS does (thermodynamics.c,
+thermodynamics_calculate_drag_quantities); tau_d and rs_d from the background at
+z_d. z_star / tau_star / rs_star come from a three-point parabola through the
+knots around the visibility maximum, in ln a (CLASS does the same in z); z_rec
+from the linear interpolation of kappa = 1. All are differentiable.
+`compute_ept_from_clax(..., th=)` uses `th.rs_d` and `clax.lensing` passes it; the
+fitting formula stays, with its ceiling stated, for callers without a
+ThermoResult.
+
+**Oracle.** `scripts/generate_class_reference.py --recfast-hesw1-drag` writes
+`reference_data/<name>/drag_recfast_hesw1.json` (z_d, tau_d, rs_d; CLASS's
+parabolic z_rec, tau_rec, rs_rec) for the 11 recombination cosmologies with the
+RECFAST Heswitch = 1 setup of the x_e references; at fiducial these agree with the
+HyRec-default `derived.json` values to 3e-6.
+
+**Measured against that oracle, 11 cosmologies, worst case (job 28139).**
+
+| | 20000 points | 3000 points (`fit_cl`) | before |
+|---|---|---|---|
+| r_s(z_d) | 8.6e-7 | 2.4e-5 | fit: 1.3e-4 at fiducial, 1.5e-3 at omega_b +20% |
+| z_d | 1.5e-6 | 3.6e-5 | (no clax value) |
+| tau_d | 1.0e-6 | 2.7e-5 | (no clax value) |
+| z_star | 1.1e-6 | 2.9e-5 | grid point: 1.8e-4 / 1.1e-3 |
+| tau_star | 6.7e-7 | 2.1e-5 | grid point: 1.3e-4 / 1.0e-3 |
+| rs_star | 5.8e-7 | 1.8e-5 | grid point: 1.2e-4 / 9e-4 |
+
+Reverse-mode gradients of rs_d, tau_d, z_d, tau_star, rs_star and z_star along
+omega_b and omega_cdm match finite differences to 3.2e-6 or better, and along h,
+where these epochs move only through Lambda (derivatives 1e-3 of the others), to
+4.6e-5 (job 28147; `tests/test_thermodynamics.py` bars 1e-4).
+The primal shift at `fit_cl` from the sub-grid tau_star (which sets the
+perturbation save grid): C_l^TT, EE, TE at the fiducial cosmology move by at
+most 1.4e-6 in every band from l = 2 to 1500 (jobs 28137, 28142).
+
+**Tests (red first, then green).** `test_drag_epoch_matches_class` and
+`test_visibility_peak_scalars_match_class` (11 cosmologies, both grids, bars twice
+the worst above): 32 of 44 red on main even against provisional bars ten times
+looser, all 44 green (jobs 28134, 28139). `TestThermoScalars`: z_star against
+CLASS's parabolic peak at 1e-4 (was a 1% bar against a grid-point reference),
+z_rec as exp(-kappa(z_rec)) = e^-1 at 1e-4 (the old test compared the kappa = 1
+epoch with CLASS's visibility peak at a 2% bar that hid the 0.4% difference of
+the two definitions; 3.3e-3 off at the grid point), z_d / tau_d / rs_d at 1e-4;
+`TestThermoGradients`: rs_d, tau_star, z_d against FD at 1e-3; 7 of 40 red on
+main (job 28135), 40 of 40 green (job 28140). `test_ept_from_clax.py::test_th_rs_d_wiring`:
+with `th` the damping scale is `th.rs_d`; 5 red on main, 16 of 16 green (jobs
+28136, 28141).
+
+**Test pass rates on the final tree (CPU, 12 cores unless noted).** Full mode of
+`tests/test_recomb_thermo.py` and `tests/test_thermodynamics.py` at the 11
+recombination cosmologies: 998 passed (job 28148, 44 min; 945 before this
+change). `tests/ --fast -q`: 496 passed, 1113 skipped, 1 failed, the pre-existing
+`test_pk_rosenbrock_vs_kvaerno5` max_steps failure identical on main (job 28149,
+1:32). GPU (V100): `tests/test_recomb_downstream.py` 12 passed (job 28150, 2:34);
+`tests/test_recomb_gpu.py` CPU vs GPU tangents 9 passed (job 28151).
+
+### Oct 22, 2026: The baryon-temperature update loses its Taylor switch; T_b and x_e below z ~ 700 move onto CLASS (ADR 0003 follow-up)
+
+**Bug.** The MB95 baryon-temperature step `a^2 T_b' = a^2 (T_b - T_g) e^{-x} - T_cmb (1 - e^{-x}) / thomc`,
+x = thomc (a_{i+1} - a_i), switched to a first-order Taylor branch at f_e < 1e-3
+(z ~ 620) to dodge the cancellation in 1 - e^{-x}. Two things were wrong with it.
+The branch was used where x is not small, so its truncation error grew with the
+grid step: against CLASS RECFAST, T_b at z 300-700 was 2.7e-4 (20000 points) /
+1.8e-3 (3000 points) off and x_e at z 100-500 1.1e-4 / 8.7e-4, at every one of the
+11 recombination cosmologies (job 27896); that is the "c_s^2 1.3% from CLASS c_b^2
+at z ~ 632" item of ADR 0003. And the switch location moved with the parameters,
+so each knot it crossed put a jump in the primal: the dense staircase below z ~ 620
+that biased finite differences along omega_b (ADR 0004; 1.7e-3 of the derivative on
+10000 points) and the spike of ratio 20 in the T_b tangent at z ~ 624 on a
+1500-point grid (ADR 0003 Known limitations).
+
+**Fix.** The update uses the exact form with phi(x) = -expm1(-x)/x, which is
+stable at small x; below x = 1e-12 the series 1 - x/2 equals it to 1e-24, so the
+remaining `jnp.where` carries no jump. Above z ~ 700 every table is bitwise
+unchanged; z_star, tau_star, r_s(z_star) and tau_free_streaming are unchanged at
+every cosmology. Below: T_b moves by up to 2.6e-4 (20000) / 1.7e-3 (3000) at
+z ~ 570, x_e by 1.2e-4 / 7.9e-4 at z ~ 140, c_s^2 by 1.2e-2 / 7.5e-2 at z ~ 616,
+and z_reio by 1e-7.
+
+**Measured against CLASS RECFAST (Heswitch = 1), 11 cosmologies, worst always
+massive_nu_015 (jobs 27896 before, 27897 after).**
+
+| window | T_b 20000 | T_b 3000 | x_e 20000 | x_e 3000 |
+|---|---|---|---|---|
+| z 100-300 | 2.7e-4 -> 6.2e-5 | 1.7e-3 -> 1.7e-4 | 1.1e-4 -> 1.8e-5 | 8.7e-4 -> 3.9e-5 |
+| z 300-500 | 2.7e-4 -> 3.2e-5 | 1.8e-3 -> 1.1e-4 | 1.1e-4 -> 1.9e-5 | 8.3e-4 -> 3.5e-5 |
+| z 500-700 | 2.7e-4 -> 1.1e-5 | 1.8e-3 -> 5.1e-5 | 6.8e-5 -> 1.9e-5 | 6.0e-4 -> 7.4e-5 |
+| z 700-800 | 4.5e-6 (same) | 3.1e-5 (same) | 1.8e-5 (same) | 1.1e-4 (same) |
+
+**Tests (red first, then green).**
+- `test_xe_tb_low_z_match_class` (new): x_e and T_b against CLASS in the three
+  windows above, both grids, 11 cosmologies, bars twice the worst after the fix;
+  the old code misses every window by 2x to 12x.
+- `test_coarse_grid_1500_helium_hydrogen_spike_free`: window z 300-6000 (was
+  800-6000), through the former switch.
+- `test_opacity_tangents_match_converged_fd`: omega_b at every sample (was
+  z >= 900): the staircase that kept the gate above 900 is gone.
+- `TestThermoGradients`: exp(-kappa) along omega_b at ln a = -6 again (it had moved
+  to -5 in #59 because the finite difference there was set by the switch's jumps).
+
+Red on the old code: the low-z windows 66 of 66 cases (job 27911); the coarse-grid
+spike window and the omega_b opacity gate 9 of 110 (job 27884: the T_b tangent spike
+of ratio 16-20 along omega_b at eight cosmologies, and exp(-kappa) at z = 400 at
+omega_b +20%, 1.1e-2); the spot check 1 of 23 (job 27883, 30%). Green on this
+change: 66 of 66 (job 27922), 55 of 55 opacity cases with omega_b now at every
+redshift and a worst resolved error of 1.2e-5 along omega_b (job 27941; it was
+2.0e-4 with the gate at z >= 900), 23 of 23 spot checks (job 27890). The opacity
+test's small-derivative floor is 1e-6 for the derivative tables (one rounding-limited
+point, dkappa_dot/dlna at z = 1 along omega_cdm at N_eff = 2, 1.5e-7 of its value,
+landed in the resolved class once its finite difference was no longer unsettled by
+the staircase) with class-B bars 2.0e-6 (and 1.9e-5 along h), twice the measured
+worst.
+
+**Test pass rates on the final tree (CPU, 12 cores unless noted).** Full mode of
+`tests/test_recomb_thermo.py` and `tests/test_thermodynamics.py` at the 11
+recombination cosmologies: 1012 passed (job 27949, 41 min; 945 before this
+change). `tests/ --fast -q`: 488 passed, 1130 skipped, 1 failed, the pre-existing
+`test_pk_rosenbrock_vs_kvaerno5` max_steps failure, identical on main (job 27950,
+1:21). GPU (V100): `tests/test_recomb_downstream.py` 12 passed (job 27951, 2:34);
+`tests/test_recomb_gpu.py` CPU vs GPU tangents 9 passed (job 27952).
 
 ### Oct 20, 2026: The opacity tables carry their full tangents; dP(k)/d omega_b and d omega_cdm follow finite differences (#55, #45)
 

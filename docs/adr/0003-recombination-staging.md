@@ -511,7 +511,10 @@ static shape. The ADR 0001 caveat (forward mode needs
 - The out-of-scope items: `Heswitch = 6` helium physics; the hard Taylor switch in
   the T_b update at f_e < 1e-3 (the Compton-coupling electron fraction, x_e <
   ~1.08e-3 at fiducial Y_He; spike ratio 20 at z ~ 624, on a 1500-point grid
-  only); c_s^2 against CLASS's c_b^2 (1.3% apart at z ~ 632), together with the
+  only) and c_s^2 against CLASS's c_b^2 (1.3% apart at z ~ 632), both removed on
+  Oct 22, 2026 by the exact expm1 form of the update (CHANGELOG: T_b and x_e
+  below z ~ 700 within 1.1e-5 to 6.2e-5 / 5.1e-5 to 1.7e-4 of CLASS on 20000 /
+  3000 points, from 2.7e-4 / 1.8e-3), together with the
   four `1 - 0.75 Y_He` sites of D4.
 
 ## Note (Oct 25, 2026, smsharma/clax#54)

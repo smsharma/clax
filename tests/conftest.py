@@ -152,8 +152,9 @@ COSMOLOGY_GRID_LCDM = {
 
 # For changes touching massive neutrinos / the ncdm sector, the rule uses
 # this grid instead (CLAUDE.md's reference suite: 0.06, 0.15, 0.3 eV).
-# Only massive_nu_015 has CLASS reference data today; the other masses are
-# for consistency tests. Massive-nu solves conventionally set
+# massive_nu_015 and massive_nu_030 have CLASS reference data (the latter since
+# Oct 20, 2026, scripts/generate_class_reference.py --model); massive_nu_006 is the
+# fiducial and has none. Massive-nu solves conventionally set
 # ncdm_fluid_approximation="none" (cf. tests/test_multipoint.py PREC).
 COSMOLOGY_GRID_NULCDM = {
     "lcdm_fiducial": {},

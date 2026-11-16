@@ -14,7 +14,7 @@ The goal is a differentiable alternative to [CLASS](https://github.com/lesgourg/
 
 ## Status
 
-Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. `fit_cl` preset for HMC / fitting (~17-19 s end to end on a V100); `planck_cl` for science-grade accuracy (~124 s on a V100 after the Oct 2026 retune; 4679 s before). One-loop EFTofLSS module (`clax.ept`) ports the CLASS-PT FFTLog pipeline to JAX with sub-percent accuracy on monopoles/quadrupoles. See [CHANGELOG.md](CHANGELOG.md) for details.
+Sub-0.2% unlensed C_l^TT/EE at l=20-1200. Full lensed C_l^TT/EE/TE/BB (sub-0.2% at l=10-2000). Multi-cosmology validated (10 LCDM parameter points). Full ncdm Boltzmann hierarchy. `fit_cl` preset for HMC / fitting (~20 s end to end on a V100 with its 5 q-bin massive-neutrino hierarchy, Oct 22, 2026); `planck_cl` for science-grade accuracy (~124 s on a V100 after the Oct 2026 retune; 4679 s before). One-loop EFTofLSS module (`clax.ept`) ports the CLASS-PT FFTLog pipeline to JAX with sub-percent accuracy on monopoles/quadrupoles. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## One-loop EFTofLSS (`clax.ept`) accuracy vs CLASS-PT
 
@@ -142,7 +142,8 @@ remaining residual is from photon-hierarchy and IC corrections at next order.
 | Module | Accuracy | Notes |
 |--------|----------|-------|
 | Background (H, D_A, r_s) | < 0.01% | 6+ significant digits |
-| Thermodynamics (x_e) | 2e-5 (20000-point grid) / 1.1e-4 (`fit_cl`, 3000 points) over z 800-5000 vs CLASS RECFAST (Heswitch=1), 11 cosmologies | CLASS's Saha -> ODE staging, advanced by an L-stable ROS2 step; 2.4e-4 above z = 5000 (HeIII stage) |
+| Derived epochs (z_d, r_s(z_d); z_star, tau_star, r_s(z_star)) | 2e-6 (20000-point grid) / 4e-5 (`fit_cl`, 3000 points) vs CLASS RECFAST, 11 cosmologies | kappa_b = 1 and the visibility peak located sub-grid; differentiable (#44) |
+| Thermodynamics (x_e, T_b) | x_e 2e-5 (20000-point grid) / 1.1e-4 (`fit_cl`, 3000 points) over z 800-5000, and x_e 2e-5 / 7.4e-5 with T_b 6e-5 / 1.7e-4 over z 100-700, vs CLASS RECFAST (Heswitch=1), 11 cosmologies | CLASS's Saha -> ODE staging, advanced by an L-stable ROS2 step; 2.4e-4 above z = 5000 (HeIII stage) |
 | Visibility function g(tau) | **0.04%** | Bisection reionization, corrected kappa |
 | Perturbation ODE (Phi, Psi) | 0.01-0.25% | Gauge-corrected at recombination |
 | AD gradients (dP(k)/d(params)) | omega_cdm: within 0.1% at five LCDM points (k = 0.1 Mpc^-1, forward and both reverse modes equal to 1e-8); omega_b: within 0.03% (k = 0.05 Mpc^-1, production reverse mode) | vs central finite differences; the finite differences themselves scatter by ~0.1% between steps. Before #55 (ADR 0004) AD was +0.6-0.8% off along omega_cdm and 4% along omega_b |
@@ -152,10 +153,11 @@ remaining residual is from photon-hierarchy and IC corrections at next order.
 | Preset | Background | Thermo | Perturbations | Harmonic | **Total** | GPU |
 |--------|-----------|--------|--------------|----------|-----------|-----|
 | planck_cl (Oct 2026 retune; `scripts/benchmark_speed.py`, job 24668) | 0.6s | 63s | 47s | 13s | 124s | V100 |
-| fit_cl (Oct 2026 retune; same script and job) | 0.6s | 2.1s | 8.4s | 7.6s | 18.6s | V100 |
+| fit_cl (Oct 2026 retune, ncdm_q_size 0; same script and job) | 0.6s | 2.1s | 8.4s | 7.6s | 18.6s | V100 |
+| fit_cl (Oct 22, 2026, 5 ncdm q-bins, l_max_ncdm 8, no fluid approximation, #57; `diags/diag_fitcl_qgrid.py`, job 27746, cached medians; 21.6 s on another node, job 27711) | 0.5s | 1.7s | 8.9s | 7.3s | 18.5s | V100 |
 | planck_cl (before the retune) | 1s | 53s | 401s | 33s | 487s | H100 |
 
-`fit_cl` uses 20 k/decade, l_max=17, 2000 tau points, 3000 thermodynamics points, table-based Bessel (all l at once, n_k_fine 5000, l_max 1500), rtol=1e-4 / atol=1e-6, max_steps=8192, and the Rodas5 Rosenbrock solver with cubic Hermite dense output. Suitable for HMC/fitting at <1.5% TT/EE accuracy (l<=500; measured 0.69% TT and 1.25% EE vs CLASS massless RECFAST, job 24668). `planck_cl` uses 60 k/decade, l_max=17, rtol=1e-4 / atol=1e-6, max_steps=8192, n_k_fine 20000 and Rodas5: within 0.26% TT of CLASS to l=1000 and 0.46% EE to l=500 (0.98% EE to l=1000, one sparse-l-grid multipole at l~526). All times are JIT-cached (second call onwards); `benchmark_speed.py` keeps planck_cl's 5 neutrino q-bins at m_ncdm=0, so its perturbation stage is ~30 s without them.
+`fit_cl` uses 20 k/decade, l_max=17, 2000 tau points, 3000 thermodynamics points, table-based Bessel (all l at once, n_k_fine 5000, l_max 1500), rtol=1e-4 / atol=1e-6, max_steps=8192, a 5 q-bin massive-neutrino hierarchy truncated at l_max_ncdm=8 and followed to today without the fluid approximation (#57, Oct 22, 2026), and the Rodas5 Rosenbrock solver with cubic Hermite dense output. Suitable for HMC/fitting at <2% TT/EE at l<=500: 0.48% TT and 1.21% EE at the massless fiducial vs CLASS RECFAST (job 27746; 0.69% / 1.25% before #53, job 24668), and with the default 0.06 eV neutrino against CLASS HyRec references on the five-point LCDM grid within 0.69% TT, 1.65% EE and 1.13% TE/sqrt(TT EE); 0.52% / 1.18% / 0.87% at 0.15 eV, 0.64% / 1.16% / 0.86% at 0.30 eV, 0.63% / 1.19% / 0.85% at 0.50 eV, flat in the neutrino mass (jobs 27746, 27711). `planck_cl` uses 60 k/decade, l_max=17, rtol=1e-4 / atol=1e-6, max_steps=8192, n_k_fine 20000 and Rodas5: within 0.26% TT of CLASS to l=1000 and 0.46% EE to l=500 (0.98% EE to l=1000, one sparse-l-grid multipole at l~526). All times are JIT-cached (second call onwards); `benchmark_speed.py` keeps planck_cl's 5 neutrino q-bins at m_ncdm=0, so its perturbation stage is ~30 s without them.
 
 ## Quick start
 
@@ -334,7 +336,7 @@ pk_direct = compute_pk(params, prec_direct, k=0.05)
 
 | Preset        | k/decade | l_max | k_max  | Use case                 |
 |---------------|----------|-------|--------|--------------------------|
-| **`fit_cl()`**| 20       | 17    | 1.0    | HMC / fitting (<1.5%, ~17-19 s V100) |
+| **`fit_cl()`**| 20       | 17    | 1.0    | HMC / fitting (<2% with massive neutrinos to 0.5 eV, ~20 s V100) |
 | **`planck_fast()`**| 60  | 17    | 1.0    | planck_cl with th_n_points 20000, l_max 1500 |
 | `fast_cl()`   | 15       | 25    | 0.15   | Quick iteration, testing |
 | `medium_cl()` | 20       | 50    | 0.3    | Moderate accuracy        |

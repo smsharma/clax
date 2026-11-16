@@ -21,8 +21,9 @@ ISW (rodas5: -4% to -46% at l = 2).
 Multi-cosmology rule: the fiducial massless-RECFAST comparison is the tight
 gate; the LCDM grid (massive 0.06 eV neutrino, CLASS default HyRec
 recombination) runs with looser bars that include the RECFAST-vs-HyRec and
-ncdm-fluid systematics. fit_cl has the same grid test (added Oct 20, 2026;
-its bars are provisional until the grid measurement is recorded). All tests
+ncdm-fluid systematics. fit_cl has the same grid test, one on the massive-neutrino
+grid and a hierarchy-truncation guard (Oct 20, 2026, with the 3 q-bin hierarchy
+of #57; bars from jobs 27173 / 27187, docs/fitcl_qgrid_2026-10-20.md). All tests
 are GPU-scale and marked slow.
 """
 import dataclasses
@@ -188,7 +189,16 @@ class TestPlanckClPreset:
 @pytest.mark.slow
 class TestFitClPreset:
     """fit_cl is the HMC preset: coarse, but its low-l TT must not be corrupted
-    by the solver's dense output (rodas5 gave -46% at l = 2 at these tolerances)."""
+    by the solver's dense output (rodas5 gave -46% at l = 2 at these tolerances)
+    or by its neutrino treatment (ncdm_q_size 0 gave -15% at l = 2, #57).
+
+    Bars for the two grids below: TT 2-30 < 0.9%, TT 2-500 < 1.1%, EE 5-500
+    < 2.5%, TE/sqrt(TT EE) 2-500 < 1.7%, set at 1.7x / 1.6x / 1.5x / 1.5x the
+    maxima measured Oct 22, 2026 with the shipped 5 q-bins / l_max_ncdm 8 /
+    no fluid approximation over the LCDM grid (job 27746) and the 0.15 and
+    0.30 eV points (job 27711); the sweep is in docs/fitcl_qgrid_2026-10-20.md."""
+
+    BARS = {"TT 2-30": 0.009, "TT 2-500": 0.011, "EE 5-500": 0.025, "TEn 2-500": 0.017}
 
     def test_low_l_within_fit_budget(self):
         ref = dict(np.load(os.path.join(REFERENCE_DIR, "cls_massless_recfast.npz")))
@@ -201,32 +211,13 @@ class TestFitClPreset:
             "EE 5-500": _band_max(cls["ee"], ref["ee"], 5, 500),
         }
         _report("fit_cl vs CLASS massless RECFAST", got)
-        # measured 0.461 / 0.461 / 1.194 percent after #53 (job 27000; 0.46 / 0.69 / 1.25
-        # before, job 24668); bars 3.3x / 4.3x / 1.7x
+        # measured 0.482 / 0.482 / 1.208 percent with the shipped hierarchy (job 27746;
+        # 0.461 / 0.461 / 1.194 with ncdm_q_size 0 after #53, job 27000); bars 3.1x / 4.1x / 1.7x
         assert got["TT 2-30"] < 0.015
         assert got["TT 2-500"] < 0.02
         assert got["EE 5-500"] < 0.02
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "fit_cl's ncdm_q_size=0 drops the massive-neutrino hierarchy; with the"
-        " default 0.06 eV neutrino TT is 14.6-15.4% off CLASS at l <= 30 at every"
-        " LCDM grid point (job 27008, Oct 20, 2026). Strict: starts failing when"
-        " fit_cl's neutrino treatment is fixed, so the bars get re-measured."))
-    def test_lcdm_grid_massive(self, lcdm_cosmology):
-        """fit_cl on the LCDM grid against CLASS's default references (HyRec,
-        one 0.06 eV neutrino): the HMC preset is evaluated away from fiducial by
-        construction, so it must be measured there too. Measured Oct 20, 2026
-        (job 27008, max |C_l / C_CLASS - 1|): TT 2-30 14.6-15.4%, TT 2-500 the
-        same (the error is concentrated at low l), EE 5-500 3.1-4.1%,
-        TE/sqrt(TT EE) 16.8-19.4% over fiducial / h_high / omega_b_high /
-        omega_cdm_low / ns_high, against 0.46% / 0.69% / 1.25% for the same
-        preset at the massless-RECFAST fiducial and 0.26% / 0.75% / 0.36% for
-        planck_cl (5 q-bins) on this grid. The cause is the preset's
-        ncdm_q_size=0 ("disable ncdm hierarchy, massless approx"): the
-        background carries a 0.06 eV neutrino that the perturbations do not.
-        Pre-existing; not changed by the Oct 2026 retune. The bars below are
-        the planck_cl-grid bars and will fail until that is fixed."""
-        name, params = lcdm_cosmology
+    def _grid_point(self, name, params):
         ref_dir = os.path.join(REFERENCE_DIR, name)
         if not os.path.isdir(ref_dir):
             pytest.skip(f"no CLASS reference for {name}")
@@ -239,10 +230,57 @@ class TestFitClPreset:
             "TEn 2-500": _te_norm_max(cls, ref, 2, 500),
         }
         _report(f"fit_cl vs CLASS ({name}, massive, HyRec)", got)
-        # Target once the neutrino treatment is fixed: the planck_cl grid bars
-        # (measured there TT <= 0.43%, EE <= 1.03%, TE <= 0.44%) plus fit_cl's
-        # own coarseness; to be re-measured then.
-        assert got["TT 2-30"] < 0.02
-        assert got["TT 2-500"] < 0.02
-        assert got["EE 5-500"] < 0.03
-        assert got["TEn 2-500"] < 0.02
+        for key, bar in self.BARS.items():
+            assert got[key] < bar, f"{key} {100 * got[key]:.3f}% >= {100 * bar:.2f}%"
+
+    def test_lcdm_grid_massive(self, lcdm_cosmology):
+        """fit_cl on the LCDM grid against CLASS's default references (HyRec,
+        one 0.06 eV neutrino): the HMC preset is evaluated away from fiducial by
+        construction, so it must be measured there too. Measured Oct 22, 2026
+        with the shipped 5 q-bins / l_max_ncdm 8 / no fluid approximation (job
+        27746, max |C_l / C_CLASS - 1| over fiducial / h_high / omega_b_high /
+        omega_cdm_low / ns_high): TT 2-30 0.47-0.54%, TT 2-500 0.56-0.69%,
+        EE 5-500 1.20-1.65%, TEn 2-500 0.87-1.13% (maxima at omega_b_high and
+        omega_cdm_low); planck_cl on the same grid
+        reads 0.23-0.42% / 0.76-1.04% / 0.30-0.42% to l = 1000. With ncdm_q_size 0
+        (job 27008) the same bands read 14.6-15.4% / the same / 3.1-4.1% /
+        16.8-19.4% (#57)."""
+        name, params = lcdm_cosmology
+        self._grid_point(name, params)
+
+    def test_nulcdm_grid_massive(self, nulcdm_cosmology):
+        """ncdm-sector rule: the massive-neutrino grid against CLASS references
+        (fiducial 0.06 eV; massive_nu_015; massive_nu_030, generated Oct 20,
+        2026; massive_nu_006 is the fiducial and skips). Measured Oct 22, 2026
+        (job 27711, 5 q-bins / l_max_ncdm 8 / no fluid approximation): 0.15 eV
+        TT 2-30 0.48%, TT 2-500 0.52%, EE 5-500 1.18%, TEn 2-500 0.87%; 0.30 eV
+        0.52 / 0.64 / 1.16 / 0.86%; fiducial 0.51 / 0.60 / 1.20 / 0.87%; and
+        0.53 / 0.63 / 1.19 / 0.85% at 0.50 eV, outside this grid. With the
+        "class" fluid approximation the same hierarchy reads TT 0.71% at
+        0.15 eV, 0.98% at 0.30 eV and 1.29% at 0.50 eV (its implementation,
+        #46, biases the late ISW), which is why the preset runs without it."""
+        name, params = nulcdm_cosmology
+        self._grid_point(name, params)
+
+    def test_lmax_ncdm_truncation(self, nulcdm_cosmology):
+        """fit_cl truncates the massive-neutrino hierarchy at pt_l_max_ncdm 8
+        (CLASS 17). Consistency guard at every massive-neutrino grid point, no
+        reference needed: against the same preset at l_max_ncdm 17 the C_l
+        differed by <= 0.011% in TT and EE to l = 500 at every measured point
+        with the fluid approximation on (LCDM grid, massless, 0.15 and 0.30 eV;
+        <= 0.083% to l = 1000; jobs 27173 / 27187, Oct 20, 2026); with it off,
+        as shipped, TT <= 0.007% and EE <= 0.010% at fiducial, 0.15 and 0.30 eV
+        (job 27766, Oct 22, 2026). Bar 0.1%. In linear P_m the same truncation is +0.9% at
+        k = 1 Mpc^-1 (the species' relativistic-era free streaming; not a C_l
+        matter, see the preset docstring)."""
+        name, params = nulcdm_cosmology
+        prec = PrecisionParams.fit_cl()
+        a = _cls(params, prec)
+        b = _cls(params, dataclasses.replace(prec, pt_l_max_ncdm=17))
+        got = {
+            "TT 2-500": _band_max(a["tt"], b["tt"], 2, 500),
+            "EE 5-500": _band_max(a["ee"], b["ee"], 5, 500),
+        }
+        _report(f"fit_cl l_max_ncdm 8 vs 17 ({name})", got)
+        assert got["TT 2-500"] < 0.001
+        assert got["EE 5-500"] < 0.001

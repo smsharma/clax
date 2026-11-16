@@ -13,15 +13,26 @@ import pytest
 from clax.background import background_solve
 from clax.interpolation import CubicSpline
 from clax.thermodynamics import thermodynamics_solve
-from tests.recomb_test_utils import (QS, QS_OPACITY, THETAS, THERMO_GRIDS, as_traced,
-                                     load_ref, spike_ratio, tables, tables_opacity,
-                                     tangent_tables, thermo_prec, xe_on_ref_grid, z_of)
+from tests.recomb_test_utils import (QS, QS_OPACITY, THERMO_GRIDS, THETAS, as_traced, load_drag, load_ref, spike_ratio, table_on_ref_grid, tables, tables_opacity, tangent_tables, thermo_prec, xe_on_ref_grid, z_of)
 
 _CACHE = {}
 # Under --fast the 3000-point (fit_cl) grid runs at fiducial; the default 20000-point
 # grid and the FD tests (a jvp compile per cosmology and theta) are marked slow.
 GRIDS = [pytest.param(n, marks=pytest.mark.slow, id=str(n)) if n > 3000 else n
          for n in THERMO_GRIDS]
+
+
+_TH_CACHE = {}
+
+
+def _thermo(name, p, n):
+    """The ThermoResult itself (for its derived scalars), cached per (name, n)."""
+    key = (name, n)
+    if key not in _TH_CACHE:
+        prec = thermo_prec(n)
+        pt = as_traced(p)
+        _TH_CACHE[key] = thermodynamics_solve(pt, prec, background_solve(pt, prec))
+    return _TH_CACHE[key]
 
 
 def _prim_tan(name, p, n, theta="h"):
@@ -170,6 +181,41 @@ def test_xe_hydrogen_windows_match_class(recomb_cosmology, n, window):
     assert rel[i] <= 1e-3, f"ERROR x_e {window} {rel[i]:.3e} > 1e-3 ({name}, n={n})"
 
 
+# ---- Below z = 800: the freeze-out tail and the Compton-coupling era of T_b ----
+# x_e and T_b against CLASS RECFAST where the T_b update's former Taylor switch
+# (f_e < 1e-3, z ~ 620) sat. That branch was a first-order expansion in
+# x = thomc * da used where x was not small, an error that grew with the grid step:
+# T_b was 2.7e-4 (20000 points) / 1.8e-3 (3000) from CLASS at z 300-700 and x_e
+# 1.1e-4 / 8.7e-4 at z 100-500. With the exact expm1 form the bars below are twice
+# the worst over the 11 cosmologies (job 27897, Oct 22, 2026; the worst is
+# massive_nu_015 everywhere), ceiled to two figures; the old code misses every one
+# of them by 2x to 12x (job 27896). Above z = 700 nothing changed.
+LOW_Z_CLASS_BARS = {
+    # (z_lo, z_hi): {n: (x_e bar, T_b bar)}
+    (100.0, 300.0): {20000: (3.6e-5, 1.3e-4), 3000: (7.9e-5, 3.4e-4)},
+    (300.0, 500.0): {20000: (3.9e-5, 6.4e-5), 3000: (7.1e-5, 2.2e-4)},
+    (500.0, 700.0): {20000: (3.9e-5, 2.2e-5), 3000: (1.5e-4, 1.1e-4)},
+}
+
+
+@pytest.mark.parametrize("n", GRIDS)
+@pytest.mark.parametrize("window", list(LOW_Z_CLASS_BARS), ids=lambda w: f"z{w[0]:g}-{w[1]:g}")
+def test_xe_tb_low_z_match_class(recomb_cosmology, n, window):
+    name, p = recomb_cosmology
+    prim, _ = _prim_tan(name, p, n)
+    ref = load_ref(name)
+    sel = (ref["z"] >= window[0]) & (ref["z"] <= window[1])
+    bar_xe, bar_tb = LOW_Z_CLASS_BARS[window][n]
+    failures = []
+    for q, rq, bar in (("xe", "x_e", bar_xe), ("tb", "Tb", bar_tb)):
+        rel = np.abs(table_on_ref_grid(prim, q, ref["z"][sel]) / ref[rq][sel] - 1.0)
+        i = int(np.argmax(rel))
+        print(f"{name} n={n}: {q} vs CLASS z {window} max {rel[i]:.3e} at z={ref['z'][sel][i]:.1f} (bar {bar:.1e})")
+        if rel[i] > bar:
+            failures.append(f"ERROR {q} {window} {rel[i]:.3e} > {bar:.1e} ({name}, n={n})")
+    assert not failures, "; ".join(failures)
+
+
 @pytest.mark.parametrize("n", GRIDS)
 def test_visibility_peak_matches_class(recomb_cosmology, n):
     from tests.recomb_test_utils import visibility_peak
@@ -218,6 +264,62 @@ def test_tangents_match_converged_fd_hydrogen(recomb_cosmology, theta):
     _fd_check(recomb_cosmology, theta, ZS_H)
 
 
+# ---- Derived epochs: the baryon drag epoch (smsharma/clax#44) and the visibility peak ----
+# Oracle: CLASS RECFAST (Heswitch = 1) with the same setup as the x_e references,
+# drag_recfast_hesw1.json (scripts/generate_class_reference.py --recfast-hesw1-drag).
+# z_d is where kappa_b = 1, dkappa_b/dtau = kappa'/R with R = 3 rho_b / 4 rho_gamma,
+# found by linear interpolation on the table as thermodynamics.c does; tau_d and
+# rs_d are the background's conformal time and sound horizon there. z_rec is CLASS's
+# visibility maximum by a three-point parabola on its table, which clax calls
+# z_star; tau_rec and rs_rec likewise. Bars are twice the worst over the 11
+# cosmologies on the fixed code, ceiled to two figures (job 28139, Oct 23, 2026:
+# z_d 1.5e-6 / 3.6e-5, rs_d 8.6e-7 / 2.4e-5, z_star 1.1e-6 / 2.9e-5 on 20000 /
+# 3000 points). The Aubourg et al. fit this replaces was 1.3e-4 off at fiducial
+# and 1.5e-3 at omega_b +20%; the grid-point z_star was up to 1.8e-4 / 1.1e-3 off.
+DRAG_EPOCH_BARS = {
+    20000: {"z_d": 3.1e-6, "tau_d": 2.0e-6, "rs_d": 1.8e-6},
+    3000: {"z_d": 7.3e-5, "tau_d": 5.4e-5, "rs_d": 4.8e-5},
+}
+VISIBILITY_PEAK_BARS = {
+    20000: {"z_star": 2.2e-6, "tau_star": 1.4e-6, "rs_star": 1.2e-6},
+    3000: {"z_star": 5.8e-5, "tau_star": 4.3e-5, "rs_star": 3.7e-5},
+}
+
+
+@pytest.mark.parametrize("n", GRIDS)
+def test_drag_epoch_matches_class(recomb_cosmology, n):
+    name, p = recomb_cosmology
+    th = _thermo(name, p, n)
+    ref = load_drag(name)
+    failures = []
+    for q in ("z_d", "tau_d", "rs_d"):
+        rel = abs(float(getattr(th, q)) / ref[q] - 1.0)
+        bar = DRAG_EPOCH_BARS[n][q]
+        print(f"{name} n={n}: {q} {float(getattr(th, q)):.6f} vs CLASS {ref[q]:.6f} rel {rel:.3e} (bar {bar:.0e})")
+        if rel > bar:
+            failures.append(f"ERROR {q} {rel:.3e} > {bar:.0e} ({name}, n={n})")
+    assert not failures, "; ".join(failures)
+
+
+@pytest.mark.parametrize("n", GRIDS)
+def test_visibility_peak_scalars_match_class(recomb_cosmology, n):
+    """z_star, tau_star, rs_star against CLASS's parabolic visibility peak. The
+    grid-point values the code took until #44 were off by up to one thermodynamics
+    step (5e-4 in z on 20000 points, 3e-3 on 3000) and piecewise constant in the
+    parameters; tau_star sets the perturbation save grid, so that was a primal jump."""
+    name, p = recomb_cosmology
+    th = _thermo(name, p, n)
+    ref = load_drag(name)
+    failures = []
+    for q, rq in (("z_star", "z_rec"), ("tau_star", "tau_rec"), ("rs_star", "rs_rec")):
+        rel = abs(float(getattr(th, q)) / ref[rq] - 1.0)
+        bar = VISIBILITY_PEAK_BARS[n][q]
+        print(f"{name} n={n}: {q} {float(getattr(th, q)):.6f} vs CLASS {rq} {ref[rq]:.6f} rel {rel:.3e} (bar {bar:.0e})")
+        if rel > bar:
+            failures.append(f"ERROR {q} {rel:.3e} > {bar:.0e} ({name}, n={n})")
+    assert not failures, "; ".join(failures)
+
+
 # ---- Opacity tables: kappa_dot, exp(-kappa), g, dkappa_dot/dlna, g' (smsharma/clax#55) ----
 # The tables perturbations.py reads. Until #55 they carried a stop_gradient with an
 # n_H_0 rescale (d127731): along omega_cdm and N_ur their tangents were exactly zero at
@@ -230,27 +332,36 @@ def test_tangents_match_converged_fd_hydrogen(recomb_cosmology, theta):
 # window, where a finite difference measures the grid's position against the kink.
 ZS_OP = np.array([3000., 2000., 1650., 1550., 1400., 1200., 1100., 1000., 900., 800., 600.,
                   400., 200., 100., 30., 10., 7., 3., 1., 0.3, 0.])
-# omega_b: the classifier gates z >= 900. Below the T_b Taylor switch (f_e < 1e-3,
-# z ~ 620; ADR 0003 Known limitations) the primal's omega_b dependence is a dense
-# staircase, one step per knot the switch crosses, so a finite difference at any
-# step measures the staircase's mean slope rather than the derivative: 1e-3 of
-# kappa_dot and g, 1.1e-2 of exp(-kappa) at its zero crossing near z = 400 at
-# omega_b + 20% (ADR 0004; the bias scales with the grid and vanishes onto AD as
-# the grid is refined). kappa integrates upward from z = 0, so exp(-kappa) carries
-# the same absolute bias at every z: 8e-4 of its derivative at z = 800 at omega_b
-# + 20%, 2e-4 or less from z = 900 up. Below 900 the spot checks of
-# tests/test_thermodynamics.py::TestThermoGradients gate the tables at 1%.
-ZS_OP_OMEGA_B = ZS_OP[ZS_OP >= 900.0]
+# omega_b: every sample. With the T_b update's former Taylor switch (f_e < 1e-3,
+# z ~ 620) the primal's omega_b dependence was a dense staircase below the switch,
+# one step per knot it crossed, and a finite difference measured the staircase's
+# mean slope: 1e-3 of kappa_dot and g, 1.1e-2 of exp(-kappa) at its zero crossing
+# near z = 400 at omega_b + 20% (ADR 0004), which kept this gate at z >= 900.
+ZS_OP_OMEGA_B = ZS_OP
 # h at fixed omega_b, omega_cdm: the tables respond at z <= 10 (Lambda in H(z) and the
 # reionisation epoch), where AD and FD agree to 1e-6. Above z = 1400 exp(-kappa) is
 # below 1e-5 and its h tangent is the trapezoid sum's sensitivity to knot phase
 # (1e-5 to 1e-3 of the value, step-unstable in FD too), so those samples are dropped;
 # between z = 30 and 600 the derivatives are 1e-7 to 1e-5 of the value and sit under
-# the staircase above, so the floor is 1e-5; class B then asserts |jvp/Q| <= 1.4e-5,
-# twice the worst measured over the 11 cosmologies (6.7e-6 at omega_cdm - 20%,
-# job 27184, Oct 20, 2026). Worst resolved errors in that run: 1.8e-4 (h),
-# 2.0e-4 (omega_b), 1.8e-4 (omega_cdm), 9.7e-5 (Y_He), 1.8e-4 (N_ur).
+# the staircase that the former T_b switch made (now gone), so the floor is 1e-5;
+# class B then asserts |jvp/Q| <= 1.9e-5, twice the worst measured over the 11
+# cosmologies (9.5e-6 at omega_cdm - 20%, job 27941, Oct 23, 2026; 6.7e-6 with the
+# switch, job 27184).
 ZS_OP_H = ZS_OP[ZS_OP <= 1200.0]
+
+
+# The derivative tables dkappa_dot/dlna and g' are spline derivatives of cumulative
+# sums and carry rounding at the 1e-10 level of their value, so a derivative below
+# 1e-6 of the value per unit theta cannot be resolved to 1e-3 by a 1e-3 step: the
+# floor is 1e-6 for the opacity tables (1e-8 is the x_e tables'), and class B asserts
+# |jvp/Q| <= OPACITY_B_BAR. With the x_e floor one such point, dkappa_dot/dlna at
+# z = 1 along omega_cdm at N_eff = 2 (1.5e-7 of the value), landed in class A at
+# 2.8e-3 once the T_b staircase no longer unsettled its finite difference. The bar
+# is twice the worst class-B value over the 11 cosmologies and four parameters
+# (9.5e-7, Y_He at omega_b - 20%, job 27941, Oct 23, 2026); worst resolved errors in
+# that run: 1.2e-5 (omega_b, at every redshift), 1.7e-4 (omega_cdm), 6.8e-5 (Y_He),
+# 2.0e-5 (N_ur), 1.8e-4 (h).
+OPACITY_B_BAR = 2.0e-6
 
 
 @pytest.mark.slow
@@ -258,18 +369,22 @@ ZS_OP_H = ZS_OP[ZS_OP <= 1200.0]
 def test_opacity_tangents_match_converged_fd(recomb_cosmology, theta):
     if theta == "h":
         _fd_check(recomb_cosmology, theta, ZS_OP_H, floor=1e-5, qs=QS_OPACITY,
-                  tables_fn=tables_opacity, b_bar=1.4e-5)
+                  tables_fn=tables_opacity, b_bar=1.9e-5)
     elif theta == "omega_b":
-        _fd_check(recomb_cosmology, theta, ZS_OP_OMEGA_B, qs=QS_OPACITY, tables_fn=tables_opacity)
+        _fd_check(recomb_cosmology, theta, ZS_OP_OMEGA_B, floor=1e-6, qs=QS_OPACITY,
+                  tables_fn=tables_opacity, b_bar=OPACITY_B_BAR)
     else:
-        _fd_check(recomb_cosmology, theta, ZS_OP, qs=QS_OPACITY, tables_fn=tables_opacity)
+        _fd_check(recomb_cosmology, theta, ZS_OP, floor=1e-6, qs=QS_OPACITY,
+                  tables_fn=tables_opacity, b_bar=OPACITY_B_BAR)
 
 
 # ---- Robustness checks: bounds, T_cmb, coarser grid, jit vs eager, vmap ----
 
 # Also on the 1500-point grid of the coarse-grid spike test and PREC_FAST's 1200
 # points, where |h J| reaches ~4-5 and an overshoot of the unclipped step would show
-# first (the unstaged L-stable variant drove x_e to -988, ADR 0003).
+# first (the unstaged L-stable variant drove x_e to -988, ADR 0003). The spike window
+# runs down to z = 300, through the T_b update's former Taylor switch at f_e < 1e-3
+# (z ~ 620), which on this grid put a spike of ratio 20 in the T_b tangent.
 @pytest.mark.parametrize("n", GRIDS + [1500, 1200])
 def test_fractions_stay_physical_without_clips(recomb_cosmology, n):
     name, p = recomb_cosmology
@@ -349,8 +464,8 @@ def test_coarse_grid_1500_helium_hydrogen_spike_free(recomb_cosmology, theta):
         assert np.all(np.isfinite(tan[q])) and np.all(np.isfinite(prim[q])), \
             f"ERROR non-finite {q} table or tangent ({name}, {theta}, n=1500)"
     z = z_of(prim["loga"])
-    worst = max(spike_ratio(tan[q] / prim[q], z, 800.0, 6000.0) + (q,) for q in QS)
-    print(f"{name} n=1500 d/d{theta}: worst spike ratio z 800-6000 {worst[0]:.3g}")
+    worst = max(spike_ratio(tan[q] / prim[q], z, 300.0, 6000.0) + (q,) for q in QS)
+    print(f"{name} n=1500 d/d{theta}: worst spike ratio z 300-6000 {worst[0]:.3g}")
     assert worst[0] < 10.0, f"ERROR 1500-grid spike ratio {worst[0]:.3g} ({name}, {theta})"
 
 

@@ -21,6 +21,8 @@ python diags/diag_cl_comprehensive.py
 | `timing_test.py` | JIT compilation and execution timing benchmarks |
 | `diag_rodas5_dense_output.py` | Rodas5 dense-output fix (Oct 2026): rodas5 vs kvaerno5 C_l, interleaved same-GPU timing of solver variants (`--abc`) |
 | `diag_preset_solver_choice.py` | Preset solver choice A-F (kvaerno5 / rodas5 at two tolerance rungs, planck- and fit-like settings) vs the CLASS massless reference |
+| `diag_fitcl_qgrid.py` | fit_cl massive-neutrino q-grid sweep (#57, Oct 2026): `ncdm_q_size` x `pt_l_max_ncdm` configurations on the five-point LCDM grid vs the CLASS HyRec references plus the massless fiducial (`--grid lcdm`), or on the massive-neutrino grid with linear P_m (`--grid nu --pk`), with cached per-stage timings |
+| `diag_pk_batched_steps.py` | fit_cl batched P(k) vs the ncdm state dimension (#57 follow-up, Oct 2026): tolerance ladder, per-mode Kvaerno5 reference, the batched solve mirrored chunk by chunk for step counts, and C_l^phiphi / lensed TT, EE with and without halofit for two hierarchies |
 
 ## AD diagnostics (May 2026 investigation, PR #16)
 

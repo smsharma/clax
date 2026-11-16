@@ -218,7 +218,10 @@ main the same AD was 4.0% off (jobs 24324, 24429).
   thermodynamics gradient tests to ln a = -8 are gone.
 - No runtime cost in the primal. The tangent passes carry the cumulative
   optical depth's tangent, which they computed and discarded before.
-- Not changed here: the T_b Taylor switch at f_e < 1e-3 (ADR 0003); the
+- Not changed here: the T_b Taylor switch at f_e < 1e-3 (ADR 0003; removed on
+  Oct 22, 2026, see CHANGELOG, after which the finite-difference floor along
+  omega_b described above is gone and the opacity test gates omega_b at every
+  redshift); the
   tau_free_streaming switch time held fixed under AD (#51); whatever part of
   #45's omega_cdm bias sits in the massive-neutrino sector rather than in this
   cut.
