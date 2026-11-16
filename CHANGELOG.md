@@ -11,7 +11,8 @@ power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 ### Oct 23, 2026: Reverse mode through Rodas5 is finite at fit_cl; it uncovers a 1.3% error of the recursive-checkpoint adjoint in the perturbation solve
 
 All numbers are at fit_cl as of 5ac3df3, before #58 (which gives fit_cl a
-massive-neutrino hierarchy), on a V100.
+massive-neutrino hierarchy), on a V100, except where a job number >= 38000 is
+given (fit_cl as of 6ff1303, with #58).
 
 **Bug.** At `PrecisionParams.fit_cl()` (Rodas5), `jax.grad` of any C_l or source
 functional, and of delta_m from `perturbations_solve`, was NaN in every cosmological
@@ -67,7 +68,16 @@ fiducial / omega_b + 20% / Y_He = 0.28, as relative |reverse - forward|:
 **Discovered: the recursive-checkpoint adjoint of the perturbation solve is 1.3% off.**
 With the NaN gone, production reverse mode gives d/dh = -137.23 at omega_b + 20%
 against -135.50 from forward mode, with the two primals agreeing to 7.5e-9. The error
-is 2.2e-4 at fiducial and 2.4e-4 at Y_He = 0.28.
+is 2.2e-4 at fiducial and 2.4e-4 at Y_He = 0.28. With #58's fit_cl (5-bin neutrino
+hierarchy; 26 to 309 Rodas5 steps per k-mode) it is 1.159e-2 at fiducial, 1.108e-2 at
+omega_b + 20% and 1.030e-2 at Y_He = 0.28 (jobs 38683, 38691): its size follows the
+step schedule, not the cosmology. It is a property of how many loop states equinox
+stores for the backward pass: with the default count (127 for a step budget of 8192,
+the steps in between recomputed) the error is 1.1e-2; with 512 or with one state per
+step of the budget it is 8.7e-6, with 32 it is 1.8e-5; Kvaerno5 and k-chunks of at
+most 10 modes are unaffected (job 38691). The fix (one stored state per step) is the
+follow-up PR; here the production-adjoint test is a strict expected failure at all
+three points.
 
 Relative error against forward mode, one setting switched at a time (job 27787, on the
 fix before #59; #59 left the production numbers unchanged, job 27788):
