@@ -456,7 +456,12 @@ class PrecisionParams:
           ISW is sourced at k ~ 1e-3-1e-2 Mpc^-1 below z ~ 2, where k tau > 31
           and clax's implementation of that approximation (#46) is active;
           with the hierarchy kept to today both read 0.5% and 0.1%, flat in
-          mass. 3 q-bins sit closer to CLASS with the approximation on
+          mass. Since Oct 25, 2026 (#46 fixed: the fluid variables follow the
+          hierarchy's moments exactly up to a narrow switch at k tau = 31) the
+          "class" mode on this hierarchy reads TT 2-30 0.515 / 0.483 / 0.529%
+          at 0.06 / 0.15 / 0.30 eV, the full hierarchy's 0.513 / 0.481 /
+          0.525% to 0.004%, at the same cost (18 s cached on a V100); the
+          preset keeps "none". 3 q-bins sit closer to CLASS with the approximation on
           (0.47-0.61%) only because two errors cancel; with it off they read
           0.93% at 0.50 eV. Cost: 18.5-21.6 s end to end on a V100 across two
           nodes (jobs 27746, 27711; PT 8.9-11.0 s), against 19.8-20.3 s for 3
@@ -514,7 +519,7 @@ class PrecisionParams:
             pt_l_max_ur=17,
             ncdm_q_size=5,           # 0 until Oct 20, 2026 (#57: 15% TT at l<=30); converged (8, 12 bins agree)
             pt_l_max_ncdm=8,         # vs 17: C_l identical to 0.011% at l<=500; +0.6% in P_m at k=1 (docstring)
-            ncdm_fluid_approximation="none",  # "class" mode (#46) costs 1% TT at l<=30 by 0.30 eV (docstring)
+            ncdm_fluid_approximation="none",  # "class" cost 1% TT at l<=30 at 0.30 eV until #46 was fixed; now equal (docstring)
             pt_ode_rtol=1e-4,        # Oct 2026: converged rung of the tolerance ladder (was 1e-3)
             pt_ode_atol=1e-6,        # (was 1e-4)
             # was 1024; 4096 was sufficient with Kvaerno5 at rtol 1e-4 / atol

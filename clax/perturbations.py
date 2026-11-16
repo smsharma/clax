@@ -73,10 +73,19 @@ _RSA_DAMPING_ENABLED = True
 # 5 Mpc before it); CLASS turns on strictly after.
 _RSA_TAU_BLEND_WIDTH = 2.5
 
-# Width of the sigmoid used for the ncdm fluid approximation transition.
-# Matches the _TCA_WIDTH convention: large enough for a sharp transition
-# in log-space, smooth enough for well-defined AD gradients through the switch.
-_NCDMFA_WIDTH = 5.0
+# Width, in ln(k*tau), of the sigmoid that hands an ncdm species from its
+# Psi_l(q) hierarchy to the fluid equations at k*tau = 31. CLASS switches hard
+# (perturbations.c:6274-6281). At 50 the fluid weight runs from 5% to 95%
+# between k*tau = 29.2 and 32.9, so the hierarchy, damped by (1 - w) inside the
+# window, stalls for only ~6% of the switch time. At 5 (the value until
+# smsharma/clax#46) the window ran from k*tau = 17 to 56: the stalled hierarchy
+# carried weight for about a Hubble time and P_m(z=0) left CLASS by up to 1.2%
+# at 0.30 eV. With exact-derivative tracking (below, in _perturbation_rhs) the
+# residual against CLASS's own fluid result, max over k = 1.5e-3 to 5e-2 Mpc^-1
+# at 0.15 eV, is 1.1e-3 at width 5, 1.5e-4 at 20 and 3.0e-5 at 50
+# (/lustre/work/n2minh/clax-probes/nu46, Oct 25, 2026). The switch sits at a
+# fixed tau = 31/k that no cosmological parameter moves.
+_NCDMFA_WIDTH = 50.0
 
 
 @dataclass(frozen=True)
@@ -464,13 +473,16 @@ def _ncdmfa_blend_weight(mode_code: int, trigger_tau_over_tau_k: float, tau, k, 
     """Return smooth sigmoid weight for the ncdm fluid approximation.
 
     Returns w ∈ (0, 1): w → 1 when fluid is fully active (late times),
-    w → 0 when hierarchy is active (early times).  The sigmoid transition
-    mirrors the TCA switching pattern (cf. ``_compute_tca_criterion``).
+    w → 0 when hierarchy is active (early times), half-on at
+    ``tau * k = trigger``. The width ``_NCDMFA_WIDTH`` (50 in ln(k*tau)) keeps
+    the window within ±6% of CLASS's hard switch (perturbations.c:6274-6281).
 
-    CLASS uses a hard boolean at ``tau * k > trigger``.  The smooth sigmoid
-    provides well-defined reverse-mode AD gradients through the transition
-    point, preventing gradient artifacts for parameters that shift the
-    switch time (e.g., ``m_ncdm``).
+    The switch time tau = trigger / k depends on no cosmological parameter, so
+    a hard switch would not move under a parameter change either. The sigmoid
+    spreads the change of right-hand side over several solver steps, so that
+    where a step lands relative to the switch does not set the result; the
+    batched solvers share one step sequence across modes whose switch times
+    differ, and their filtered error norm holds no ncdm variable.
     """
     enabled = (idx["n_q_ncdm"] > 0) & (mode_code != 3)
     ratio = (tau * k) / jnp.maximum(trigger_tau_over_tau_k, 1e-30)
@@ -1470,12 +1482,15 @@ def _perturbation_rhs(tau, y, args):
             return dy_acc
 
         dy = jax.lax.fori_loop(0, n_q, ncdm_hierarchy_all_q, dy)
+        # The hierarchy's own time derivative, before the damping below; the
+        # fluid variables follow its moments until the switch.
+        dy_ncdm_hierarchy = dy
 
         # Smooth damping of ncdm hierarchy when fluid approximation is active.
         # Instead of the hard ``jax.lax.cond`` freeze, we multiply the hierarchy
         # RHS by ``(1 - w_ncdmfa)`` so it is smoothly suppressed near and beyond
-        # the transition. This provides well-defined AD gradients through the
-        # switch point (the sigmoid has non-zero derivative everywhere).
+        # the transition. Inside the narrow blend window (k*tau 29-33) the
+        # damped hierarchy lags for only ~6% of the switch time.
         def damp_ncdm_hierarchy(iq, dy_acc):
             base = ncdm_start + iq * n_l_ncdm
             def damp_l(l, dy_inner):
@@ -1518,15 +1533,29 @@ def _perturbation_rhs(tau, y, args):
                 fluid_shear_hu,
                 jnp.where(ncdmfa_mode_code == 0, fluid_shear_mb, fluid_shear_class),
             )
-            # Tracking rate: before fluid activation (w_ncdmfa ≈ 0), the fluid
-            # auxiliary variables relax toward the hierarchy projections.  This
-            # is a JAX-specific design choice — CLASS uses hard switching, but
-            # clax needs branch-free computation for traceability.  The rate
-            # 20× max(aH, 1/τ) tracks within ~1/20 of a Hubble time.
-            track_rate = 20.0 * jnp.maximum(a_prime_over_a, 1.0 / tau_safe)
-            fluid_delta_rhs = w_ncdmfa * fluid_delta_prime + (1.0 - w_ncdmfa) * track_rate * (delta_ncdm_h - fluid_delta)
-            fluid_theta_rhs = w_ncdmfa * fluid_theta_prime + (1.0 - w_ncdmfa) * track_rate * (theta_ncdm_h - fluid_theta)
-            fluid_shear_rhs = w_ncdmfa * fluid_shear_prime + (1.0 - w_ncdmfa) * track_rate * (shear_ncdm_h - fluid_shear)
+            # Before the switch (w_ncdmfa ≈ 0) the fluid variables follow the
+            # exact time derivative of the hierarchy's moments, so they equal
+            # the moments at the switch: CLASS starts its fluid from them there
+            # (perturbations.c:4920-4987). The moments (delta, theta, shear) are
+            # linear in Psi_l(q) with coefficients set by epsilon(q, a); their
+            # tau-derivative is the projection of dPsi/dtau plus the explicit
+            # a-dependence times a' = a * aH, one forward-mode pass over the
+            # n_q momenta. The adiabatic initial conditions set the fluid
+            # variables to the moments at tau_ini. Until smsharma/clax#46 they
+            # relaxed toward the moments at 20 max(aH, 1/tau) instead: ~5% behind
+            # a delta_ncdm growing as tau^2, and pulled toward the damped,
+            # stalled hierarchy inside the blend (delta_ncdm 40% low today at
+            # k = 3.7e-3 Mpc^-1, 0.15 eV).
+            _, (ddelta_ncdm_h, dtheta_ncdm_h, dshear_ncdm_h) = jax.jvp(
+                lambda y_, a_: _ncdm_hierarchy_observables(
+                    y_, q_ncdm_qw, w_ncdm_qw, M_ncdm_qw, a_, k, idx
+                )[:3],
+                (y, a),
+                (dy_ncdm_hierarchy, a * a_prime_over_a),
+            )
+            fluid_delta_rhs = w_ncdmfa * fluid_delta_prime + (1.0 - w_ncdmfa) * ddelta_ncdm_h
+            fluid_theta_rhs = w_ncdmfa * fluid_theta_prime + (1.0 - w_ncdmfa) * dtheta_ncdm_h
+            fluid_shear_rhs = w_ncdmfa * fluid_shear_prime + (1.0 - w_ncdmfa) * dshear_ncdm_h
 
             dy = dy.at[idx['ncdm_fluid_delta']].set(fluid_delta_rhs)
             dy = dy.at[idx['ncdm_fluid_theta']].set(fluid_theta_rhs)

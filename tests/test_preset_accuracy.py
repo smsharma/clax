@@ -256,9 +256,11 @@ class TestFitClPreset:
         TT 2-30 0.48%, TT 2-500 0.52%, EE 5-500 1.18%, TEn 2-500 0.87%; 0.30 eV
         0.52 / 0.64 / 1.16 / 0.86%; fiducial 0.51 / 0.60 / 1.20 / 0.87%; and
         0.53 / 0.63 / 1.19 / 0.85% at 0.50 eV, outside this grid. With the
-        "class" fluid approximation the same hierarchy reads TT 0.71% at
+        "class" fluid approximation the same hierarchy read TT 0.71% at
         0.15 eV, 0.98% at 0.30 eV and 1.29% at 0.50 eV (its implementation,
-        #46, biases the late ISW), which is why the preset runs without it."""
+        #46, biased the late ISW), which is why the preset runs without it.
+        With #46 fixed (Oct 25, 2026) the "class" mode reads TT 2-30 0.483%
+        at 0.15 eV and 0.529% at 0.30 eV, within 0.004% of the hierarchy."""
         name, params = nulcdm_cosmology
         self._grid_point(name, params)
 

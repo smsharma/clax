@@ -8,6 +8,91 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
 power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 `compute_cl_pp(... nonlinear="ept")`.**
 
+### Oct 25, 2026: The massive-neutrino fluid approximation hands over from the hierarchy as CLASS does (#46)
+
+**Bug (smsharma/clax#46).** With `ncdm_fluid_approximation="class"`, the
+default and planck_cl's setting, P_m(z=0) left CLASS by up to 0.25% / 0.51% /
+1.2% at 0.06 / 0.15 / 0.30 eV across k = 1.5e-3 to 2e-2 Mpc^-1, and planck_cl's
+TT at l <= 30 by 0.21 / 0.32 / 0.59%. CLASS's own fluid approximation moves P_m
+by <= 1.3e-3 there, and clax with the approximation off matches CLASS with it
+off to 3.6e-5, so the defect was clax's handover, not the approximation. The
+fluid equations themselves match CLASS term by term (perturbations.c:9501-9570).
+
+**Root cause, two clax-only devices around CLASS's hard switch at k tau = 31**
+(probe `/lustre/work/n2minh/clax-probes/nu46`, single-mode ablations against
+stock CLASS 3.3.4 run with the approximation on and off):
+- The blend sigmoid had width 5 in ln(k tau): fluid weight 5% at k tau = 17,
+  95% at 56. Inside it the hierarchy's right-hand side is multiplied by
+  (1 - w), so the hierarchy evolved slower than the physics for about a Hubble
+  time, and the observables kept (1 - w) of it. At k = 3.7e-3 Mpc^-1, 0.15 eV,
+  delta_ncdm today was 40% below the full hierarchy (CLASS's fluid: 0.13%).
+- Before the switch the fluid variables relaxed toward the hierarchy's moments
+  at 20 max(aH, 1/tau), about 5% behind a delta_ncdm growing as tau^2, and inside
+  the blend they were pulled toward the stalled hierarchy. A 100x faster
+  relaxation made P_m worse (1.9e-2 at k = 2e-2): it tied the fluid harder to
+  the stalled hierarchy.
+
+**Fix (`clax/perturbations.py`).** (1) Before and through the switch the fluid
+variables follow the exact tau-derivative of the hierarchy's moments, the
+projection of dPsi/dtau plus the explicit dependence of epsilon(q, a) on a, by
+one forward-mode pass over the momenta; they start equal to the moments, so they
+equal them at the switch, where CLASS starts its fluid (perturbations.c:4920-4987).
+(2) `_NCDMFA_WIDTH` 5 -> 50: the window is k tau = 29.2 to 32.9. Either change
+alone is not enough. Max over k = 1.5e-3 to 5e-2 of |clax-fluid - CLASS-fluid|
+in P_m, each code relative to its own approximation-off run:
+
+| variant | 0.06 eV | 0.15 eV | 0.30 eV |
+|---|---|---|---|
+| as shipped (relaxation, width 5) | 2.5e-3 | 5.0e-3 | 1.2e-2 |
+| exact tracking, width 5 | 3.9e-4 | 1.1e-3 | 2.3e-3 |
+| exact tracking, width 20 | | 1.5e-4 | |
+| exact tracking, width 50 (this fix) | 1.9e-5 | 3.0e-5 | 4.7e-5 |
+| relaxation, width 200 | | 5.5e-4 | |
+
+The switch time tau = 31/k depends on no cosmological parameter; the sigmoid
+only spreads the change of right-hand side over several solver steps, since the
+batched solvers share one step sequence across modes and their error norm holds
+no ncdm variable. The "mb" and "hu" modes share the handover and get the fix.
+
+**Results against CLASS (final tree).**
+- P_m(z=0), `compute_pk` at `PK_TABLE_SOLVE_PREC`, max over k = 1.5e-3 to 1e-2:
+  3.1e-5 / 3.8e-5 / 6.9e-5 at 0.06 / 0.15 / 0.30 eV (was 2.5e-3 / 4.8e-3 /
+  9.9e-3); at k = 2e-2, 1.3e-4 at most (was 1.2e-2), the checked-in reference's
+  floor; at 5e-2, 9.2e-5 (was 2.7e-3). CPU and V100 agree to 1e-8. The
+  batched table path, `compute_pk_table` at planck_cl (Rodas5Batched, V100),
+  gives the same 3.1e-5 / 3.8e-5 / 6.9e-5 (was 2.5e-3 / 4.8e-3 / 9.9e-3), and
+  <= 1.0e-4 at k = 2e-2 to 0.1; cached wall time unchanged (~100 s).
+- Smoothness: ln P_m at k = 2.5e-3 over 21 masses in 0.145-0.155 eV departs
+  from a quartic fit by 9.3e-8, as before the fix (8.4e-8) and as the full
+  hierarchy (8.0e-8): the narrower switch adds no step-placement noise.
+- C_l, max |C_l/C_CLASS - 1| over TT 2-30 at 0.06 / 0.15 / 0.30 eV (V100):
+  planck_cl 0.134 / 0.091 / 0.135% (was 0.209 / 0.315 / 0.590%), within
+  0.003% of planck_cl with the approximation off; TT 2-1000 at 0.30 eV
+  0.344% (was 0.590%); EE moves by <= 0.001% and TE/sqrt(TT EE) improves by
+  up to 0.02%. fit_cl's hierarchy in the "class" mode 0.515 / 0.483 / 0.529%
+  (was 0.599 / 0.708 / 0.984%) against 0.513 / 0.481 / 0.525% for the shipped
+  fit_cl (approximation off). Cached cost unchanged: planck_cl ~96 s per
+  cosmology, fit_cl's hierarchy 18 s.
+- Gradients, d ln P_m / d m_ncdm at 0.15 eV (direct adjoint): -0.07710 at
+  k = 2.5e-3 and -0.07275 at 3.7e-3, against the full hierarchy's -0.07735 and
+  -0.07268 (the old handover: -0.1033 and -0.1082, 34% and 49% off). The fluid
+  mode's offset from the full hierarchy, per eV, against CLASS's own
+  (d/dm ln(P_fa/P_none), quadratic through 0.06 / 0.15 / 0.30 eV): +2.4e-4 vs
+  +1.5e-5 at k = 2.5e-3, -7.2e-5 vs +1.6e-4 at 3.7e-3, +5.9e-3 vs +6.4e-3 at
+  1e-2 (old handover: -2.6e-2, -3.6e-2, +3.8e-3). Reverse and forward mode
+  agree with central differences to 1.1e-3, 6.5e-4 and 2.7e-4, inside the
+  differences' own spread over three steps and at the full hierarchy's level
+  (1.6e-4, 6.3e-4, 1.5e-4).
+
+**Tests.** New `tests/test_ncdm_fluid_handover.py` on `nulcdm_cosmology`
+(0.06, 0.15, 0.30 eV): before k tau = 31 the fluid delta, theta, shear equal the
+hierarchy's moments (bar 6.6e-6, measured 3.3e-6; 4-12% before); P_m in the
+"class" mode matches CLASS's across the switch band (bars 1.4e-4 for
+k <= 1e-2 and 2.7e-4 at 2e-2, measured 6.9e-5 and 1.35e-4). RED on main (6/6
+full, 2/2 fast; jobs 30116, 30117), GREEN with the fix (jobs 30118, 30119).
+
+**Still open.** fit_cl keeps "none", which is as accurate and costs the same.
+
 ### Oct 22, 2026: fit_cl gets a massive-neutrino hierarchy (5 q-bins, l_max_ncdm 8, no fluid approximation; #57)
 
 Branch `fix/fitcl-ncdm-qgrid` (PR #58). Sweep scripts `diags/diag_fitcl_qgrid.py` and
