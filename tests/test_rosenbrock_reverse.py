@@ -28,8 +28,8 @@ Pipeline tests (slow, GPU preferred; CPU works but takes much longer): d/dh of t
 log matter power at fit_cl by reverse vs forward mode, at the 3
 ``recomb_downstream_cosmology`` points (tests/conftest.py).  The production reverse
 configuration is tested twice: with diffrax's direct adjoint (hard gate) and with the
-production recursive-checkpoint adjoint (strict xfail at all three points, a pre-existing
-adjoint defect the NaN hid; see that test).
+production recursive-checkpoint adjoint, which stores every step since Nov 17, 2026 (at
+equinox's default checkpoint count it was 1% off; see that test).
 """
 import functools
 from dataclasses import replace as dc_replace
@@ -323,31 +323,21 @@ def test_fit_cl_production_thermo_direct_adjoint_matches_forward(recomb_downstre
         f"ERROR {name}: direct-adjoint reverse {g:.10e} vs forward {t:.10e}, rel {rel:.3e}")
 
 
-_XFAIL_RECURSIVE_ADJOINT = (
-    "RecursiveCheckpointAdjoint through Rodas5 at fit_cl with equinox's default checkpoint "
-    "count (127 for max_steps 8192) differs from the direct adjoint and from forward mode by "
-    "1.16e-2 (fiducial), 1.11e-2 (omega_b_high) and 1.03e-2 (YHe_028), jobs 38683 and 38691; "
-    "with checkpoints = max_steps it is 8.7e-6 off; pre-existing, hidden by the NaN; "
-    "fixed in a follow-up PR")
-
-
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason=_XFAIL_RECURSIVE_ADJOINT)
 def test_fit_cl_production_reverse_matches_forward(recomb_downstream_cosmology):
     """jax.grad of F under production fit_cl (stable thermodynamics gradient mode,
-    recursive-checkpoint adjoint) vs jax.jvp under fwd(FIT); bar 3e-4
-    (the reverse-vs-forward bar used for #54).
+    recursive-checkpoint adjoint storing every step) vs jax.jvp under fwd(FIT); bar
+    3e-4 (the reverse-vs-forward bar used for #54).
 
-    Strict xfail at all three points.  With the fit_cl of #58 (5-bin neutrino
-    hierarchy) the recursive-checkpoint adjoint at equinox's default checkpoint count
-    is 1.159e-2 (fiducial), 1.108e-2 (omega_b_high) and 1.030e-2 (YHe_028) off forward
-    mode (jobs 38683, 38691), while the direct adjoint is 5e-6 to 1.4e-5 off (the
-    previous test, job 38682).  Before #58 (ncdm_q_size 0) the same defect was
-    2.191e-4 / 1.278e-2 / 2.404e-4 (job 27787): its size follows the step schedule,
-    not the cosmology.  The defect disappears when every step is stored
-    (checkpoints = max_steps: 8.7e-6, job 38691), so it is a property of the
-    checkpoint-and-replay schedule, fixed in a follow-up PR; once that lands the
-    strict marker fails the run, so that it gets removed."""
+    This is the test that fails on the schedule the perturbation solves used before
+    Nov 17, 2026 (equinox's default checkpoint count, 127 for a budget of 8192, with
+    recomputation in between): with the fit_cl of #58 it measured 1.159e-2
+    (fiducial), 1.108e-2 (omega_b_high) and 1.030e-2 (YHe_028) off forward mode
+    (jobs 38683, 38691), and 2.191e-4 / 1.278e-2 / 2.404e-4 before #58 (job 27787),
+    while the direct adjoint was 5e-6 to 1.4e-5 off (the previous test, job 38682).
+    With one checkpoint per step of the budget the backward pass recomputes nothing
+    and the same quantity is at the same-settings floor (see the CHANGELOG entry of
+    Nov 17, 2026 for the measurement on this tree)."""
     name, g, t, rel = _reverse_vs_forward(recomb_downstream_cosmology, _FIT, _FIT_FWD)
     assert jnp.isfinite(g), f"ERROR {name}: production reverse d/dh is {g} (forward {t:.6e})"
     assert rel < 3e-4, f"ERROR {name}: production reverse {g:.10e} vs forward {t:.10e}, rel {rel:.3e}"

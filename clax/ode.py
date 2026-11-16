@@ -121,10 +121,21 @@ def solve_stiff(
     return sol
 
 
-def _get_adjoint(adjoint: str):
-    """Return the Diffrax adjoint method from string name."""
+def _get_adjoint(adjoint: str, *, checkpoints: int | None = None):
+    """Return the Diffrax adjoint method from string name.
+
+    ``checkpoints`` is the number of states ``RecursiveCheckpointAdjoint`` may store
+    for the backward pass; ``None`` keeps diffrax's default of about
+    sqrt(2 max_steps) (127 for a budget of 8192), which recomputes the steps in
+    between.  The perturbation solves pass ``checkpoints=prec.ode_max_steps``: with
+    as many checkpoints as the step budget, equinox stores the state after every
+    step and the backward pass never recomputes one.  Through the vmapped Rodas5
+    solve, recomputation gave d/dh 1% off forward mode at fit_cl, while storing
+    every step agrees to 9e-6 and is 18% faster for 2.0 GiB more (CHANGELOG,
+    Nov 17, 2026).  The forward pass does not depend on this choice.
+    """
     if adjoint == "recursive_checkpoint":
-        return diffrax.RecursiveCheckpointAdjoint()
+        return diffrax.RecursiveCheckpointAdjoint(checkpoints=checkpoints)
     elif adjoint == "direct":
         return diffrax.DirectAdjoint()
     else:
