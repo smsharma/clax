@@ -336,8 +336,8 @@ def test_fit_cl_production_reverse_matches_forward(recomb_downstream_cosmology):
     (jobs 38683, 38691), and 2.191e-4 / 1.278e-2 / 2.404e-4 before #58 (job 27787),
     while the direct adjoint was 5e-6 to 1.4e-5 off (the previous test, job 38682).
     With one checkpoint per step of the budget the backward pass recomputes nothing
-    and the same quantity is at the same-settings floor (see the CHANGELOG entry of
-    Nov 17, 2026 for the measurement on this tree)."""
+    and the same quantity is 7.587e-6 / 8.674e-6 / 7.337e-6 (job 38735), the
+    same-settings floor."""
     name, g, t, rel = _reverse_vs_forward(recomb_downstream_cosmology, _FIT, _FIT_FWD)
     assert jnp.isfinite(g), f"ERROR {name}: production reverse d/dh is {g} (forward {t:.6e})"
     assert rel < 3e-4, f"ERROR {name}: production reverse {g:.10e} vs forward {t:.10e}, rel {rel:.3e}"
