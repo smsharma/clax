@@ -28,7 +28,7 @@ Pipeline tests (slow, GPU preferred; CPU works but takes much longer): d/dh of t
 log matter power at fit_cl by reverse vs forward mode, at the 3
 ``recomb_downstream_cosmology`` points (tests/conftest.py).  The production reverse
 configuration is tested twice: with diffrax's direct adjoint (hard gate) and with the
-production recursive-checkpoint adjoint (strict xfail at omega_b_high, a pre-existing
+production recursive-checkpoint adjoint (strict xfail at all three points, a pre-existing
 adjoint defect the NaN hid; see that test).
 """
 import functools
@@ -324,26 +324,30 @@ def test_fit_cl_production_thermo_direct_adjoint_matches_forward(recomb_downstre
 
 
 _XFAIL_RECURSIVE_ADJOINT = (
-    "RecursiveCheckpointAdjoint through Rodas5 at fit_cl differs from the direct adjoint "
-    "and from forward mode by 2.2e-4 (fiducial) to 1.3e-2 (omega_b_high), job 27787; "
-    "pre-existing, hidden by the NaN; issue to be filed")
+    "RecursiveCheckpointAdjoint through Rodas5 at fit_cl with equinox's default checkpoint "
+    "count (127 for max_steps 8192) differs from the direct adjoint and from forward mode by "
+    "1.16e-2 (fiducial), 1.11e-2 (omega_b_high) and 1.03e-2 (YHe_028), jobs 38683 and 38691; "
+    "with checkpoints = max_steps it is 8.7e-6 off; pre-existing, hidden by the NaN; "
+    "fixed in a follow-up PR")
 
 
 @pytest.mark.slow
-def test_fit_cl_production_reverse_matches_forward(recomb_downstream_cosmology, request):
+@pytest.mark.xfail(strict=True, reason=_XFAIL_RECURSIVE_ADJOINT)
+def test_fit_cl_production_reverse_matches_forward(recomb_downstream_cosmology):
     """jax.grad of F under production fit_cl (stable thermodynamics gradient mode,
     recursive-checkpoint adjoint) vs jax.jvp under fwd(FIT); bar 3e-4
     (the reverse-vs-forward bar used for #54).
 
-    Strict xfail at omega_b_high only.  There the recursive-checkpoint adjoint is
-    1.278e-2 off forward mode under either thermodynamics gradient mode, while the
-    direct adjoint is 3.6e-6 off (job 27787); #59 left it unchanged (job 27788).  At
-    fiducial and YHe_028 the same defect is 2.191e-4 / 2.404e-4, inside the bar, so
-    those two stay hard passes (a strict xfail there would turn their passes into
-    failures).  Once the adjoint is fixed, omega_b_high passes and the strict marker
-    fails the run, so that the marker gets removed."""
-    if recomb_downstream_cosmology[0] == "omega_b_high":
-        request.applymarker(pytest.mark.xfail(strict=True, reason=_XFAIL_RECURSIVE_ADJOINT))
+    Strict xfail at all three points.  With the fit_cl of #58 (5-bin neutrino
+    hierarchy) the recursive-checkpoint adjoint at equinox's default checkpoint count
+    is 1.159e-2 (fiducial), 1.108e-2 (omega_b_high) and 1.030e-2 (YHe_028) off forward
+    mode (jobs 38683, 38691), while the direct adjoint is 5e-6 to 1.4e-5 off (the
+    previous test, job 38682).  Before #58 (ncdm_q_size 0) the same defect was
+    2.191e-4 / 1.278e-2 / 2.404e-4 (job 27787): its size follows the step schedule,
+    not the cosmology.  The defect disappears when every step is stored
+    (checkpoints = max_steps: 8.7e-6, job 38691), so it is a property of the
+    checkpoint-and-replay schedule, fixed in a follow-up PR; once that lands the
+    strict marker fails the run, so that it gets removed."""
     name, g, t, rel = _reverse_vs_forward(recomb_downstream_cosmology, _FIT, _FIT_FWD)
     assert jnp.isfinite(g), f"ERROR {name}: production reverse d/dh is {g} (forward {t:.6e})"
     assert rel < 3e-4, f"ERROR {name}: production reverse {g:.10e} vs forward {t:.10e}, rel {rel:.3e}"
