@@ -256,7 +256,7 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 - Practical reverse-mode `P(k)` objectives should usually differentiate one
   table-backed multi-`k` solve, not many repeated exact `compute_pk()` calls.
 - Backend-aware batching over k-modes for GPU/CPU perturbation solves.
-- `RecursiveCheckpointAdjoint` for memory-efficient reverse-mode AD through the ODE solve.
+- `RecursiveCheckpointAdjoint` for reverse-mode AD through the ODE solves; the perturbation solves store one loop state per step of `ode_max_steps` (no recomputation), because the recomputing default schedule gave gradients 1% off at `fit_cl` (Nov 17, 2026).
 - Synchronous gauge throughout (matching CLASS default).
 - RECFAST recombination matching CLASS `wrap_recfast.c` (Peebles C with fudge, Gaussian K correction, CLASS's Saha -> ODE staging advanced by an L-stable second-order ROS2 step).
 - Source-interpolated C_l integration: source functions S(k,tau) interpolated to fine k-grid (10000 points) before line-of-sight integration, resolving the oscillatory T_l(k) transfer function robustly.
@@ -267,7 +267,10 @@ CosmoParams --> background --> thermodynamics --> perturbations --> primordial
 `PrecisionParams.ode_adjoint` controls Diffrax reverse-mode AD through the ODE solves.
 clax currently supports:
 
-- `"recursive_checkpoint"`: production default and recommended choice
+- `"recursive_checkpoint"`: production default and recommended choice. In the
+  perturbation solves it stores one loop state per step of `ode_max_steps` for every
+  k-mode of a batch (2.0 GiB for the 100-mode `fit_cl` batch on a V100); lower
+  `ode_max_steps` if memory is tight, the automatic k-chunking also accounts for it.
 - `"direct"`: optional alternate reverse pass for diagnostics or environment-specific benchmarking
 
 Use `"recursive_checkpoint"` by default on both CPU and GPU. That includes:

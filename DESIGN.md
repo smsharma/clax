@@ -1247,10 +1247,18 @@ We use a **two-level differentiation strategy**:
 
 For the perturbation ODE (the most expensive):
 
-- **RecursiveCheckpointAdjoint** (default): Splits the time interval into chunks,
-  recomputes the forward pass for each chunk during the backward pass. Memory
-  cost is O(√T) where T is the number of steps, vs O(T) for direct backprop.
-  Compute cost is ~2x the forward pass.
+- **RecursiveCheckpointAdjoint** (default): stores the loop state at a set of
+  checkpoints and recomputes the steps in between during the backward pass.
+  With diffrax's default number of checkpoints (about sqrt(2 max_steps): 127
+  for a budget of 8192) memory is O(sqrt(T)) in the number of steps T and the
+  backward pass recomputes roughly one forward pass. **The perturbation solves
+  ask for one checkpoint per step of the budget** (`checkpoints=ode_max_steps`,
+  Nov 17, 2026): nothing is recomputed, memory is O(max_steps) per k-mode (2.0
+  GiB for the 100-mode fit_cl batch on a V100) and the backward pass is 18%
+  faster. The reason is correctness, not speed: through the vmapped Rodas5
+  solve the recomputing schedule gave d/dh 1% off forward mode and off the
+  direct adjoint at fit_cl, while storing every step agrees to 9e-6
+  (CHANGELOG, Nov 17, 2026). The automatic k-chunk size counts this store.
 
 - **DirectAdjoint**: Stores all intermediate states. Memory cost O(T). Faster
   but may OOM for long integrations.
@@ -1288,7 +1296,7 @@ on one backend or problem size is not automatically validated on another.
 
 | Mode | Memory profile | Reverse-pass cost | Expected use | Validation burden | Main risks |
 |------|----------------|-------------------|--------------|-------------------|------------|
-| `recursive_checkpoint` | Sublinear in saved trajectory via recomputation | Higher wall time from replay | Default production gradients, CI/test oracle, large stiff perturbation solves | Low: this is the reference path | Extra recomputation cost |
+| `recursive_checkpoint` | One stored loop state per step of `ode_max_steps`, per k-mode, for the perturbation solves (sublinear via recomputation elsewhere) | No recomputation in the perturbation solves | Default production gradients, CI/test oracle, large stiff perturbation solves | Low: this is the reference path | `ode_max_steps` x batch memory; the k-chunking accounts for it |
 | `direct` | O(T) in solver trajectory/storage needs | Can be faster when memory is cheap | Reduced problems, adjoint debugging, target-specific benchmarking | High: must re-check AD vs FD on target setup | OOM, backend-sensitive instability, misleading test failures |
 
 #### Validation before switching adjoints
