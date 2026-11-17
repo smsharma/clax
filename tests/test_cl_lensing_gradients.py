@@ -36,9 +36,11 @@ Three tests, split so that one failing check cannot hide the others:
    forward mode, a hard pass on this tree. On the base of this branch every
    reverse-mode gradient through Rodas5 at fit_cl was NaN (masked dt = 0 steps; job
    26946) and, with that fixed, the lensed_tt cases missed the bar by 3.4e-4 to 6.4e-3
-   because the production RecursiveCheckpointAdjoint recomputed Rodas5 steps and lost a
-   k-mode's end-state cotangent (the pp cases passed, 1.9e-9 to 5.9e-5). Both are fixed
-   on main's side of this branch (smsharma/clax#63, #64). Measured here: TG5P_PENDING.
+   because the production RecursiveCheckpointAdjoint recomputed Rodas5 steps and, at the
+   seam between a recomputed segment and a stored state, counted a k-mode's end value
+   twice or not at all (the pp cases passed, 1.9e-9 to 5.9e-5; CHANGELOG, Nov 17, 2026).
+   Both are fixed on main's side of this branch (smsharma/clax#63, #64). Measured here:
+   TG5P_PENDING.
 
 Finite-difference anchor (the same as the unlensed G4 test in tests/test_cl_gradients.py).
 At fit_cl tolerance (rtol 1e-4, atol 1e-6) sum ln C_l wobbles along omega_b at ~1e-8
@@ -55,25 +57,22 @@ FD's error, since fd7 reuses 7 of the 9 points). Bars: unc <= 3e-4 and
 |AD/fd9 - 1| <= 1e-3, the spec's. AD at fit_cl's own tolerance is printed beside
 AD at the tight one (a convergence record, not gated).
 
-Recombination epoch (ZREC_K5, ZREC_R5). th.z_rec = z_grid[argmin |kappa - 1|]
-(clax/thermodynamics.py:1004) is a knot of the thermodynamics grid, and the knots move
-with the parameters (the grid is uniform in ln tau, and tau_0 depends on h). AD
-differentiates the knot's motion; finite differences see the motion plus a jump back
-by one index (a sawtooth: at omega_b_high z_rec rises 0.32 per 0.25% step in h, then
-drops 3.24). The physical kappa = 1 epoch barely depends on h at fixed omega_b and
-omega_cdm. C_l^phiphi depends on z_rec through the lensing kernel's start, so
-dF_pp/dh misses FD by 0.55-2.9% (jobs 28542/28544/28546, 28615/28617/28619); with
-z_rec held fixed, AD matches FD to 4.9e-5 (job 28583, omega_b_high). Along omega_b the
-knot moves smoothly inside the 1% stencil at omega_b_high (job 28610), but at
-lcdm_fiducial it jumps by one index at s = -1% (z_rec +0.54 against a -0.035 trend
-per step, job 28698), so the FD spread is 2.2e-3; with z_rec frozen, AD/fd9 - 1 =
--2.3e-4, unc 4.8e-5. The cases this makes fail are xfail(strict) per cosmology
-(ZREC_K5, ZREC_R5, applied at run time with request.applymarker) until PR
-smsharma/clax#61 (z_rec by linear interpolation of kappa = 1). A case not listed
-passes as it is: the Rodas5 companion at lcdm_fiducial, for instance, because the
-knot's FD spread also widens its allowance. Lensed TT dilutes the channel below the
-bar. th.tau_star, also a knot, sets the perturbation save grid; its effect on
-unlensed TT was a single step of +4.6e-9 of |F| along h (scan job 28168).
+Recombination epoch. On the base of this branch th.z_rec = z_grid[argmin |kappa - 1|] was
+a knot of the thermodynamics grid, and the knots move with the parameters (the grid is
+uniform in ln tau, and tau_0 depends on h). AD differentiated the knot's motion; finite
+differences saw the motion plus a jump back by one index (a sawtooth: at omega_b_high
+z_rec rose 0.32 per 0.25% step in h, then dropped 3.24). The physical kappa = 1 epoch
+barely depends on h at fixed omega_b and omega_cdm. C_l^phiphi depends on z_rec through
+the lensing kernel's start, so dF_pp/dh missed FD by 0.55-2.9% (jobs 28542/28544/28546,
+28615/28617/28619) and dF_pp/domega_b at lcdm_fiducial by 2.0e-3 (a one-index jump at s =
+-1%, job 28698); with z_rec held fixed, AD matched FD to 4.9e-5 (job 28583) and -2.3e-4
+(unc 4.8e-5). smsharma/clax#61 (merged Oct 23, 2026; main 6ff1303) replaced the knot by
+linear interpolation of kappa = 1 in ln a (clax/thermodynamics.py:1050); this tree carries
+it, so the twelve pp cases that were xfail(strict) on the base, and the six lcdm_fiducial
+pp Rodas5 companions that passed only because the knot widened their allowance, are plain
+gates again. Measured on this tree: TG5F_PENDING. th.tau_star, also a knot, sets the
+perturbation save grid; its effect on unlensed TT was a single step of +4.6e-9 of |F|
+along h (scan job 28168).
 """
 import jax
 import jax.numpy as jnp
@@ -87,61 +86,17 @@ pytestmark = pytest.mark.slow
 FUNCS = {"pp": F_pp, "lensed_tt": F_ltt}
 THETAS = ("h", "omega_b")
 
-ZREC_REASON = ("th.z_rec is a thermodynamics grid knot (thermodynamics.py:1004); continuous "
-               "in PR #61")
 NONLINEAR = ("none", "halofit", "ept")
 THETA_FUNC = [pytest.param(t, f, id=f"{t}-{f}") for t in THETAS for f in FUNCS]
-# The (cosmology, theta, func, nonlinear) cases the z_rec knot makes fail on this base, per
-# test, with the measured miss (raw runs on the branch; see the module docstring). A case
-# not listed passed its bar.
-ZREC_K5 = {
-    ("lcdm_fiducial", "h", "pp", "none"): "AD/fd9-1 6.8e-3, unc 6.8e-3 (job 28542)",
-    ("omega_b_high", "h", "pp", "none"): "AD/fd9-1 2.0e-2, unc 2.9e-3 (job 28544)",
-    ("YHe_028", "h", "pp", "none"): "AD/fd9-1 2.9e-2, unc 8.6e-3 (job 28546)",
-    ("lcdm_fiducial", "omega_b", "pp", "none"): "AD/fd9-1 2.0e-3, unc 2.2e-3 (job 28542)",
-    ("lcdm_fiducial", "h", "pp", "halofit"): "AD/fd9-1 5.6e-3, unc 5.5e-3 (job 28756)",
-    ("omega_b_high", "h", "pp", "halofit"): "AD/fd9-1 1.6e-2, unc 2.4e-3 (job 28758)",
-    ("YHe_028", "h", "pp", "halofit"): "AD/fd9-1 2.4e-2, unc 7.0e-3 (job 28760)",
-    ("lcdm_fiducial", "omega_b", "pp", "halofit"): "AD/fd9-1 1.6e-3, unc 1.8e-3 (job 28756)",
-    ("lcdm_fiducial", "h", "pp", "ept"): "AD/fd9-1 5.5e-3, unc 5.4e-3 (job 28615)",
-    ("omega_b_high", "h", "pp", "ept"): "AD/fd9-1 1.6e-2, unc 2.3e-3 (job 28617)",
-    ("YHe_028", "h", "pp", "ept"): "AD/fd9-1 2.4e-2, unc 6.9e-3 (job 28619)",
-    ("lcdm_fiducial", "omega_b", "pp", "ept"): "AD/fd9-1 1.8e-3, unc 1.8e-3 (job 28615)",
-}
-# Not listed, and passing only because the z_rec knot widens the companion's FD-
-# uncertainty allowance (1e-3 + unc): the six lcdm_fiducial pp cases. |AD-fd9|/|AD|
-# against the allowance: (h, pp) none 6.9e-3/8.1e-3, halofit 5.5e-3/6.8e-3, ept
-# 5.5e-3/6.7e-3 (82-85%); (omega_b, pp) none 2.1e-3/3.3e-3, halofit 1.4e-3/2.8e-3, ept
-# 1.8e-3/3.0e-3 (50-65%). The gap is the knot artefact itself, not lensing. Not flaky:
-# Rodas5 step noise at g4_prec is ~1e-5 in the derivative, against margins >= 1.2e-3.
-# A change that moves thermodynamics grid knots before PR #61 could flip them to a
-# FAIL, which should be read as the knot. On the #61 overlay they pass at <= 4.8e-4.
-ZREC_R5 = {
-    ("omega_b_high", "h", "pp", "none"): "|AD-fd9|/|AD| 2.0e-2 > allowed 3.9e-3 (job 28544)",
-    ("YHe_028", "h", "pp", "none"): "|AD-fd9|/|AD| 3.0e-2 > allowed 1.0e-2 (job 28546)",
-    ("omega_b_high", "h", "pp", "halofit"): "|AD-fd9|/|AD| 1.6e-2 > allowed 3.4e-3 (job 28758)",
-    ("YHe_028", "h", "pp", "halofit"): "|AD-fd9|/|AD| 2.4e-2 > allowed 8.3e-3 (job 28760)",
-    ("omega_b_high", "h", "pp", "ept"): "|AD-fd9|/|AD| 1.6e-2 > allowed 3.3e-3 (job 28617)",
-    ("YHe_028", "h", "pp", "ept"): "|AD-fd9|/|AD| 2.4e-2 > allowed 8.3e-3 (job 28619)",
-}
-
-
-def _xfail_if_zrec(request, cases, name, theta, func, nonlinear):
-    """Mark this case xfail(strict, AssertionError) if `cases` lists it."""
-    miss = cases.get((name, theta, func, nonlinear))
-    if miss is not None:
-        request.applymarker(pytest.mark.xfail(
-            raises=AssertionError, strict=True, reason=f"{miss}; {ZREC_REASON}"))
 
 
 @pytest.mark.parametrize("nonlinear", NONLINEAR)
 @pytest.mark.parametrize("theta,func", THETA_FUNC)
-def test_g5_forward_matches_fd_kvaerno5(request, recomb_downstream_cosmology, func, nonlinear,
+def test_g5_forward_matches_fd_kvaerno5(recomb_downstream_cosmology, func, nonlinear,
                                         theta):
     """Gate: forward-mode AD of F against stencil_fd, on Kvaerno5 at g4_prec (see the
     module docstring). Asserts AD and FD finite, unc <= 3e-4 and |AD/fd9 - 1| <= 1e-3."""
     name, base = recomb_downstream_cosmology
-    _xfail_if_zrec(request, ZREC_K5, name, theta, func, nonlinear)
     x0 = float(getattr(base, theta))
     n_th = G4_TH[theta]
     F = FUNCS[func](g4_prec("kvaerno5", n_th), base, theta, nonlinear)
@@ -162,7 +117,7 @@ def test_g5_forward_matches_fd_kvaerno5(request, recomb_downstream_cosmology, fu
 
 @pytest.mark.parametrize("nonlinear", NONLINEAR)
 @pytest.mark.parametrize("theta,func", THETA_FUNC)
-def test_g5_forward_matches_fd_rodas5(request, recomb_downstream_cosmology, func, nonlinear,
+def test_g5_forward_matches_fd_rodas5(recomb_downstream_cosmology, func, nonlinear,
                                       theta):
     """Companion on fit_cl's production solver (Rodas5) at g4_prec and the same
     stencil_fd. Asserts AD and FD finite and |AD - fd9| <= 1e-3 |AD| + unc |fd9|:
@@ -170,7 +125,6 @@ def test_g5_forward_matches_fd_rodas5(request, recomb_downstream_cosmology, func
     accepted-step sequence is not reproducible between compilations (jobs
     27675/27676: primals 4.7e-6 apart), so the FD reference carries that noise."""
     name, base = recomb_downstream_cosmology
-    _xfail_if_zrec(request, ZREC_R5, name, theta, func, nonlinear)
     x0 = float(getattr(base, theta))
     n_th = G4_TH[theta]
     F = FUNCS[func](g4_prec(FIT.pt_ode_solver, n_th), base, theta, nonlinear)

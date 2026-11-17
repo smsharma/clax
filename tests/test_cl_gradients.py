@@ -2,9 +2,10 @@
 is independent of solver step placement, agrees between forward and production
 reverse mode, is smooth along h, and matches converged finite differences.
 GPU (each point is a full fit_cl solve under AD). Multi-cosmology:
-recomb_downstream_cosmology (3 points). Wall clock on a V100: about 6 h per cosmology for
-the whole file, of which G4 is ~3 h (jobs 28321-28323) and each G2-direct case ~25 min of
-reverse-program compile (job 27802); run one job per cosmology with -k.
+recomb_downstream_cosmology (3 points). Wall clock on a V100: about 4.5 h per cosmology
+for the file without G4 (jobs 38768-38770), G4 ~3 h more (jobs 28321-28323), each
+G2-direct case ~25 min of reverse-program compile (job 27802); run one job per
+cosmology with -k.
 
 Two perturbation solvers appear, for a reason that is about the finite-difference
 reference and the step sequence, not about the physics:
@@ -49,19 +50,22 @@ Reverse-mode tests (G2, RF1 companion). On the base of this branch every reverse
 gradient at fit_cl was NaN (vmapped k-batches run masked dt = 0 steps through Rodas5)
 and, with that fixed, the production adjoint was 1% off (RecursiveCheckpointAdjoint at
 diffrax's default checkpoint count recomputes steps whose Rodas5 trajectory does not
-reproduce, and drops the end-state cotangent of a k-mode that finishes just before a
-stored checkpoint). Both are fixed on main's side of this branch: smsharma/clax#63
+reproduce; at the seam between a recomputed segment and a stored state a k-mode that
+has reached tau_end on one side only has its end value counted twice or not at all;
+CHANGELOG, Nov 17, 2026). Both are fixed on main's side of this branch: smsharma/clax#63
 (the 1/dt guard) and #64 (one checkpoint per step of the budget). The reverse-mode
 tests below are therefore hard passes, measured on this tree:
 - test_g2_direct_adjoint_reverse_matches_forward: jax.grad under the direct adjoint
   equals the forward-mode derivative, the statement that the C_l pipeline's reverse
   mode is correct (the thermodynamics gradient mode, stable or native, does not
-  matter). Measured: TG2D_PENDING.
+  matter). Measured: 1.9e-8 to 5.6e-6 over h, omega_b, omega_cdm at the three
+  cosmologies, bar 3e-4 (jobs 38768-38770).
 - test_g2_production_reverse_matches_forward: the production configuration (stable
   thermodynamics mode, recursive-checkpoint adjoint storing every step) against
-  forward mode. Measured: TG2P_PENDING.
+  forward mode. Measured: 9.1e-9 to 1.0e-5 over the same nine cases, the largest
+  dF/domega_b at omega_b_high (jobs 38768-38770).
 - test_rf1_jit_of_grad_equals_grad_rodas5_companion: eager and jitted reverse mode
-  agree. Measured: TRF1R_PENDING.
+  agree. Measured: 2.6e-8 to 7.1e-8 at the three cosmologies (jobs 38768-38770).
 """
 from dataclasses import replace
 
