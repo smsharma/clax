@@ -2054,6 +2054,24 @@ def _pt_saved_output_count(*, solve_kind: str) -> int:
     raise ValueError(f"Unknown perturbation solve kind: {solve_kind}")
 
 
+def _pt_checkpoint_store_bytes_per_mode(prec: PrecisionParams, *, n_eq: int) -> int:
+    """Bytes per ``k``-mode of the reverse pass's per-step checkpoint store.
+
+    The perturbation solves ask ``RecursiveCheckpointAdjoint`` for
+    ``ode_max_steps`` checkpoints (see ``clax.ode._get_adjoint``), so the backward
+    pass holds one loop state per step of the budget, for every mode of the batch,
+    whether or not the steps are taken.  A state is the ``n_eq`` solution values,
+    the ``n_eq`` cached right-hand side of the Rosenbrock solver and a few scalars;
+    ``3 n_eq + 32`` doubles is a bound measured against fit_cl (100 modes, 106
+    variables, a budget of 8192: 2.0 GiB on a V100, job 38691; this estimate gives
+    2.1 GiB).  The direct adjoint has its own O(max_steps) residual store, which
+    this function does not describe.
+    """
+    if prec.ode_adjoint != "recursive_checkpoint":
+        return 0
+    return prec.ode_max_steps * (3 * n_eq + 32) * 8
+
+
 def _resolve_pt_k_batch_size(
     prec: PrecisionParams,
     *,
@@ -2061,12 +2079,15 @@ def _resolve_pt_k_batch_size(
     n_tau: int,
     n_outputs: int,
     solve_kind: str,
+    n_eq: int | None = None,
 ) -> int:
     """Resolve the effective ``k`` batch size for perturbation solves.
 
     Semantics:
     - ``pt_k_chunk_size > 0``: exact chunk size
     - ``pt_k_chunk_size == 0``: auto-batched mode using saved-output estimates
+      plus, when ``n_eq`` is given, the reverse pass's per-step checkpoint store
+      (``_pt_checkpoint_store_bytes_per_mode``)
     - ``pt_k_chunk_size < 0``: explicit full-``vmap`` mode
     """
     chunk_size = prec.pt_k_chunk_size
@@ -2077,6 +2098,8 @@ def _resolve_pt_k_batch_size(
 
     platform = jax.devices()[0].platform
     bytes_per_mode = max(1, n_tau * n_outputs * 8)
+    if n_eq is not None:
+        bytes_per_mode += _pt_checkpoint_store_bytes_per_mode(prec, n_eq=n_eq)
     auto_batch = _pt_output_memory_cap_bytes() // bytes_per_mode
     auto_batch = min(auto_batch, _pt_auto_batch_mode_cap(platform=platform, solve_kind=solve_kind))
     return max(1, min(n_k, auto_batch))
@@ -2277,7 +2300,7 @@ def _perturbations_solve_impl(
             stepsize_controller=_make_scalar_pid_controller(
                 prec=prec, k=k, idx=idx, config=pid_config,
             ),
-            adjoint=_get_adjoint(prec.ode_adjoint),
+            adjoint=_get_adjoint(prec.ode_adjoint, checkpoints=prec.ode_max_steps),
             max_steps=prec.ode_max_steps,
             args=ode_args,
         )
@@ -2290,7 +2313,7 @@ def _perturbations_solve_impl(
     batch_size = _resolve_pt_k_batch_size(
         prec, n_k=n_k, n_tau=n_tau,
         n_outputs=_pt_saved_output_count(solve_kind="full"),
-        solve_kind="full",
+        solve_kind="full", n_eq=n_eq,
     )
     all_sources = _solve_k_modes_batched(solve_single_k, k_grid, batch_size)
 
@@ -2487,7 +2510,7 @@ def _perturbations_solve_mpk_impl(
             stepsize_controller=_make_scalar_pid_controller_unfiltered(
                 prec=prec, config=pid_config,
             ),
-            adjoint=_get_adjoint(prec.ode_adjoint),
+            adjoint=_get_adjoint(prec.ode_adjoint, checkpoints=prec.ode_max_steps),
             max_steps=prec.ode_max_steps,
             args=ode_args,
         )
@@ -2500,7 +2523,7 @@ def _perturbations_solve_mpk_impl(
     batch_size = _resolve_pt_k_batch_size(
         prec, n_k=n_k, n_tau=n_tau,
         n_outputs=_pt_saved_output_count(solve_kind="mpk"),
-        solve_kind="mpk",
+        solve_kind="mpk", n_eq=n_eq,
     )
 
     if prec.pt_ode_solver in ("rodas5", "rosenbrock", "rosenbrock_batched"):
@@ -2587,7 +2610,7 @@ def _matter_delta_m_single_k_impl(
         stepsize_controller=_make_scalar_pid_controller_unfiltered(
             prec=prec, config=pid_config,
         ),
-        adjoint=_get_adjoint(prec.ode_adjoint),
+        adjoint=_get_adjoint(prec.ode_adjoint, checkpoints=prec.ode_max_steps),
         max_steps=prec.ode_max_steps,
         args=ode_args,
     )
@@ -3061,7 +3084,7 @@ def tensor_perturbations_solve(
             stepsize_controller=diffrax.PIDController(
                 rtol=prec.pt_ode_rtol, atol=prec.pt_ode_atol,
             ),
-            adjoint=_get_adjoint(prec.ode_adjoint),
+            adjoint=_get_adjoint(prec.ode_adjoint, checkpoints=prec.ode_max_steps),
             max_steps=prec.ode_max_steps,
             args=ode_args,
         )

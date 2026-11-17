@@ -195,6 +195,12 @@ class PrecisionParams:
     hr_n_k_fine: int = 5000          # fine k-grid for source interpolation
     hr_l_max: int = 2500             # max multipole for C_l computation
     hr_l_limber: int = 0             # use Limber approx for l >= this (0=disabled)
+    # Mpc; upper bound on the conformal age tau_0 that fixes the fast path's
+    # Bessel-table range, x_max = 1.05 pt_k_max_cl hr_tau0_max, independent of
+    # cosmology so the table is built once (#54, ADR 0005). Fiducial tau_0 is
+    # ~14100 Mpc; compute_cls_all_fast raises (also under jit) if tau_0 exceeds
+    # this bound. Raising it widens the table proportionally (82 MiB at fit_cl).
+    hr_tau0_max: float = 20000.0
 
     # Lensing
     le_l_max: int = 2500
@@ -292,7 +298,9 @@ class PrecisionParams:
 
     @staticmethod
     def planck_cl():
-        """Science preset, measured as shipped (rodas5; job 24668, before #53;
+        """Science preset, measured as shipped before #54, i.e. with the fast
+        path's LINEAR Bessel lookup at 30 points per unit x, rebuilt on every
+        call (rodas5; job 24668, before #53;
         V100, compute_cls_all_fast at n_k_fine 20000) against CLASS with a
         massless neutrino and RECFAST: TT within 0.086% (l <= 30), 0.233%
         (l <= 500), 0.262% (l <= 1000); EE within 0.60% (l = 2-4), 0.46%
@@ -310,7 +318,15 @@ class PrecisionParams:
         Oct 20, 2026): TT 0.086 / 0.238 / 0.271%, EE 0.596 / 0.455 / 0.981%,
         TE/sqrt(TT EE) 0.327%, within 0.01 pp of the above; stages
         thermodynamics 59.6 s, perturbations 27.8 s, harmonic 13.5 s,
-        101.5 s end to end.
+        101.5 s end to end. With #54's cubic Hermite lookup at 3 points per
+        unit x (table built once per process), against the same tree without
+        it (main 5ac3df3, which has the CLASS radiation-streaming trigger;
+        tests/test_preset_accuracy.py::TestPlanckClPreset, V100, jobs 30151 /
+        30152): EE at l = 2-4 0.596% -> 0.151%, the linear table's l = 2 bias
+        removed; every other band within 0.04 percentage points (TT 0.086 ->
+        0.079 / 0.238 -> 0.245 / 0.370 -> 0.375%, EE 5-500 0.455 -> 0.450%,
+        5-1000 0.981 -> 0.986%, TE/sqrt(TT EE) 0.327 -> 0.287%). The stage
+        timings above were not re-measured with it.
 
         Retuned Oct 2026 (docs/precision_sweep_2026-10-10.md). The previous
         values (Kvaerno5, l_max 50, rtol 1e-6, atol 1e-11, max_steps 131072)
@@ -320,7 +336,10 @@ class PrecisionParams:
         retune costs nothing at l <= 2000. l_max 17 for all species keeps the
         photon-truncation effect in the reionization EE bump below 0.05%
         (12/10/17 gives 0.18%). hr_n_k_fine 20000 together with the fast
-        path's 30-point-per-unit-x Bessel table removes the former -1% TT
+        path's 30-point-per-unit-x linear Bessel table (since #54 the default
+        is the cubic Hermite lookup at 3 points per unit x, which agrees with
+        the Hermite lookup at 30 to 1.6e-5 in TT at fit_cl, jobs
+        27208-27214) removes the former -1% TT
         offset at l < 50 and the +20% EE error at l=2. Above l ~ 1000 the
         C_l stage is percent-level (TT rms 1.7-2% at l = 1000-2000, EE 3-8%,
         common to the exact-j_l and table paths: perturbation k sampling /
@@ -380,7 +399,8 @@ class PrecisionParams:
         Same perturbation stage as planck_cl (k_max 1.0, 60 k/decade, 5000
         tau points, l_max 17/17/17, rtol 1e-4 / atol 1e-6, max_steps 8192,
         rodas5 with the cubic Hermite dense output) and the same fast-path
-        C_l settings (hr_n_k_fine 20000, 30-point-per-unit-x Bessel table),
+        C_l settings (hr_n_k_fine 20000, the default Hermite Bessel lookup at
+        3 points per unit x since #54; 30-point linear lookup before),
         with two changes:
         - th_n_points 20000 (planck_cl: 100000): thermodynamics ~13 s instead
           of ~59-63 s on a V100; C_l differ by <= 0.02% to l=500, <= 0.05%
@@ -477,10 +497,14 @@ class PrecisionParams:
         - rtol 1e-4 / atol 1e-6 (the same; Oct 2026): the converged rung of
           the tolerance ladder. The old 1e-3 / 1e-4 was never validated at
           low l and leaves 1.8% TT at l=2 even with the Hermite dense output.
-        - fast all-l table Bessel (hr_n_k_fine 5000, hr_l_max 1500; planck_cl
+        - fast all-l table Bessel (hr_n_k_fine 20000, hr_l_max 1500; planck_cl
           20000, 2500): precomputed j_l(x) and j_l'(x) tables with the
           T0+T1+T2 transfer contributions, one JIT instead of one per sparse
-          l (83 of them at l_max 1500)
+          l (83 of them at l_max 1500). hr_n_k_fine was 5000 until #54: with
+          5000 fine-k points the trapezoid integral over k samples |T_l|^2
+          about once per oscillation near l ~ 1200, so dC_l/dh flips sign
+          along h; 20000 makes it monotone at +3.7% forward time (measured
+          against 5000, eager, V100).
 
         V100 timings with the shipped hierarchy (diags/diag_fitcl_qgrid.py,
         cached medians): job 27746 (LCDM grid) BG 0.5 s, TH 1.7 s, PT 8.9 s,
@@ -494,7 +518,12 @@ class PrecisionParams:
         Earlier records, all with ncdm_q_size 0. V100 timings, cached, rodas5
         at rtol 1e-4 / atol 1e-6, from two
         scripts that time the harmonic stage differently (quote the script
-        with the number): diags/diag_preset_solver_choice.py (job 24652,
+        with the number). The timings and CLASS accuracies below were
+        measured at n_k_fine 5000, before it was raised to 20000 (+3.7%
+        forward time; TT at l = 100-1200 moves by up to 1.6% toward CLASS,
+        EE/TE at l = 500-1200 by 2e-3 / 6e-3 away, job 27208), and before #54's
+        fixed-range Bessel table (built once per process and reused) and
+        Hermite lookup: diags/diag_preset_solver_choice.py (job 24652,
         config E; C_l to l_max 1500 with n_k_fine 5000): BG 0.7 s, TH 2.4 s,
         PT 9.8 s, HR 3.8 s, 16.8 s end to end (kvaerno5: 61.0 s);
         scripts/benchmark_speed.py (job 24668, hr_l_max 1500, n_k_fine 5000):
@@ -521,7 +550,8 @@ class PrecisionParams:
             # 1e-8 (sweep config G4); rodas5's step count differs, and the
             # validation passed at 8192 (job 24668).
             ode_max_steps=8192,
-            hr_n_k_fine=5000,        # fine k-grid for accurate Bessel integrals
+            # 5000 undersamples |T_l|^2 near l~1200: dC_l/dh flips sign along h (#54); planck_cl already 20000
+            hr_n_k_fine=20000,
             hr_l_max=1500,           # reduced max multipole
             # rodas5 with cubic Hermite dense output (Oct 12, 2026). With the
             # earlier linear dense output the late ISW was wrong (TT -46% at

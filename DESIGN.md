@@ -1119,6 +1119,18 @@ j_l(x) ≈ cos(x - (l+1)π/2) / x  for x >> l
 
 These smooth approximations are differentiable.
 
+**Tabulated j_l for the fast C_l path** (`harmonic.compute_cls_all_fast`,
+`bessel.build_jl_table`): j_l and j_l' are tabulated for the sparse l grid on a
+uniform x grid at 3 points per unit x (`JL_TABLE_X_PER_UNIT`) over a fixed range
+x ∈ [0, 1.05 · pt_k_max_cl · hr_tau0_max], built once per process and reused for
+every cosmology. They are looked up with a cubic Hermite interpolant from the
+tabulated values and slopes (j_l'' from Bessel's equation). The reason: a linear
+lookup biases the amplitude by -(Δx)²/12 at table spacing Δx and its AD
+derivative is the chord slope, a staircase in x; Hermite's error falls as (Δx)⁴
+and its derivative is smooth. So C_l is at least as accurate at 3 points per
+unit x as the linear lookup was at 30, and dC_l/dθ is smooth, which the linear
+lookup's chord-slope derivative is not at any density measured (ADR 0005, #54).
+
 ### 4.14 ODE Solver Utilities
 
 **Files**: `ode.py`, `rosenbrock.py`
@@ -1235,10 +1247,18 @@ We use a **two-level differentiation strategy**:
 
 For the perturbation ODE (the most expensive):
 
-- **RecursiveCheckpointAdjoint** (default): Splits the time interval into chunks,
-  recomputes the forward pass for each chunk during the backward pass. Memory
-  cost is O(√T) where T is the number of steps, vs O(T) for direct backprop.
-  Compute cost is ~2x the forward pass.
+- **RecursiveCheckpointAdjoint** (default): stores the loop state at a set of
+  checkpoints and recomputes the steps in between during the backward pass.
+  With diffrax's default number of checkpoints (about sqrt(2 max_steps): 127
+  for a budget of 8192) memory is O(sqrt(T)) in the number of steps T and the
+  backward pass recomputes roughly one forward pass. **The perturbation solves
+  ask for one checkpoint per step of the budget** (`checkpoints=ode_max_steps`,
+  Nov 17, 2026): nothing is recomputed, memory is O(max_steps) per k-mode (2.0
+  GiB for the 100-mode fit_cl batch on a V100) and the backward pass is 18%
+  faster. The reason is correctness, not speed: through the vmapped Rodas5
+  solve the recomputing schedule gave d/dh 1% off forward mode and off the
+  direct adjoint at fit_cl, while storing every step agrees to 9e-6
+  (CHANGELOG, Nov 17, 2026). The automatic k-chunk size counts this store.
 
 - **DirectAdjoint**: Stores all intermediate states. Memory cost O(T). Faster
   but may OOM for long integrations.
@@ -1276,7 +1296,7 @@ on one backend or problem size is not automatically validated on another.
 
 | Mode | Memory profile | Reverse-pass cost | Expected use | Validation burden | Main risks |
 |------|----------------|-------------------|--------------|-------------------|------------|
-| `recursive_checkpoint` | Sublinear in saved trajectory via recomputation | Higher wall time from replay | Default production gradients, CI/test oracle, large stiff perturbation solves | Low: this is the reference path | Extra recomputation cost |
+| `recursive_checkpoint` | One stored loop state per step of `ode_max_steps`, per k-mode, for the perturbation solves (sublinear via recomputation elsewhere) | No recomputation in the perturbation solves | Default production gradients, CI/test oracle, large stiff perturbation solves | Low: this is the reference path | `ode_max_steps` x batch memory; the k-chunking accounts for it |
 | `direct` | O(T) in solver trajectory/storage needs | Can be faster when memory is cheap | Reduced problems, adjoint debugging, target-specific benchmarking | High: must re-check AD vs FD on target setup | OOM, backend-sensitive instability, misleading test failures |
 
 #### Validation before switching adjoints

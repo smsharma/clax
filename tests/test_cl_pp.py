@@ -25,17 +25,21 @@ import jax.numpy as jnp
 from dataclasses import replace as _replace
 
 
+def _pipeline_prec():
+    """The precision of the ``pipeline`` fixture (k_max=5 so Halofit can converge)."""
+    from clax import PrecisionParams
+    return _replace(PrecisionParams.fast_cl(), pt_k_max_cl=5.0, pt_k_chunk_size=20)
+
+
 @pytest.fixture(scope="module")
 def pipeline():
     """Run pipeline once for all tests (k_max=5 so Halofit can converge)."""
-    from clax import CosmoParams, PrecisionParams
+    from clax import CosmoParams
     from clax.background import background_solve
     from clax.thermodynamics import thermodynamics_solve
     from clax.perturbations import perturbations_solve, perturbations_solve_mpk
 
-    prec = _replace(PrecisionParams.fast_cl(),
-                    pt_k_max_cl=5.0,
-                    pt_k_chunk_size=20)
+    prec = _pipeline_prec()
     params = CosmoParams()
     bg = background_solve(params, prec)
     th = thermodynamics_solve(params, prec, bg)
@@ -354,16 +358,59 @@ class TestPtMpk:
         assert ("ept", True) in seen and ("lin", True) in seen, seen
         assert all(ok for _, ok in seen), seen
 
-    def test_pt_mpk_with_narrower_k_range_raises(self, pipeline):
+    @pytest.fixture(scope="class")
+    def pt_narrow(self, pipeline):
+        """The tau0-complete matter solve on a NARROWER k-range than the pipeline's
+        (fast_cl at pt_k_max_cl = 1 instead of 5), solved once for the three
+        narrow-range tests below. Each of them used to solve it itself: about
+        360-420 s of CPU apiece, most of this file's --fast time after the pipeline
+        fixture (job 30244)."""
+        from dataclasses import replace
+        from clax import PrecisionParams
+        from clax.perturbations import perturbations_solve_mpk
+        params, bg, th, _, _ = pipeline
+        narrow = replace(PrecisionParams.fast_cl(), pt_k_max_cl=1.0, pt_k_chunk_size=20)
+        return perturbations_solve_mpk(params, narrow, bg, th)
+
+    def test_pt_mpk_with_narrower_k_range_raises(self, pipeline, pt_narrow):
         """A pt_mpk solved at another precision must not silently misalign:
         P_lin is evaluated at explicit k, and k outside pt_mpk's support is
         rejected."""
-        from dataclasses import replace
-        from clax import PrecisionParams
         from clax.lensing import compute_cl_pp
-        from clax.perturbations import perturbations_solve_mpk
         params, bg, th, pt, _ = pipeline
-        narrow = replace(PrecisionParams.fast_cl(), pt_k_max_cl=1.0, pt_k_chunk_size=20)
-        pt_narrow = perturbations_solve_mpk(params, narrow, bg, th)
         with pytest.raises(ValueError, match="solved perturbation grid"):
             compute_cl_pp(pt, params, bg, th, l_max=10, nonlinear="halofit", pt_mpk=pt_narrow)
+
+    @pytest.mark.parametrize("nl", ["halofit", "ept"])
+    def test_pt_mpk_with_narrower_k_range_raises_under_jit(self, pipeline, pt_narrow, nl):
+        """Jitted twin of test_pt_mpk_with_narrower_k_range_raises (smsharma/clax#54):
+        under jit the eager support check cannot read the traced pt_mpk grid, so the
+        modulators' guard on the queried k (eqx.error_if) must raise at run time;
+        without it the P_lin spline clamps at pt_mpk's k_max and R(k) is silently
+        wrong. Cosmology-independent plumbing (a guard on array shapes and ranges):
+        exempt from the multi-cosmology rule."""
+        from clax.lensing import compute_cl_pp
+        params, bg, th, pt, _ = pipeline
+        prec = _pipeline_prec()
+        f = jax.jit(lambda pm: compute_cl_pp(pt, params, bg, th, l_max=10, nonlinear=nl,
+                                             pt_mpk=pm, prec=prec))
+        with pytest.raises(Exception, match="solved perturbation grid"):
+            jax.block_until_ready(f(pt_narrow))
+
+    def test_mismatched_prec_raises(self, pipeline):
+        """A prec whose pt_k_max_cl is not pt.k_grid[-1] would silently resize the
+        Halofit k-extension (it is sized from prec but starts at pt.k_grid[-1]);
+        compute_cl_pp raises, eagerly and under jit (smsharma/clax#54).
+        Cosmology-independent plumbing: exempt from the multi-cosmology rule."""
+        from clax.lensing import compute_cl_pp
+        params, bg, th, pt, pt_mpk = pipeline
+        wrong = _replace(_pipeline_prec(), pt_k_max_cl=1.0)
+        with pytest.raises(Exception, match="pt_k_max_cl does not match"):
+            compute_cl_pp(pt, params, bg, th, l_max=10, nonlinear="halofit",
+                          pt_mpk=pt_mpk, prec=wrong)
+        # pt traced too, so the check runs as a run-time check (as inside a jitted
+        # likelihood), not at trace time on a concrete grid.
+        f = jax.jit(lambda p_, pm: compute_cl_pp(p_, params, bg, th, l_max=10,
+                                                 nonlinear="halofit", pt_mpk=pm, prec=wrong))
+        with pytest.raises(Exception, match="pt_k_max_cl does not match"):
+            jax.block_until_ready(f(pt, pt_mpk))

@@ -500,8 +500,52 @@ MODELS = {
 }
 
 
+# C_l differentiability gates (smsharma/clax#54): unlensed C_l^phiphi for the same
+# parameter set as the cls.npz references (FIDUCIAL_PARAMS + the multipoint overrides),
+# not necessarily the same CLASS build (three of the five cls.npz predate it).
+CL_PP_GRID = {
+    "lcdm_fiducial": {},
+    "omega_b_high": {"omega_b": 0.02237 * 1.20},
+    "h_high": {"h": 0.6736 * 1.10},
+    "h_low": {"h": 0.6736 * 0.90},
+    "massive_nu_015": {"m_ncdm": 0.15},
+}
+
+
+def generate_cl_pp(name, overrides, outdir_base):
+    """Unlensed C_l^phiphi (CLASS raw_cl 'pp', l = 0..2500) at FIDUCIAL_PARAMS +
+    overrides; writes cl_pp.npz (ell, pp) and cl_pp.json provenance."""
+    import classy
+    from classy import Class
+
+    pars = dict(FIDUCIAL_PARAMS)
+    pars.update(overrides)
+    c = Class()
+    c.set(pars)
+    c.compute()
+    raw = c.raw_cl(2500)
+    ell = np.arange(2501)
+    pp = np.asarray(raw['pp'])[:2501]
+    outdir = os.path.join(outdir_base, name)
+    os.makedirs(outdir, exist_ok=True)
+    np.savez(os.path.join(outdir, 'cl_pp.npz'), ell=ell, pp=pp)
+    with open(os.path.join(outdir, 'cl_pp.json'), 'w') as fh:
+        json.dump({"class_params": pars,
+                   "classy": getattr(classy, '__version__', 'unknown'),
+                   "build": "CLASS-PT tree (CLASS v3.3.4), classpt env",
+                   "quantity": "unlensed C_l^phiphi, CLASS raw_cl()['pp'], l=0..2500"},
+                  fh, indent=1)
+    c.struct_cleanup()
+    c.empty()
+    print(f"  {name}: C_l^pp(l=100)={pp[100]:.6e}")
+
+
 def main():
     outdir = os.path.join(os.path.dirname(__file__), '..', 'reference_data')
+    if '--cl-pp' in sys.argv:
+        for name, overrides in CL_PP_GRID.items():
+            generate_cl_pp(name, overrides, outdir)
+        return
     if '--model' in sys.argv:
         names = [a for a in sys.argv[sys.argv.index('--model') + 1:] if not a.startswith('--')]
         unknown = sorted(set(names) - set(MODELS))

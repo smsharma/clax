@@ -233,3 +233,91 @@ class TestHaloFitDifferentiable:
 
         pk_nl = compute_nl(pk_lin)
         assert jnp.all(jnp.isfinite(pk_nl)), "JIT result contains NaN/Inf"
+
+
+# halofit_parameters(ln k, P_lin) = (k_sigma [Mpc^-1], n_eff, C) on the CLASS linear P(k) at
+# z = 0, reference_data/<name>/pk.npz["pk_lin_z0"], from the bisection as it was before the
+# implicit-function tangent (clax/nonlinear.py before #54, main 5ac3df3; CPU, eager, job 28763). The
+# tangent leaves these values bit-identical on CPU (smsharma/clax#54).
+HALOFIT_PARAMS_REF = {
+    "lcdm_fiducial": (0.24570584575996515, -1.7411794478559754, 0.3411749812387166),
+    "h_high": (0.26385384279187535, -1.7651881724348482, 0.3329749020911661),
+    "omega_b_high": (0.26040864431932365, -1.7657158999064142, 0.33064248735323254),
+    "omega_cdm_low": (0.32687007871620355, -1.9042101163246437, 0.282806437856729),
+    "ns_high": (0.23655701493402806, -1.6908435744495975, 0.3462992005355152),
+}
+HALOFIT_QUANTITIES = ("k_sigma", "n_eff", "C")
+
+
+def _class_pk_lin_z0(name):
+    """(ln k, P_lin(k, z=0)) from reference_data/<name>/pk.npz (CLASS; k in Mpc^-1, P in Mpc^3)."""
+    d = np.load(os.path.join(REFERENCE_DIR, name, "pk.npz"))
+    return jnp.log(jnp.asarray(d["k"])), jnp.asarray(d["pk_lin_z0"])
+
+
+class TestHaloFitTangent:
+    """The nonlinear scale's derivative (smsharma/clax#54).
+
+    halofit_parameters finds R_nl, sigma(R_nl) = 1, by a 60-step bisection whose
+    jnp.where updates carry no derivative, so AD through it returned
+    d k_sigma / d theta = 0 exactly (and n_eff, C to 1e-16), and every Halofit gradient
+    missed the response of the nonlinear scale: d sum ln P_NL / dA was 44% low for
+    P_lin -> A P_lin (job 28762). The root now carries the implicit-function tangent
+    (clax.nonlinear._log10_r_nl). Checked on the CLASS P_lin at each COSMOLOGY_GRID_LCDM
+    point (lcdm_cosmology; fiducial only under --fast).
+
+    The tangent is checked along both inputs of the root: the amplitude A of P_lin
+    at A = 1 (i.e. A_s d/dA_s) and a shift s of ln k at s = 0. The finite
+    difference is central with step 1e-2 (in A, or in ln k). The bisection stops
+    once |sigma - 1| <= 1e-6, so k_sigma carries a ~1e-6 relative floor, and the FD
+    inherits ~2e-6 / step of it (4.5e-4 at step 1e-3, 8.5e-5 at 1e-2, job 28762).
+    The FD's truncation error at 1e-2 is ~1e-4."""
+
+    def test_primal_unchanged(self, lcdm_cosmology):
+        """(k_sigma, n_eff, C) equal the stored pre-tangent bisection values to 1e-12
+        (bit-identical on CPU; the bound leaves room for a few ulp of reordered
+        trapezoid sums on another backend)."""
+        name, _ = lcdm_cosmology
+        lnk, pk = _class_pk_lin_z0(name)
+        got = np.array([float(x) for x in halofit_parameters(lnk, pk)])
+        ref = np.array(HALOFIT_PARAMS_REF[name])
+        rel = np.abs(got / ref - 1.0)
+        assert np.all(rel <= 1e-12), (
+            f"ERROR halofit_parameters changed at {name}: max rel {rel.max():.2e} on "
+            f"{HALOFIT_QUANTITIES[int(np.argmax(rel))]} (got {got.tolist()}, stored {ref.tolist()})")
+
+    # Tangent channels of the root's inputs (ln k, P_lin), each as (t0, move(lnk, pk, t)):
+    # "amplitude" P_lin -> A P_lin at A = 1; "lnk_shift" ln k -> ln k + s at s = 0, the
+    # channel a caller whose k-grid depends on cosmology (k = k_h h) would exercise.
+    CHANNELS = {
+        "amplitude": (1.0, lambda lnk, pk, t: (lnk, t * pk)),
+        "lnk_shift": (0.0, lambda lnk, pk, t: (lnk + t, pk)),
+    }
+
+    @pytest.mark.parametrize("channel", list(CHANNELS))
+    @pytest.mark.parametrize("quantity", HALOFIT_QUANTITIES)
+    def test_tangent_matches_fd(self, lcdm_cosmology, quantity, channel):
+        """d quantity / dt along each channel by jax.jvp and by jax.grad (both jitted)
+        within 1e-3 of the central FD (step 1e-2 in A, or in ln k)."""
+        name, _ = lcdm_cosmology
+        lnk, pk = _class_pk_lin_z0(name)
+        i = HALOFIT_QUANTITIES.index(quantity)
+        t0, move = self.CHANNELS[channel]
+
+        def F(t):
+            return halofit_parameters(*move(lnk, pk, t))[i]
+
+        x0, one = jnp.asarray(t0), jnp.asarray(1.0)
+        jv = float(jax.jit(lambda t: jax.jvp(F, (t,), (one,))[1])(x0))
+        gr = float(jax.jit(jax.grad(F))(x0))
+        Fj, eps = jax.jit(F), 1e-2
+        fd = (float(Fj(x0 + eps)) - float(Fj(x0 - eps))) / (2.0 * eps)
+        rel_jvp, rel_grad = abs(jv / fd - 1.0), abs(gr / fd - 1.0)
+        print(f"halofit tangent {name} {channel} d{quantity}/dt: jvp {jv:.8e} grad {gr:.8e} "
+              f"fd {fd:.8e} jvp/fd-1 {rel_jvp:.2e} grad/fd-1 {rel_grad:.2e}")
+        assert np.isfinite(jv) and np.isfinite(gr), (
+            f"ERROR non-finite d{quantity}/dt ({channel}) at {name}")
+        assert rel_jvp <= 1e-3, (f"ERROR jvp d{quantity}/dt ({channel}) {jv:.6e} vs FD "
+                                 f"{fd:.6e}: rel {rel_jvp:.2e} > 1e-3 at {name}")
+        assert rel_grad <= 1e-3, (f"ERROR grad d{quantity}/dt ({channel}) {gr:.6e} vs FD "
+                                  f"{fd:.6e}: rel {rel_grad:.2e} > 1e-3 at {name}")

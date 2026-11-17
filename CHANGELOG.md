@@ -8,6 +8,520 @@ C_l^TT/EE/TE/BB, and lensed C_l^TT/EE/TE/BB. AD gradients verified to 0.03%.
 power spectra (`clax.ept`, CLASS-PT port) and EPT-corrected C_l^phiphi via
 `compute_cl_pp(... nonlinear="ept")`.**
 
+### Nov 17, 2026: The #54 branch rebased onto main 6ff1303 with #63 and #64; every C_l gradient gate re-measured and a hard pass; the C_l-vs-CLASS baseline regenerated
+
+Branch `fix/cl-differentiability-r2` = `fix/cl-differentiability` (5e7d779, the Oct 25
+entry and ADR 0005) merged with main 6ff1303 (#58, #60, #61) and with
+`fix/pt-adjoint-checkpoints` (#64, which carries #63). All numbers on V100-32GB, JAX
+0.9.2, fit_cl as of #58 (5-bin neutrino hierarchy, 106 perturbation variables), at
+lcdm_fiducial / omega_b + 20% / Y_He = 0.28 unless stated. F = sum_{l=30}^{1200} ln C_l
+(TT unless named). Nothing in clax/ changes here beyond the merges: the branch's own code
+is the Oct 25 entry's.
+
+**What the stack changes for #54.** The Oct 25 entry left three things undone on purpose:
+reverse mode through Rodas5 was NaN (fixed by #63), the production recursive-checkpoint
+adjoint was 1% off (fixed by #64), and `th.z_rec` was a thermodynamics grid knot that made
+dF_pp/dh miss finite differences by 0.55-2.9% (fixed by #61). Every test that was a strict
+expected failure for one of those is now a plain assertion:
+- tests/test_cl_gradients.py: the 9 direct-adjoint and 9 production-adjoint
+  reverse-vs-forward cases and the jit-of-grad Rodas5 companion (commit e32177b);
+- tests/test_cl_lensing_gradients.py: the 18 production reverse C_l^phiphi / lensed-TT
+  cases (e32177b) and the 18 z_rec cases (ZREC_K5 / ZREC_R5 and `_xfail_if_zrec` removed,
+  32414d4).
+
+**Measured** (bars: 3e-4 for the consistency gates, 1e-3 with unc <= 3e-4 for AD vs FD).
+- G1 step placement, dF/dtheta spread over 4 solves (rtol x 1.0 / 1.001, eager / jit):
+  2.5e-6 to 8.4e-6 along h, 1.3e-5 to 2.4e-5 along omega_cdm, 3.0e-5 / 1.9e-4 / 1.1e-4
+  along omega_b (lcdm_fiducial / omega_b + 20% / Y_He = 0.28; the Rodas5 step-sequence
+  wobble along omega_b, 1.65e-4 on the Oct 25 base) (job 38813).
+- G2 direct adjoint vs forward: 1.9e-8 to 5.6e-6 over h, omega_b, omega_cdm at the three
+  cosmologies. G2 production (stable thermodynamics, recursive checkpoint storing every
+  step) vs forward: 9.1e-9 to 1.0e-5, the largest dF/domega_b at omega_b + 20%. On the Oct
+  25 base the production adjoint missed by 3.1e-4 to 7.2e-3 (jobs 38768-38770; 4.5 h and
+  170 GB host memory per cosmology, each G2-direct case ~25 min of reverse compile).
+- G3 smoothness of dF/dh along h (cubic residual): 9.5e-6 / 3.3e-6 / 1.4e-5.
+- RF1 jit(grad) = grad: harmonic stage <= 5.1e-14; Rodas5 companion 2.6e-8 to 7.1e-8. RF4
+  vmap = loop: harmonic 1.9e-16; Rodas5 companion <= 7.8e-10.
+- G4 AD vs 9-point FD at 100x tighter perturbation tolerance (Kvaerno5 gate; Rodas5
+  companion): Kvaerno5 gate |AD/fd9 - 1| 1.2e-6 to 8.8e-5 with the FD's own spread unc <=
+  7.1e-5, all 9 cases (h, omega_b, omega_cdm at the three cosmologies); Rodas5 companion
+  |AD - fd9|/|AD| 1.7e-6 to 6.8e-5 against allowances >= 1.0e-3. AD at fit_cl's own
+  tolerance sits within 3.4e-4 of the converged derivative (omega_b at omega_b + 20%; <=
+  3.1e-5 for h and omega_cdm). 4 h per cosmology (jobs 38795, 38799, 38803).
+- G5 lensing, nonlinear none / Halofit / EPT, theta = h and omega_b:
+  - production reverse vs forward (12 cases per cosmology): 5.8e-9 to 8.1e-5 over all 36
+    cases, C_l^phiphi <= 2.1e-7, the largest lensed TT with EPT along omega_b at omega_b +
+    20% (jobs 38776-38778; 3.4 h and 105 GB per cosmology). On the Oct 25 base the
+    lensed-TT cases missed by 3.4e-4 to 6.4e-3.
+  - forward AD vs FD, Kvaerno5 gate and Rodas5 companion, all 72 cases incl. the 18 former
+    z_rec cases: Kvaerno5 gate |AD/fd9 - 1| 2.5e-7 to 4.8e-4 with unc <= 1.2e-4 (bars 1e-3
+    and 3e-4); Rodas5 companion |AD - fd9|/|AD| 9.6e-7 to 3.8e-4 against allowances >=
+    1.0e-3. The largest values are C_l^phiphi along omega_b at Y_He = 0.28 (4.8e-4 /
+    4.0e-4 / 3.0e-4 for none / Halofit / EPT on Kvaerno5); lensed TT <= 1.5e-4. The 12
+    former z_rec Kvaerno5 cases are at 3.2e-6 to 2.1e-4 and the 6 Rodas5 ones at 4.3e-5 to
+    1.6e-4, where the base missed by 0.55-2.9%. AD at fit_cl's own tolerance is within
+    4.6e-4 of the converged derivative. 5.1-5.4 h per 8 none cases, 7.4-8.2 h per 4
+    Halofit or EPT cases (jobs 38796, 38800, 38804, 38922-38933).
+- V1, C_l vs CLASS no worse than the base in any l band (fit_cl and planck_cl, five
+  cosmologies): baseline regenerated on main 6ff1303 (jobs 38807-38811); all 10 cases
+  pass, every band (32 per fit_cl case, 40 per planck_cl case) on the error branch; the
+  tightest margin is TT 30-100, 7.5e-7 (planck_cl, omega_b + 20%, l = 47) to 3.0e-6
+  (fit_cl, h_high, l = 55), where the Hermite lookup's removal of the linear table's
+  -(dx)^2/12 bias raises TT by 9.7e-5 against the 1e-4 slack, as on the old base (jobs
+  38814, 38815; 15 min for all ten).
+- Cost at fiducial fit_cl (job 38812; the Oct 25 numbers in brackets): eager forward 0.78x
+  the base at equal k-grid (14.5 against 18.6 s; stages bg+th 2.5 / perturbations 10.2 /
+  harmonic 1.8 s against 2.4 / 9.8 / 6.4 s; gate <= 1.05x), 0.80x against the base
+  preset's own 5000 fine k points; jitted forward 10.1 s (lower 26 s, compile 57 s);
+  jit(grad) over the 20 CosmoParams leaves 39.0 s = 3.83x the jitted forward (lower 132 s,
+  compile 323 s), all 20 finite, dF/dh equal to the G2 production value to 11 digits; peak
+  device memory with both programs alive 7.59 GiB (allocator; 13.7 GiB NVML). #58's
+  hierarchy (61 to 106 state variables) is what moved the forward from 6.70 to 10.1 s; the
+  gradient's multiple fell from 4.8x to 3.83x with #64's store-every-step adjoint [eager
+  forward 0.70x the base at equal k-grid; jitted forward 6.70 s; gradient over the
+  CosmoParams pytree 31.8 s = 4.8x; peak 6.20 GiB].
+
+**Baseline and generator.** tests/data/cl_vs_class_baseline.{json,npz} are now the spectra
+and band errors of main 6ff1303 (the branch's base without the #54 code), made by
+scripts/cl_vs_class_baseline.py, which is the Oct 25 scratch generator moved into the
+repository: `run` evaluates one cosmology on a base tree (GPU, ~7 min), `assemble` writes
+the two files with `_provenance`. The two TE allowances (fit_cl TE and lensed TE at l =
+2-30, 5e-3 over the base error) are retired, re-derived as the Oct 25 record asked: #58,
+#60 and #61 took fit_cl TE 2-30 from 17% to 0.9% off CLASS, the l = 2 shift of 4.4e-3 to
+5.3e-3 of sqrt(TT EE) that the Hermite lookup makes no longer sets the band maximum, and
+the fix's band error is 1.9e-5 below the base's at all five cosmologies (branch (1) passes
+with 8e-5 to spare).
+
+**Not done.**
+- Rodas5's step sequence does not reproduce between compilations (Oct 23 and Oct 25
+  entries): it floors every Rodas5 AD comparison near 1e-5 and finite differences along
+  omega_b near 1e-3 at fit_cl tolerance. Follow-up issue drafted, not posted.
+- The origin of the Kvaerno5 reverse-vs-forward floor (1.6-7.2e-6; the perturbation solve
+  alone is an exact transpose).
+- The gradient's cost, 3.83x the jitted forward against ADR 0005's 3x budget (waived
+  there; 4.8x before #64). Follow-up issue drafted, not posted.
+- The CLASS references cls.npz / cls_lensed.npz of lcdm_fiducial, omega_b_high and h_high
+  predate the CLASS build of cl_pp.npz (up to 2.5e-3 of reference noise, which cancels in
+  V1 because fix and base are read against the same files).
+- Memory and time of the lensed gradients are measured per cosmology (12
+  production-reverse cases in 3.4 h and 105 GB of host memory), not per case.
+- Out of scope as before: #56, planck_cl's absolute accuracy, fit_cl at l < 30, the slow
+  C_l paths, tensor B-modes, and CLAUDE.md's figures (its performance table and its
+  RecursiveCheckpointAdjoint bullet describe neither #58's fit_cl nor #64's adjoint).
+- Pre-existing failures, identical on main: test_pk_rosenbrock_vs_kvaerno5 (max_steps; the
+  one --fast failure) and, in full mode, test_cls_chebyshev_path_matches_spline_path (not
+  re-run here).
+
+**Tests.** `pytest tests/ --fast -q` on 1ef2d1e (GPU, job 38816): 542 passed, 1 failed,
+1400 skipped in 1:35; the failure is the pre-existing
+`tests/test_solver_selection.py::TestRosenbrockPk::test_pk_rosenbrock_vs_kvaerno5`
+(max_steps), identical on main (537 passed at the merge commit 2f421b5, job 38740; 505 on
+#64's tree, job 38736). The commits after 1ef2d1e change documentation only. GPU gates on
+this tree: 48 C_l gradient cases (jobs 38768-38770, 38795, 38799, 38803, 38813), 36 + 72
+lensing cases (38776-38778; 38796, 38800, 38804, 38922-38933), 10 C_l-vs-CLASS cases
+(38814, 38815).
+
+### Nov 17, 2026: The perturbation solves store every ODE step for the backward pass; the recursive-checkpoint adjoint at the default checkpoint count was 1% off
+
+All numbers at fit_cl as of 6ff1303 (#58's 5-bin neutrino hierarchy) on a V100,
+F = sum_k ln delta_m(k, tau_end)^2 from `perturbations_solve`, d/dh, relative
+|reverse - forward| with forward = jax.jvp under native thermodynamics + direct adjoint.
+
+**Bug.** `jax.grad` through the vmapped Rodas5 perturbation solve with the production
+adjoint (`RecursiveCheckpointAdjoint()`, equinox's default checkpoint count) was 1.159e-2
+(fiducial), 1.108e-2 (omega_b + 20%) and 1.030e-2 (Y_He = 0.28) off forward mode (jobs
+38683, 38691), where the direct adjoint is 5e-6 to 1.4e-5 off (job 38682). Before #58
+(ncdm_q_size 0) the same quantity was 2.2e-4 / 1.28e-2 / 2.4e-4 (job 27787). The
+primals of the two programs agree to 1e-8. Every reverse-mode C_l or P(k) gradient at
+fit_cl went through this; the NaN of the Oct 23 entry had hidden it.
+
+**Measured, one setting at a time** (omega_b + 20%; jobs 38553, 38691, 38731):
+
+| setting | |reverse/forward - 1| | d/dh cached (s) |
+|---|---|---|
+| production: default checkpoint count (127 for `ode_max_steps` 8192) | 1.108e-2 (d/dh 1.50 too negative) | 43.1 |
+| 127 checkpoints, explicit | 1.108e-2 (bitwise = the default) | 44.0 |
+| 8 checkpoints | 4.2e-5 | |
+| 32 checkpoints | 1.8e-5 | 48.6 |
+| 64 checkpoints | 1.004e-2 (1.36 too negative) | 46.2 |
+| 150 checkpoints | 1.606e-3 (0.22 too positive) | 43.4 |
+| 200 checkpoints | 7.866e-3 (1.07 too positive) | 41.3 |
+| 300 and 310 checkpoints | 8.674e-6 (bitwise = store every step) | 37.5 |
+| 512 checkpoints | 8.7e-6 (bitwise = the row below) | 36.7 |
+| 8192 checkpoints = one stored state per step of the budget | 8.7e-6 | 35.5 |
+| direct adjoint | 1.4e-5 | 102.8 |
+| Kvaerno5, default count | 4.1e-7 | 182.5 |
+| k-chunks of 2 or 10 modes, default count | 6.4e-6 (bitwise equal to each other) | 674.7 / 156.8 |
+| FSAL reuse off (f0 re-evaluated every step), default count | 1.104e-2 | |
+| 24-member stiff-oscillator toy, Rodas5 / Rodas5Batched / Kvaerno5, counts 8..8192 and default | 0 (every count gives the same gradient) | |
+
+The 100 k-modes take 26 to 309 Rodas5 steps each (4 to 52 rejected), 106 state
+variables, 2000 saved times, one vmapped batch (job 38691).
+
+**Equinox's schedule.** `checkpointed_while_loop` with the default count c =
+floor(-1.5 + sqrt(2 max_steps + 0.25)) + 1 = 127 runs Stumm-Walther's Algorithm I for every
+step (so does c = 32 here: Wang-Moin would start at step 560). For c = 127 and 309 steps
+the forward pass ends with the states of steps {0, 128, 182..252, 255..308} stored, so the
+backward pass recomputes steps 1..127 from step 0 in one segment and 129..181 from step
+128; for c = 32 the recomputed segments are about 30 steps long; for c >= 309 every state
+is stored and nothing is recomputed (the direct adjoint stores everything too).
+
+**Mechanism.** Three measured facts fix it.
+1. The forward pass is reproducible: the plain forward loop and the checkpoint-saving
+   loop that the backward pass runs give the same step sequence in all 100 modes and the
+   same delta_cdm(tau_end) to the bit, as does the same program run twice (job 38733).
+2. The recomputed steps are not: 8, 32 and 64 checkpoints each give a different gradient
+   from one stored state per step (4.2e-5, 1.8e-5, 1.0e-2 off), while in the toy every
+   count gives the same gradient to the bit. The recomputed body is a differently
+   compiled program (it runs inside jax.vjp), and a Rodas5 step is sensitive to its
+   rounding: an algebraically equivalent rewrite of the stage system flipped
+   accept/reject decisions in 31 of 100 modes (Oct 23 entry). Kvaerno5's Newton
+   iteration corrects such differences, and it is unaffected.
+3. The whole error sits in k-modes 40-49: the slice 40-60 is off by -1.505 of the
+   -1.503 total, the slices 0-20, 20-40 and 50-100 by at most 2e-3 (job 38733). Those
+   ten modes finish between step 98 and step 149, inside the recomputed segments
+   1..127 and 129..181; the forty slowest modes, which finish inside stored territory,
+   are off by 3e-7 and 6e-9.
+Put together: the backward pass meets a stored state at the end of every recomputed
+segment. When the recomputed trajectory of a mode needs more steps than the stored one,
+a mode that had finished just before that stored state has not finished in the
+recomputation, and the cotangent of its saved end state, which waits in the save buffer
+for the step that wrote it, meets no such step: that mode's contribution to the gradient
+is lost. The error is therefore one mode's contribution, with a size and sign set by
+which modes straddle a boundary (-1.50, -1.36, +0.22, +1.07 for 127, 64, 150 and 200
+checkpoints), it needs a batch whose modes finish at different steps (k-chunks of 10
+modes finish close together and are immune), and a bit-reproducible recomputation
+(Kvaerno5, the toy) loses nothing. The recomputed trajectory's lag is the one link not
+observed directly; a per-step log of the backward pass (adjoint_bisect5.py, jobs 38756,
+38757) is queued and this entry will carry its result. Any recomputation-based
+checkpointing of this solve has the problem; storing every step is the fix, not a
+work-around.
+
+**Fix.** The perturbation solves ask for one checkpoint per step of the budget:
+`_get_adjoint(adjoint, *, checkpoints=None)` in clax/ode.py passes the count to
+`RecursiveCheckpointAdjoint`, and the four perturbation solves (sources, batched
+delta_m, per-mode delta_m, tensors) pass `checkpoints=prec.ode_max_steps`. Equinox
+then stores the loop state after every step and the backward pass recomputes nothing.
+The forward pass does not depend on the count. The background and thermodynamics
+solves keep diffrax's default (they were adjoint-independent to 4e-6, job 27916).
+
+- Cost per d/dh at omega_b + 20% (cached): 43.1 -> 35.5 s (-18%); peak device memory
+  0.95 -> 2.95 GiB (job 38691). The store is `ode_max_steps` states per k-mode of a
+  batch, about 3 n_eq + 32 doubles each (2.1 GiB predicted for the fit_cl batch vs 2.0
+  measured); `_pt_checkpoint_store_bytes_per_mode` adds it to the automatic k-chunk
+  size. The presets' chunking does not change (fit_cl: one chunk of 100 modes; the
+  128-mode GPU cap binds before memory elsewhere). Lower `ode_max_steps` to trim it.
+- Not changed: `_solve_mpk_batched_rosenbrock` (hard-coded direct adjoint).
+
+**Tests.** `test_fit_cl_production_reverse_matches_forward` is a hard pass again:
+7.587e-6 (fiducial), 8.674e-6 (omega_b + 20%), 7.337e-6 (Y_He = 0.28) off forward
+mode, the same-settings floor (job 38735; bar 3e-4). `test_k_batch_size_counts_the_reverse_pass_checkpoint_store` (CPU) pins
+the store accounting. Fast suite: 505 passed, the pre-existing `test_pk_rosenbrock_vs_kvaerno5` failure (step
+budget), 1188 skipped (job 38736; 504 passed on the base, job 38552). C_l-level gradients cannot be taken on this
+tree (the fast C_l path's Bessel-table range is a Python float of the cosmology; #54's
+branch makes it traceable) and are re-measured there (jobs 38737, 38738 failed for that
+reason on both trees).
+
+**Open.** A toy that reproduces the defect (the 24-member oscillator does not); whether
+to report the finding upstream (equinox/diffrax); the planck_cl gradient's memory with
+the store (not measured; the chunking accounts for it).
+
+### Oct 25, 2026: C_l, C_l^phiphi and lensed C_l are differentiable at fit_cl (#54)
+
+Design record: ADR 0005. Every number is measured on main at 5ac3df3, before #58
+(which gives fit_cl a massive-neutrino hierarchy), #60 and #61. Main is now at
+6ff1303 with all three merged (Oct 25, 2026); the branch was rebased onto it, with #63
+and #64, and every gate re-measured there: see the Nov 17, 2026 entry "The #54 branch
+rebased onto main 6ff1303 with #63 and #64" above, which supersedes the Uncovered and
+Not done lists below where it says so. V100 and JAX 0.9.2 unless a CPU job is named.
+F = sum_{l=30}^{1200} ln C_l (TT unless named).
+
+**Bug (smsharma/clax#54).** No C_l gradient existed at fit_cl.
+`compute_cls_all_fast` sized its Bessel table j_l(k chi) from float(k_max tau_0),
+so jvp, grad and jit raised for every parameter that moves the conformal age;
+reverse mode would have stored ~46 GB. The linear table lookup made AD's dj_l/dx
+the chord slope, a staircase: dF/dh came out 1.7% low and rough (1.4e-2 about its
+trend along h). 5000 fine k points sampled |T_l(k)|^2 once per oscillation near
+l ~ 1200, so dF/dh changed sign along h (-1492.5 at fiducial against the converged
+-251.5). The Halofit and EPT lensing corrections branched on float(z_rec),
+float(k_max) and float(h) and changed array shapes with h: no lensed gradient.
+
+**Fix.**
+- The Bessel table covers a fixed x-range, 1.05 pt_k_max_cl hr_tau0_max (new field
+  `PrecisionParams.hr_tau0_max` = 20000 Mpc), built once per process (82 MiB at
+  fit_cl); it raises if tau_0 exceeds the bound or k chi the table.
+  `compute_cls_all_fast` and `compute_cl_pp` take `prec=`, required to jit or grad.
+- j_l, j_l' come from a cubic Hermite lookup of the stored values and slopes at 3
+  points per unit x (`JL_TABLE_X_PER_UNIT` 30 -> 3); reverse mode recomputes each
+  multipole's lookups. fit_cl `hr_n_k_fine` 5000 -> 20000;
+  `compute_cls_all_fast(n_k_fine=None)` follows `prec.hr_n_k_fine` when `prec` is
+  given (5000 only on the eager no-prec path; an explicit value wins).
+- Lensing: Halofit's z-grid follows the traced z_rec, its k-extension is sized from
+  prec. EPT's R = P_NL/P_lin is splined over the fixed EPT nodes and read at the
+  exact perturbation k, R = 1 at the last node (one-loop EFT invalid at 1.48 h/Mpc;
+  <= 8.7e-6 from the old spectra for h in [0.62, 0.72]); its IR grid follows h.
+- Under jit the lensing path keeps its eager k-range checks as run-time guards (main
+  could not jit it at all): a narrower pt_mpk or a mismatched prec raises instead of
+  silently clamping P_lin or resizing Halofit.
+
+**Fixed on the way (pre-existing).**
+- Every Halofit gradient, P_NL included, missed the response of the nonlinear scale
+  R_nl (a bisection with zero AD tangent): d k_sigma/dA_s 0 against -0.195 by FD,
+  dF_pp/dtheta 11-31% and lensed dF/dtheta 0.1-2.3% off. R_nl now carries the
+  implicit-function tangent (primal bit-identical at five cosmologies; FD to 8.5e-5).
+- The EPT h-derivative lacked the motion of the IR-resummation grid, frozen at a
+  concrete h. Per-k dP/dh matches FD to a median 1.4e-5 (max 2.6e-4), against
+  1.9e-3 with the frozen grid; EPT P(k) moves by <= 1.6e-12 (CPU 28628/30245/28536).
+
+**Measured** (at fiducial, omega_b + 20% and Y_He = 0.28 unless stated).
+- Lookup (fiducial). Smoothness of dF/dh over h = 0.64-0.70 (cubic residual, bar
+  3e-4): Hermite at 3 points per unit x 5.6e-6, at 30 5.9e-6, linear at 30 1.36e-2.
+  Hermite 3 vs 30: gradients <= 6e-6, C_l^TT <= 1.6e-5; 82 MiB vs 0.80 GiB.
+- A 0.1% rtol jitter times jit/eager moves dF/dtheta by <= 6.5e-6 (h), 1.65e-4
+  (omega_b), 1.3e-5 (omega_cdm); bar 3e-4. dF/dh is smooth along h to <= 7.4e-6.
+- AD vs a 9-point FD stencil at 100x tighter perturbation tolerance (Kvaerno5):
+  <= 3.3e-4 (h), 6.2e-4 (omega_b), 3.5e-5 (omega_cdm); bar 1e-3. AD at fit_cl
+  tolerance is within 2.8e-4 of it; the harmonic stage alone: jit(grad) = grad to
+  3.7e-14. Lensed dF vs FD <= 8.7e-4; dF_pp/d omega_b <= 2.0e-4 (not at fiducial).
+- C_l vs CLASS against the old code at equal k-grid (five cosmologies; fit_cl and
+  planck_cl; TT/EE/TE, C_l^phiphi, lensed TT/EE/TE/BB): every band passes, its
+  error grown by <= 1e-4 or the spectrum moved by <= 1e-4 (l by l from l = 30).
+  planck_cl EE l = 2-4: 0.596% -> 0.151%. Hermite raises TT near l ~ 45 by
+  9.6-9.9e-5: the linear table's bias -(dx)^2/12 at spacing dx = 1/30, removed
+  (margins ~1e-6).
+  Documented: fit_cl TE and lensed TE l = 2-30 +2.5e-3 to +4.5e-3 (allowance 5e-3);
+  fit_cl EE at l = 2 0.74-0.88% further from CLASS, under a band maximum at
+  l = 10-15. The k-grid change alone moves fit_cl TT l = 100-1200 up to 1.6% toward
+  CLASS, EE/TE l = 500-1200 2.2e-3/6.5e-3 away (job 27208).
+- The lcdm_fiducial, omega_b_high and h_high cls.npz / cls_lensed.npz predate the
+  CLASS build (v3.3.4) of the new cl_pp.npz: up to 2.5e-3 of reference noise (job
+  26859). Both codes use the same files; the printed old-vs-new shift is primary.
+- Cost: eager forward 0.70x the old code at equal k-grid (0.72x vs the old 5000);
+  gradient over 20 parameters 31.8 s = 4.8x the 6.7 s jitted forward; peak 6.2 GiB.
+
+**Uncovered, not fixed.**
+- Production reverse mode is silently wrong: through batched Rodas5 the default
+  `ode_adjoint="recursive_checkpoint"` misses forward mode by 3.1e-4-2.0e-3 (h),
+  1.2e-3-7.2e-3 (omega_b), 1.9e-4-1.5e-3 (omega_cdm); the direct adjoint is right
+  to 1.2e-5 at 2.6x the time. Mechanism open; issue to be filed.
+- Reverse mode through Rodas5 at fit_cl is NaN on main (masked dt = 0 steps); the
+  fix is its own PR, so those tests are marked as expected to fail, strictly. When
+  it merges, 9 direct-adjoint, 2 production-adjoint, 1 jit-of-grad and 18
+  C_l^phiphi cases pass, pytest reports an error, and their marks must go.
+- Rodas5's steps differ between compilations (primals 4.7e-6 apart, 2.5e-11 on
+  Kvaerno5): F wobbles by 1e-8 at fit_cl tolerance; FD along omega_b floors at 1e-3.
+  Follow-up drafted.
+- z_rec is a thermodynamics grid knot: dF_pp/dh misses FD by 0.55-2.9% (4.9e-5
+  with z_rec frozen). 18 cases marked to fail pass on a #61 overlay (#61 is merged in
+  main 6ff1303; the rebase removes the marks).
+- The gradient costs 4.8x a forward evaluation, against a 3x budget (waived): the
+  reverse pass through the perturbation solve alone takes 33.7 s. Follow-ups drafted.
+
+**Not done.** The rebase onto main 6ff1303 (#58, #60 and #61 merged): it re-measures
+every fit_cl number (the neutrino hierarchy takes the perturbation state from 61 to
+106 variables: forward time, the 4.8x gradient cost, the 6.2 GiB peak, G1-G5),
+regenerates the C_l-vs-CLASS baseline with the generator (to be committed), and removes
+the 18 z_rec expected-fail markers (#61 is in). fit_cl's neutrino hybrid (#57;
+massive_nu_015 TT 4.9% off CLASS at 5ac3df3; #58 changes it); regenerating the three old
+references; the memory and time of the lensed gradients (the overlay reverse jobs
+28549-28553 and 28769-28771 ran to completion on V100-32GB, no per-case figure was
+recorded). The generator of
+tests/data/cl_vs_class_baseline.* is not committed (path and sha1 in its
+`_provenance`); regenerating it after #58/#60/#61 needs it. The origin of a Kvaerno5
+reverse-vs-forward floor, 1.6-7.2e-6 (1.5-2.7e-6 at 100x tighter tolerance), while
+the perturbation solve alone is an exact transpose (6e-15, job 27848). Out of
+scope: #56, planck_cl's absolute accuracy, fit_cl at l < 30, slow C_l paths,
+tensor B-modes, CLAUDE.md's stale figures.
+
+**Tests.** New: tests/test_cl_bessel_lookup.py (the lookup against direct j_l),
+test_cl_table_guard.py (guards and the n_k_fine rule), test_cl_gradients.py (G1-G4,
+RF1/RF4), test_cl_lensing_gradients.py (G5), test_cl_vs_class.py (C_l vs CLASS,
+baseline in tests/data/), test_cl_reference.py (the cl_pp.npz references, five
+cosmologies); TestHaloFitTangent in test_nonlinear.py; jitted guards in test_cl_pp.py.
+--fast shares one Bessel-table
+build (-47 s on CPU) and one narrow lensing solve (-12 min). Gate (CPU): --fast 521
+passed, 1 failed, 1271 skipped in 1:24:14 (job 30276, on 6e9810d with the two
+n_k_fine tests; 519 passed in 1:22:36 before them, job 30250).
+Failing on the base too: `test_pk_rosenbrock_vs_kvaerno5` (max_steps) and, in full
+mode, `test_cls_chebyshev_path_matches_spline_path` (ratio 1.0170).
+
+### Oct 23, 2026: Reverse mode through Rodas5 is finite at fit_cl; it uncovers a 1.3% error of the recursive-checkpoint adjoint in the perturbation solve
+
+All numbers are at fit_cl as of 5ac3df3, before #58 (which gives fit_cl a
+massive-neutrino hierarchy), on a V100, except where a job number >= 38000 is
+given (fit_cl as of 6ff1303, with #58).
+
+**Bug.** At `PrecisionParams.fit_cl()` (Rodas5), `jax.grad` of any C_l or source
+functional, and of delta_m from `perturbations_solve`, was NaN in every cosmological
+parameter, so gradient-based samplers and fitters could not use the production preset;
+forward mode was fine. The dedicated batched matter-power solve (`lax.map` over chunks,
+direct adjoint) has no masked steps and was finite.
+
+The mechanism:
+- `perturbations_solve` vmaps the single-mode Rodas5 solve over k.
+- Under vmap, diffrax keeps stepping until the slowest k-mode reaches the end time, and a
+  finished mode runs masked steps with dt = 0 exactly.
+- Rodas5 formed W = I/(dt gamma) - J and the stage couplings C_ij/dt, which are infinite
+  there.
+- The forward pass discards those steps. The backward pass multiplies their zero
+  cotangent by inf, and 0 * inf = NaN spreads to the whole gradient.
+
+**Fix.** Every division by dt in `Rodas5` and `Rodas5Batched` (clax/rosenbrock.py) now
+uses dt_div = where(dt == 0, 1, dt): the same number on every real step, finite on a
+masked one.
+
+The forward pass is identical to main to the last bit at fit_cl fiducial:
+- per-k step counts identical in 100/100 modes (14654 steps);
+- sources, delta_m and the batched matter solve bit-identical (jobs 27656, 27727);
+- unlensed TT/EE/TE C_l bit-identical (job 27656).
+
+On a masked step W = I/gamma - J is singular only if J has the real eigenvalue
++1/gamma = +5.26/Mpc (growth on a 0.19 Mpc time scale); the masked step would then be
+inf and the NaN would return, in reverse mode only. At fit_cl the end-time Jacobians of
+all 100 k-modes have Re(lambda) <= 4.5e-4/Mpc and |lambda| <= 1.41/Mpc (job 27662), so
+|lambda - 1/gamma| >= 1/gamma - Re(lambda) ~ 5.26/Mpc.
+
+The division-free form W' = I - dt gamma J (each stage multiplied by dt gamma) also gives
+finite gradients. Its rounding, though, flipped step accept/reject decisions in 31 of
+100 k-modes and moved source_T0 by 1.85e-4 of its peak, a re-sampling of the rtol 1e-4
+integration error (job 27641). It is recorded in the module docstring.
+
+Reverse-pass cost (main: job 27642; the fix: job 27727):
+- perturbation stage: 24.7 -> 25.5 s;
+- full chain d/dh: 30.0 s (NaN) -> 31.3 s.
+
+**Measured.** F = sum_k ln delta_m(k, tau_end)^2 from `perturbations_solve`, d/dh at
+fiducial / omega_b + 20% / Y_He = 0.28, as relative |reverse - forward|:
+- Rodas5, the same settings in both modes: 1.146e-5 / 3.592e-6 / 8.324e-6 (was NaN;
+  job 27788). The reverse and forward programs integrate slightly different Rodas5 step
+  sequences (primals 2-5e-8 apart), and that sets this ~1e-5 floor.
+- Production thermodynamics gradient mode with diffrax's direct adjoint: 1.146e-5 /
+  3.594e-6 / 7.932e-6 (was NaN; jobs 27917, 27918).
+- Production fit_cl, with the recursive-checkpoint adjoint (the default): 2.191e-4 /
+  **1.278e-2** / 2.404e-4 (was NaN; jobs 27788, 27918). See below.
+- Kvaerno5 control, the same settings in both modes: 1.607e-6 / 6.232e-6 / 7.225e-6.
+  Main gives the same (jobs 27725, 27788).
+
+**Discovered: the recursive-checkpoint adjoint of the perturbation solve is 1.3% off.**
+With the NaN gone, production reverse mode gives d/dh = -137.23 at omega_b + 20%
+against -135.50 from forward mode, with the two primals agreeing to 7.5e-9. The error
+is 2.2e-4 at fiducial and 2.4e-4 at Y_He = 0.28. With #58's fit_cl (5-bin neutrino
+hierarchy; 26 to 309 Rodas5 steps per k-mode) it is 1.159e-2 at fiducial, 1.108e-2 at
+omega_b + 20% and 1.030e-2 at Y_He = 0.28 (jobs 38683, 38691): its size follows the
+step schedule, not the cosmology. It is a property of how many loop states equinox
+stores for the backward pass: with the default count (127 for a step budget of 8192,
+the steps in between recomputed) the error is 1.1e-2; with 512 or with one state per
+step of the budget it is 8.7e-6, with 32 it is 1.8e-5; Kvaerno5 and k-chunks of at
+most 10 modes are unaffected (job 38691). The fix (one stored state per step) is the
+follow-up PR; here the production-adjoint test is a strict expected failure at all
+three points.
+
+Relative error against forward mode, one setting switched at a time (job 27787, on the
+fix before #59; #59 left the production numbers unchanged, job 27788):
+
+| thermodynamics gradient mode, ODE adjoint | omega_b + 20% | fiducial |
+|---|---|---|
+| stable, recursive checkpoint (production) | 1.278e-2 | 2.191e-4 |
+| stable, direct | 3.595e-6 | 1.146e-5 |
+| native, recursive checkpoint | 1.278e-2 | 2.191e-4 |
+| native, direct | 3.593e-6 | 1.146e-5 |
+
+- It reaches C_l. For F = sum over l = 30-1200 of ln C_l^TT at fiducial, the recursive
+  adjoint is off forward mode by 3.1e-4 in d/dh and 1.3e-3 in d/d omega_b, the direct
+  one by 7e-8 and 1.5e-5, under either thermodynamics mode (job 27802).
+- It is the perturbation solve's adjoint, not the background's or the
+  thermodynamics'. The background and thermodynamics on the recursive adjoint with the
+  perturbation solve on the direct one give 3.594e-6. The other way round gives
+  1.278e-2 (job 27916).
+- It is not the parameter-dependent end time or save grid (t1 = 0.999 tau_0 and the
+  tau grid built from tau_0 and tau_star). At omega_b + 20%, with t1 frozen, the save
+  times frozen, or both frozen, the recursive-vs-direct gap stays at 1.26e-2, 1.92e-2
+  and 1.87e-2 (job 27915; freezing removes a legitimate +94 of d/dh from all three
+  estimators alike). Along a scale factor on tau_0 alone, with the background and
+  thermodynamics held fixed, the two adjoints agree to 9.4e-7 (job 27916).
+- It is in the parameter dependence of the perturbation equations. With the
+  background, thermodynamics, end time and save times all fixed, d/dw0 (dark-energy
+  fluid at w0 = -0.9, wa = 0.1, omega_b + 20%) is 1.33e-2 off under the
+  recursive-checkpoint adjoint and 8.4e-6 off under the direct one (job 27916).
+- It is specific to Rodas5. With Kvaerno5 for the perturbation solve, otherwise fit_cl,
+  the recursive and direct adjoints give the same d/dh to the last bit at
+  omega_b + 20%, both 6.2e-6 off forward mode (job 28012).
+- It needs the vmapped k-batches. With `pt_k_chunk_size=1` (a sequential map over modes:
+  no vmap, hence also no masked steps), Rodas5's two adjoints agree to 3.1e-6 at
+  omega_b + 20% (job 28012).
+
+  At fit_cl, one batch holds all 100 modes, and their step counts run from 26 to 306.
+  The batch therefore executes about 1.1 masked steps per real step: 16093 at
+  omega_b + 20%, 16746 at fiducial. The count of masked steps does not explain the
+  omega_b dependence.
+- It does not come from how the fix removes the division by dt. The division-free
+  W' form shows it as well (jobs 27675, 27676: on the old functional at fiducial,
+  dF/dh 6.58e-5 under the recursive adjoint against 5.41e-5 under the direct one).
+  It cannot be checked against main, where Rodas5 reverse mode is NaN under both
+  adjoints.
+
+Rodas5, the vmapped k-batches and the checkpointed backward pass are all needed for it.
+Which effect of the vmap carries it is not separated. On the division-free W' form a
+masked step is an exact no-op, yet the error is present there (jobs 27675, 27676). The
+vmapped toy solves in the new test file (Rodas5 and Rodas5Batched, masked steps,
+recursive-checkpoint adjoint) match the closed form to 5.4e-6 and 1.8e-5 (job 27923). The
+mechanism is not established.
+
+It is not fixed here. Until it is, reverse-mode gradients at fit_cl are right to ~1e-5
+with `ode_adjoint="direct"`. Cost per d/dh at fiducial: 76.7 s and 0.86 GiB on the
+device, against 29.9 s and 0.41 GiB with the recursive adjoint (job 27916). The
+production test is a strict xfail at omega_b + 20%, applied to that cosmology only. At
+the other two points it passes its 3e-4 bar as a plain assertion.
+
+**Kvaerno5 floor.** Under Kvaerno5 the same-settings gap is 1.6e-6 to 7.2e-6, with the
+primals 1.5-3.1e-9 apart. Its origin is not established:
+- It does not follow the ODE tolerance. At 100x tighter perturbation tolerances it is
+  1.558e-6 / 2.739e-6 / 1.492e-6 (job 27786).
+- Kvaerno5's perturbation solve alone, with the background and thermodynamics held
+  fixed, is a transpose to 6e-15 with bitwise-equal primals (job 27848). The floor
+  therefore arises upstream of the perturbation solve.
+
+**Tests.** `tests/test_rosenbrock_reverse.py` (new, 16 tests):
+- Four CPU toys:
+  - vmapped Rodas5 and Rodas5Batched solves of a stiff oscillator against the closed
+    form, 5.38e-6 and 1.81e-5 (bar 1e-3);
+  - a masked dt = 0 step with a stiff Jacobian (eigenvalues -1e3 to -1e6), where the
+    cotangent must be exactly 0.
+
+  All four are NaN on main (job 27666).
+- Twelve slow GPU tests of the log matter power at the three downstream cosmologies
+  (the four lines under Measured).
+
+The first functional, sum of source_T0^2 (F ~ 19.7, dF/dh ~ 5e-5, d ln F/dh ~ 3e-6),
+was replaced by sum_k ln delta_m^2 (dF/dh ~ -136 on F ~ 828). Its logarithmic derivative
+is so small that a relative bar on it turns a 1e-6-of-F absolute error into an O(1) miss.
+The O(1) misses it gave in job 27644 (3.6e-1 / 3.9e-1 / 2.3e-2 at fiducial /
+omega_b + 20% / Y_He = 0.28) compared the recursive-checkpoint reverse pass with forward
+mode: they were the recursive-checkpoint defect amplified by the small derivative, not
+rtol-level path noise.
+On the same functional at fiducial the direct adjoint matched forward mode to 7.4e-5 and
+the recursive one was 22% off (job 27675).
+
+**Test pass rates.**
+- `tests/ --fast -q` (CPU): 488 passed, 1 failed, 1068 skipped (job 27789). The failure
+  is the pre-existing `test_pk_rosenbrock_vs_kvaerno5` max_steps failure.
+- The final test file under `--fast`: 4 passed (job 27923).
+- GPU, the production pair: 5 passed and 1 xfailed (job 27918).
+- GPU, the same-settings tests: 6 passed (job 27788).
+- On the fix before the rebase onto 5ac3df3: `test_rodas5_dense_output.py` 5/5 (job
+  27728), and `test_solver_selection.py` + `test_recomb_downstream.py` 22 passed plus
+  the pre-existing failure (job 27729).
+
+**Not done.**
+- The recursive-checkpoint adjoint error with vmapped Rodas5 (issue to be filed). Next
+  step: separate which effect of the vmap carries it (a vmapped batch without masked
+  steps, for example one fixed step sequence shared by all members, would discriminate)
+  and compare what the checkpointed backward pass does for Rodas5 with Kvaerno5's.
+- The origin of the Kvaerno5 floor.
+- Rodas5 step-sequence reproducibility between compiled programs: the ~1e-5 floor of
+  every Rodas5 AD comparison (follow-up issue).
+- Re-measuring every number above after #58.
+
 ### Oct 22, 2026: fit_cl gets a massive-neutrino hierarchy (5 q-bins, l_max_ncdm 8, no fluid approximation; #57)
 
 Branch `fix/fitcl-ncdm-qgrid` (PR #58). Sweep scripts `diags/diag_fitcl_qgrid.py` and

@@ -21,6 +21,9 @@ References:
 
 from __future__ import annotations
 
+import math
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -31,6 +34,36 @@ from clax.bessel import spherical_jl
 from clax.params import CosmoParams, PrecisionParams
 from clax.perturbations import MatterPerturbationResult, PerturbationResult
 from clax.primordial import primordial_scalar_pk
+
+
+def _k_within_mpk_support(k_eval, pt_mpk):
+    """jit/AD-safe twin of clax.transfer._validate_k_eval_support (smsharma/clax#54).
+
+    The nonlinear modulators read P_lin at ``k_eval`` (pt.k_grid) from pt_mpk with
+    validate=False, and the P_lin spline clamps k outside pt_mpk.k_grid to its end
+    node (clax/interpolation.py), so a pt_mpk solved on a narrower k-range would give
+    a wrong R(k) with no error. This raises instead, under jit and AD too. The guard
+    sits on the queried k, whose value the P_lin lookup needs, so jit(grad) keeps it.
+    Returns ``k_eval`` unchanged.
+    """
+    tol = 1e-12
+    bad = ((jnp.min(k_eval) < (1.0 - tol) * pt_mpk.k_grid[0])
+           | (jnp.max(k_eval) > (1.0 + tol) * pt_mpk.k_grid[-1]))
+    return eqx.error_if(
+        k_eval, bad,
+        "compute_cl_pp: k_eval (pt.k_grid) must lie within the solved perturbation grid "
+        "of pt_mpk (pt_mpk.k_grid); solve pt_mpk with the same prec as pt")
+
+
+def _k_pt_max_matches_grid(k, k_grid, k_pt_max):
+    """jit/AD-safe check that the static k_pt_max (prec.pt_k_max_cl) is pt.k_grid's
+    last node to 1e-12 relative: the Halofit k-extension is sized from k_pt_max but
+    starts at pt.k_grid[-1], so a mismatched prec would silently change it
+    (smsharma/clax#54). Returns ``k`` unchanged."""
+    return eqx.error_if(
+        k, jnp.abs(k_grid[-1] / k_pt_max - 1.0) > 1e-12,
+        "compute_cl_pp: prec.pt_k_max_cl does not match pt.k_grid[-1]; pass the prec "
+        "used for the perturbation solve")
 
 
 def _compute_cl_pp_full_bessel(
@@ -126,6 +159,7 @@ def _halofit_modulator(
     k_max_extend: float = 20.0,
     *,
     pt_mpk: MatterPerturbationResult,
+    k_pt_max: float | None = None,
 ) -> Float[Array, "Nk Ntau"]:
     """Build sqrt(R(k, tau)) modulator for source-Limber NL injection.
 
@@ -169,6 +203,8 @@ def _halofit_modulator(
             P_lin(k, z) is read from it -- the z-grid starts at 0, beyond the
             C_l solve's 0.999*tau0 grid (smsharma/clax#42) -- evaluated at
             ``pt.k_grid``, so the output stays on ``pt``'s lattice.
+        k_pt_max: static k_max of pt.k_grid (prec.pt_k_max_cl); None reads it
+            from pt.k_grid (eager callers only).
 
     Returns:
         ``sqrt(R(k, tau))`` of shape ``(Nk, Ntau)`` on the
@@ -179,28 +215,36 @@ def _halofit_modulator(
     from clax.nonlinear import compute_pk_nonlinear
     from clax.transfer import compute_linear_matter_pk_from_perturbations
 
-    # --- Extended k-grid (power-law extrapolation if pt.k_grid too narrow) ---
-    pt_k_max = float(pt.k_grid[-1])
-    k_max_use = max(pt_k_max, k_max_extend)
-    if pt_k_max < k_max_extend:
-        n_extra = max(int(20.0 * (jnp.log10(k_max_use / pt_k_max))), 10)
+    # --- Extended k-grid: decision and size from the static k_max (#54) ---
+    k_pt_max_given = k_pt_max is not None
+    if not k_pt_max_given:
+        k_pt_max = float(pt.k_grid[-1])          # eager callers only
+    k_max_use = max(k_pt_max, k_max_extend)
+    if k_pt_max < k_max_extend:
+        n_extra = max(int(20.0 * math.log10(k_max_use / k_pt_max)), 10)
         k_extra = jnp.logspace(
-            jnp.log10(pt_k_max), jnp.log10(k_max_use), n_extra + 1)[1:]
+            jnp.log10(pt.k_grid[-1]), jnp.log10(k_max_use), n_extra + 1)[1:]
         k_ext = jnp.concatenate([pt.k_grid, k_extra])
     else:
         k_ext = pt.k_grid
+    if k_pt_max_given:
+        k_ext = _k_pt_max_matches_grid(k_ext, pt.k_grid, k_pt_max)
 
-    # --- z-grid spanning [0, z_rec], log-spaced in 1+z ---
-    z_rec = float(th.z_rec)
-    log1pz_grid = jnp.linspace(jnp.log(1.0), jnp.log(1.0 + z_rec), n_z)
+    # --- z-grid spanning [0, z_rec], log-spaced in 1+z; z_rec stays traced ---
+    z_rec = th.z_rec
+    log1pz_grid = jnp.linspace(0.0, jnp.log1p(z_rec), n_z)
     z_grid = jnp.expm1(log1pz_grid)
 
     # --- P_lin(k_pt, z) on the native pt.k_grid via the public helper ---
+    # validate=False: its check needs concrete k (#54); _k_within_mpk_support is
+    # the jit/AD-safe check on the same queried k.
+    k_q = _k_within_mpk_support(pt.k_grid, pt_mpk)
+
     def _pk_lin_on_pt_grid(z):
         # tau0-complete solve, evaluated at pt's k: explicit k, not an array
         # index, so a pt_mpk at another precision cannot misalign.
         return compute_linear_matter_pk_from_perturbations(
-            pt_mpk, bg, params, pt.k_grid, z=z)
+            pt_mpk, bg, params, k_q, z=z, validate=False)
 
     pk_lin_pt_z = jax.vmap(_pk_lin_on_pt_grid)(z_grid)  # (n_z, Nk_pt)
 
@@ -289,6 +333,17 @@ def _ept_modulator(
     ``k <= 0.3 h/Mpc``; subleading EFT counterterm time dependence is
     neglected.
 
+    R0(k) on the perturbation k-grid: P_NL(z=0) is cubic-splined in
+    ``log(k/h)`` over the fixed EPT nodes (``ept_kgrid()``, h/Mpc) and read at
+    each ``pt.k_grid`` value converted to h/Mpc; P_lin(z=0) is evaluated at the
+    same exact pt k; ``R0 = P_NL / P_lin`` there, and ``R0 = 1`` for pt k
+    outside the EPT node range and at the last pt node (k = pt_k_max_cl, where
+    one-loop EFT does not apply; this reproduces the earlier node selection,
+    which never reached that node). Every array has a fixed shape and no EPT
+    node is selected by h (only the low-k edge of the EPT range moves with h,
+    where R0 - 1 is ~3e-5), so R0 is smooth in h and the modulator can be
+    jitted and differentiated (smsharma/clax#54).
+
     Args:
         pt: C_l perturbation solve; supplies only the output lattice
             (``k_grid``, ``tau_grid``).
@@ -309,42 +364,33 @@ def _ept_modulator(
     from clax.transfer import compute_linear_matter_pk_from_perturbations
     from clax.interpolation import CubicSpline
 
-    h = float(params.h)
+    h = params.h                                   # traced (#54)
 
-    # --- Run EPT once at z=0 (Mpc/h units inside, convert to Mpc^-1) ---
-    # total-matter field: the ratio below divides by the matter P_lin (C0)
+    # --- P_NL at the perturbation k (Mpc^-1): cubic spline in log(k/h) over the
+    # fixed EPT nodes, then R0 = P_NL / P_lin at the exact pt k. Fixed shapes:
+    # no h-dependent node selection, so R0 is smooth in h (#54). ---
+    # Total-matter field: the ratio divides by the matter P_lin (C0).
     # Numerator AND denominator from pt_mpk: splitting them across solves
     # would turn the old second-order residual into a first-order one.
     ept = compute_ept_from_clax(params, bg, pt_mpk, z=0.0, th=th, field="m")
-    pk_mm_h = pk_mm_real(ept)                  # (Mpc/h)^3 on EPT k-grid (h/Mpc)
-    k_h = ept_kgrid()                           # h/Mpc
-    k_ept_mpc = jnp.array(k_h) * h              # Mpc^-1
-    pk_mm_mpc = pk_mm_h / h**3                  # Mpc^3
-
-    # --- Restrict to overlap with pt.k_grid (compute_linear validates) ---
-    pt_k_min = float(pt.k_grid[0])
-    pt_k_max = float(pt.k_grid[-1])
-    in_range = (k_ept_mpc >= pt_k_min) & (k_ept_mpc <= pt_k_max)
-    k_eval = k_ept_mpc[in_range]
-    pk_nl_eval = pk_mm_mpc[in_range]
-
-    # P_lin(k_eval, z=0) on overlapping grid
-    pk_lin_eval = compute_linear_matter_pk_from_perturbations(
-        pt_mpk, bg, params, k_eval, z=0.0)
-
-    # R0(k) = P_NL/P_lin at z=0, defaulting to 1.0 outside overlap
-    R0_eval = jnp.where(pk_lin_eval > 0,
-                         pk_nl_eval / pk_lin_eval, 1.0)
-    R0_eval = jnp.clip(R0_eval, 0.0, 100.0)
-
-    # Spline R0(log k) onto pt.k_grid; outside the EPT-evaluated range, R0 = 1.
-    log_k_eval = jnp.log(k_eval)
-    log_k_pt = jnp.log(pt.k_grid)
-    R0_spline = CubicSpline(log_k_eval, R0_eval)
-    R0_pt = R0_spline.evaluate(log_k_pt)
-    R0_pt = jnp.where(
-        (pt.k_grid >= float(k_eval[0])) & (pt.k_grid <= float(k_eval[-1])),
-        R0_pt, 1.0)
+    pk_mm_h = pk_mm_real(ept)                      # (Mpc/h)^3 on the EPT k-grid (h/Mpc)
+    log_k_h = jnp.log(jnp.asarray(ept_kgrid()))    # static nodes
+    log_q = jnp.log(pt.k_grid) - jnp.log(h)        # pt k in h/Mpc, log
+    # The last pt node (k = prec.pt_k_max_cl; static index) keeps R0 = 1: one-loop
+    # EFT is not valid there (1 Mpc^-1 = 1.48 h/Mpc at fit_cl), and the base never
+    # applied the ratio at that node (<= 8.7e-6 in C_l^pp vs base at every h in
+    # [0.62, 0.72], jobs 28562/28571/28576).
+    not_last = jnp.arange(pt.k_grid.shape[0]) < pt.k_grid.shape[0] - 1
+    inside = (log_q >= log_k_h[0]) & (log_q <= log_k_h[-1]) & not_last
+    log_q_c = jnp.clip(log_q, log_k_h[0], log_k_h[-1])
+    pk_nl_pt = CubicSpline(log_k_h, pk_mm_h).evaluate(log_q_c) / h**3     # Mpc^3
+    # validate=False: its check needs concrete k (#54); _k_within_mpk_support is
+    # the jit/AD-safe check on the same queried k.
+    pk_lin_pt = compute_linear_matter_pk_from_perturbations(
+        pt_mpk, bg, params, _k_within_mpk_support(pt.k_grid, pt_mpk), z=0.0,
+        validate=False)
+    R0_pt = jnp.where(inside & (pk_lin_pt > 0), pk_nl_pt / pk_lin_pt, 1.0)
+    R0_pt = jnp.clip(R0_pt, 0.0, 100.0)
 
     # --- Growth-factor rescaling: R(k, tau) - 1 = (R0(k) - 1) * [D(tau)/D(0)]^2 ---
     loga_at_tau = bg.loga_of_tau.evaluate(pt.tau_grid)
@@ -367,6 +413,7 @@ def compute_cl_pp(
     *,
     nonlinear: str = "none",
     pt_mpk: MatterPerturbationResult | None = None,
+    prec: PrecisionParams | None = None,
 ) -> Float[Array, "Nl"]:
     """Compute C_l^phiphi via source-based Limber (CLASS-accurate at all l).
 
@@ -416,6 +463,8 @@ def compute_cl_pp(
             same params/prec). REQUIRED when ``nonlinear`` is "halofit" or
             "ept": their P_lin lookups start at z=0, beyond ``pt``'s grid,
             which stops at 0.999*tau0 (smsharma/clax#42). Ignored for "none".
+        prec: PrecisionParams of the perturbation solve; required to jit or
+            differentiate with nonlinear="halofit" (static k-range).
 
     Returns:
         C_l^phiphi array of shape (l_max+1,), indexed by l (l=0,1 are zero)
@@ -429,6 +478,17 @@ def compute_cl_pp(
             f"compute_cl_pp: nonlinear={nonlinear!r} needs pt_mpk="
             "perturbations_solve_mpk(params, prec, bg, th): its P_lin lookups "
             "start at z=0, beyond the C_l solve's 0.999*tau0 grid.")
+    if nonlinear != "none":
+        # The modulators read P_lin at pt.k_grid with validate=False (#54), and the
+        # P_lin spline would clamp k outside pt_mpk's grid. Eager callers get the
+        # ValueError (with both k-ranges) here; under jit the grids are tracers, so
+        # this check is skipped and the modulators' _k_within_mpk_support guard
+        # (eqx.error_if) raises at run time instead.
+        from clax.transfer import _validate_k_eval_support
+        try:
+            _validate_k_eval_support(pt_mpk.k_grid, pt.k_grid)
+        except jax.errors.TracerArrayConversionError:
+            pass
 
     # --- Section A: Setup (all JAX, no numpy) ---
     tau_grid = pt.tau_grid
@@ -455,7 +515,9 @@ def compute_cl_pp(
 
     # NL injection: S(k,tau) -> S(k,tau) * sqrt(R(k, z(tau)))
     if nonlinear == "halofit":
-        S_transfer = S_transfer * _halofit_modulator(pt, params, bg, th, pt_mpk=pt_mpk)
+        S_transfer = S_transfer * _halofit_modulator(
+            pt, params, bg, th, pt_mpk=pt_mpk,
+            k_pt_max=None if prec is None else float(prec.pt_k_max_cl))
     elif nonlinear == "ept":
         S_transfer = S_transfer * _ept_modulator(pt, params, bg, th, pt_mpk=pt_mpk)
 

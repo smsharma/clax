@@ -28,7 +28,9 @@ References:
 from __future__ import annotations
 
 import functools
+import math
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -775,30 +777,174 @@ L_SPLINE_PAD = 100
 def _sparse_l_padded(l_max):
     return sparse_l_grid(l_max + L_SPLINE_PAD)
 
-# Bessel lookup-table resolution (points per unit x). Linear interpolation of
-# j_l at spacing h biases the amplitude by ~ -h^2/12 on average; the historical
-# 3 points per unit x (h ~ 0.33 at k_max = 1/Mpc) gave a -1% TT offset at
-# l < 50 and +20% in EE at l = 2 (precision sweep, Oct 2026,
-# docs/precision_sweep_2026-10-10.md finding 6). At 30 the fast path matches
-# the exact-j_l path to 0.01% for l <= 500; the table costs ~0.7 GB at
-# l_max 2500 and the harmonic stage ~12 s instead of ~4 s on a V100.
-JL_TABLE_X_PER_UNIT = 30.0
+# Bessel lookup-table resolution (points per unit x). The fast path looks up
+# j_l and j_l' with a cubic Hermite interpolant in x built from the stored j_l
+# and j_l' at the two neighbouring nodes (j_l'' from Bessel's equation), so the
+# error falls as h^4 and the amplitude bias of a LINEAR lookup, ~ -h^2/12 per
+# unit amplitude, does not apply. History: the original linear lookup at 3
+# points per unit x (h ~ 0.33 at k_max = 1/Mpc) gave -1% in TT at l < 50 and
+# +20% in EE at l = 2 (precision sweep, Oct 2026,
+# docs/precision_sweep_2026-10-10.md finding 6); #50 cured that by raising the
+# linear density to 30 (table ~0.7 GB at l_max 2500, harmonic stage ~12 s
+# instead of ~4 s on a V100), measured on the then cosmology-dependent range
+# x_max = 1.05 k_max tau_0 (~14800 at k_max 1/Mpc); #54 replaced the lookup
+# by the Hermite one, which needs only 3. Measured at fit_cl with n_k_fine
+# 20000 (#54, jobs 27208-27214, V100): Hermite at 3 agrees with Hermite at 30
+# to <= 1.6e-5 in C_l^TT and to <= 6e-6 in the h, omega_b and omega_cdm
+# gradients, with a table of 82 MiB instead of 0.80 GiB, and dC_l/dh along h
+# is smooth to 5.6e-6 (cubic-fit residual over h = 0.64-0.70; the linear
+# lookup at 30 gives 1.4e-2, because its derivative is the chord slope,
+# constant on each table interval). At n_k_fine 5000 the k-integral itself
+# makes dC_l/dh change sign along h for any lookup (cubic-fit residual 1.26,
+# against 5.6e-6 at 20000). On the fixed x-range of #54, x_max = 1.05
+# pt_k_max_cl hr_tau0_max = 21000 at pt_k_max_cl = 1/Mpc, the table is
+# 2 x 85 x 63000 doubles = 82 MiB at l_max 1500 (2 x 105 x 63000 = 101 MiB at
+# 2500), built once per process and kept (see _jl_tables). Design record:
+# docs/adr/0005-cl-differentiability.md.
+JL_TABLE_X_PER_UNIT = 3.0
+
+
+def _table_bounds(pt, prec):
+    """Static (k_bound, tau0_max) for the fixed-range Bessel table (#54).
+
+    With prec: k_bound = prec.pt_k_max_cl (the fine k-grid ends at pt.k_grid[-1]
+    = pt_k_max_cl) and tau0_max = prec.hr_tau0_max -- both static, so jit, jvp
+    and grad work. Without prec (eager callers only), k_bound is read from
+    pt.k_grid; under tracing that read fails and we ask for prec instead.
+    """
+    if prec is not None:
+        return float(prec.pt_k_max_cl), float(prec.hr_tau0_max)
+    try:
+        k_bound = float(pt.k_grid[-1])
+    except jax.errors.ConcretizationTypeError as err:
+        raise TypeError(
+            "compute_cls_all_fast: pass prec=<the PrecisionParams of the perturbation "
+            "solve> to jit or differentiate; without prec the Bessel table's k-range "
+            "is read from pt.k_grid, which is traced here.") from err
+    return k_bound, float(PrecisionParams().hr_tau0_max)
+
+
+def _table_grid(k_bound, tau0_max, x_per_unit):
+    """x_max = 1.05 k_bound tau0_max and n_x = ceil(x_per_unit x_max), at
+    least 30000 points: the fixed x-range at the density the caller passes
+    (compute_cls_all_fast's x_per_unit, default JL_TABLE_X_PER_UNIT)."""
+    x_max = 1.05 * k_bound * tau0_max
+    return x_max, max(30000, int(math.ceil(x_per_unit * x_max)))
+
+
+@functools.lru_cache(maxsize=8)
+def _jl_tables(l_max_padded, n_x, x_max):
+    """j_l, j_l' on the fixed x-range for the rows of sparse_l_grid(l_max_padded);
+    compute_cls_all_fast passes l_max + L_SPLINE_PAD so the rows match
+    _sparse_l_padded(l_max). Built once per (l_max_padded, n_x, x_max) and
+    reused across cosmologies and calls -- concrete arrays, never traced.
+    Each entry holds 2 x n_l x n_x doubles for the life of the process
+    (fit_cl at the default 3 points per unit x: 2 x 85 x 63000 x 8 B = 82 MiB;
+    30 points per unit x would hold 0.8 GiB)."""
+    with jax.ensure_compile_time_eval():
+        return build_jl_table(l_max_padded, n_x=n_x, x_max=x_max)
+
+
+def _table_position(x_flat, dx_tab, n_x):
+    """Left table index and fractional position t in [0, 1] on the uniform
+    x-table. The index carries no derivative; t carries d/dx = 1/dx_tab."""
+    u = x_flat / dx_tab
+    i_left = jnp.clip(jnp.floor(u).astype(jnp.int32), 0, n_x - 2)
+    return i_left, u - i_left.astype(u.dtype)
+
+
+def _hermite(f0, f1, d0, d1, t, h):
+    """Cubic Hermite interpolant on [x_i, x_i + h] from values f and slopes d
+    at both ends; t = (x - x_i)/h in [0, 1]. C^1 across intervals (#54)."""
+    t2 = t * t
+    t3 = t2 * t
+    return ((2.0 * t3 - 3.0 * t2 + 1.0) * f0 + (t3 - 2.0 * t2 + t) * h * d0
+            + (-2.0 * t3 + 3.0 * t2) * f1 + (t3 - t2) * h * d1)
+
+
+def _jl_node_second_derivative(jl_n, jlp_n, x_n, ll1_val, is_l2):
+    """j_l'' at table nodes from Bessel's equation,
+    j_l'' = [l(l+1)/x^2 - 1] j_l - (2/x) j_l', with the x -> 0 limit
+    (2/15 for l = 2, 0 for l >= 3)."""
+    small = x_n < 1e-10
+    x_safe = jnp.where(small, 1.0, x_n)
+    jpp = (ll1_val / (x_safe * x_safe) - 1.0) * jl_n - 2.0 / x_safe * jlp_n
+    return jnp.where(small, jnp.where(is_l2, 2.0 / 15.0, 0.0), jpp)
+
+
+def _lookup_jl(jl_row, jlp_row, l_val, ll1_val, i_left, t, dx_tab):
+    """j_l(x) and j_l'(x) from one table row at positions (i_left, t): cubic
+    Hermite in x from the stored values and slopes at the two nodes (#54).
+    The slope of j_l is the stored j_l'; the slope of j_l' is j_l'' from
+    Bessel's equation."""
+    i_right = i_left + 1
+    jl0, jl1 = jl_row[i_left], jl_row[i_right]
+    jp0, jp1 = jlp_row[i_left], jlp_row[i_right]
+    x0 = i_left.astype(t.dtype) * dx_tab
+    x1 = x0 + dx_tab
+    is_l2 = l_val == 2.0
+    jpp0 = _jl_node_second_derivative(jl0, jp0, x0, ll1_val, is_l2)
+    jpp1 = _jl_node_second_derivative(jl1, jp1, x1, ll1_val, is_l2)
+    return (_hermite(jl0, jl1, jp0, jp1, t, dx_tab),
+            _hermite(jp0, jp1, jpp0, jpp1, t, dx_tab))
+
+
+# Fine k-grid size of compute_cls_all_fast when neither n_k_fine nor prec is
+# given (the eager, no-prec path); with prec the preset's hr_n_k_fine is used.
+_N_K_FINE_NO_PREC = 5000
+
+
+def _resolve_n_k_fine(n_k_fine, prec):
+    """Fine k-grid size of compute_cls_all_fast: an explicit n_k_fine wins; else
+    prec.hr_n_k_fine when prec is given; else 5000 (the eager no-prec path)."""
+    if n_k_fine is not None:
+        return n_k_fine
+    if prec is not None:
+        return prec.hr_n_k_fine
+    return _N_K_FINE_NO_PREC
 
 
 def compute_cls_all_fast(
     pt, params, bg, l_max=1500,
-    n_k_fine=5000, tt_mode=None,
+    n_k_fine=None, tt_mode=None,
     k_interp_method="spline",
     x_per_unit=JL_TABLE_X_PER_UNIT,
+    *, prec=None,
 ):
     """Fast C_l computation using precomputed j_l/j_l' tables + source interpolation.
 
+    Differentiable in every CosmoParams field (jax.jit, jax.jvp, jax.grad) when
+    ``prec`` is passed; see docs/adr/0005-cl-differentiability.md (#54). A
+    reverse-mode gradient through a whole fit_cl pipeline also needs the
+    Rodas5 reverse-mode fix (its own PR): without it the perturbation solve,
+    upstream of this function, returns NaN in reverse mode. Even with that fix
+    the default ode_adjoint="recursive_checkpoint" is silently off whenever
+    Rodas5 runs in vmapped k-batches: d(sum ln C_l^TT)/dtheta differs from
+    forward mode by 2e-4 to 7.2e-3 (h, omega_b, omega_cdm at three cosmologies),
+    and the matter-power derivative by 1.3% at omega_b + 20% (ADR 0005,
+    Consequences). Until that is fixed, forward mode (jax.jvp, jax.jacfwd) or
+    ode_adjoint="direct" gives the correct gradient. The direct adjoint costs 2.6x
+    the time and 0.86 GiB on one matter-power d/dh (job 27916); the C_l reverse
+    program under it alone compiles in ~25 min per case (job 27802).
+
     Architecture:
     1. Interpolate smooth source functions S(k,τ) to fine k-grid
-    2. Build j_l(x) and j_l'(x) lookup tables (backward+upward, one JIT)
-    3. For each l: interpolate tables at x = k*χ, compute radial_T2 on-the-fly,
-       integrate over τ → T_l(k) with all 3 transfer types (T0+T1+T2)
+    2. j_l(x) and j_l'(x) tables (backward+upward recurrence) on a FIXED
+       x-range [0, 1.05 k_bound hr_tau0_max] that depends on precision
+       settings only, so they are built once per (l_max, n_x, x_max) in a
+       process and reused across cosmologies and calls (_jl_tables)
+    3. For each l: cubic Hermite lookup of j_l and j_l' at x = k*χ from the
+       tabulated values and slopes (j_l'' from Bessel's equation), so the
+       lookup and its AD derivative are smooth in x; radial_T2 on the fly;
+       integrate over τ → T_l(k) with all 3 transfer types (T0+T1+T2). The
+       l-step is wrapped in jax.checkpoint: reverse mode recomputes each l's
+       lookups instead of storing them (~46 GB otherwise at fit_cl)
     4. Integrate C_l = 4π ∫ dlnk P_R |T_l|² for all l at once
+
+    Guards (eqx.error_if, raise at run time, also under jit): the conformal
+    age tau_0 exceeds hr_tau0_max (raise hr_tau0_max for such a cosmology);
+    k*χ exceeds the table (prec.pt_k_max_cl smaller than the perturbation
+    grid's k_max: pass the prec of the perturbation solve).
 
     Full TT transfer function (cf. CLASS harmonic.c:962):
         T_l(k) = ∫ dτ [S_T0*j_l + S_T1*j_l' + (S_T2/8)*radial_T2]
@@ -807,14 +953,22 @@ def compute_cls_all_fast(
     T1 (ISW dipole * j_l') is the dominant correction at low l (~20% at l=20).
     T2 (polarization quadrupole) contributes ~0.2-0.8% at all l.
 
-    Performance: ~3-5s harmonic (vs ~800s per-l approach) on V100.
+    Performance: harmonic stage 1.8 s at fit_cl (l_max 1500, n_k_fine 20000;
+    eager, after the first call, V100, job 30153), vs ~800s per-l approach.
 
     Args:
         pt: PerturbationResult with source functions
         params: CosmoParams for primordial spectrum
         bg: BackgroundResult for conformal age
         l_max: maximum multipole (default 1500)
-        n_k_fine: fine k-grid points for source interpolation (default 5000)
+        n_k_fine: fine k-grid points for source interpolation. Default None:
+            with ``prec`` the grid follows the preset (prec.hr_n_k_fine, 20000
+            at fit_cl, planck_cl, planck_fast); without ``prec`` (the eager
+            path) it is 5000, the value before #54. It matters because at 5000
+            the trapezoid over ln k samples |T_l(k)|^2 about once per
+            oscillation near l ~ 1200: at fit_cl dF/dh (F = sum ln C_l^TT)
+            came out -1492.5 against the converged -251.5, and changed sign
+            along h. An explicit n_k_fine overrides both.
         tt_mode: unused (always uses T0+T1+T2)
         k_interp_method: "spline" (default) or "chebyshev" -- passed
             through to _interp_sources_to_fine_k. "chebyshev" requires
@@ -822,18 +976,38 @@ def compute_cls_all_fast(
             (Lobatto nodes in log k) -- the barycentric weights assume
             Lobatto spacing.
         x_per_unit: Bessel-table points per unit x (default
-            JL_TABLE_X_PER_UNIT = 30). Values below ~10 bias C_l low by
-            ~ -h^2/12 per unit amplitude; see the module constant.
+            JL_TABLE_X_PER_UNIT = 3) on the table's fixed x-range
+            [0, 1.05 k_bound hr_tau0_max] (#54). The lookup is cubic Hermite,
+            so 3 is converged: 30 agrees to <= 1.6e-5 in C_l^TT and <= 6e-6 in
+            the gradients (fit_cl at n_k_fine 20000, jobs 27208-27214) at ten
+            times the table memory (0.80 GiB vs 82 MiB) and a longer compile
+            (harmonic stage alone 19.3 s vs 3.3 s, jobs 27156/27157). Larger
+            values add both with no measurable gain; see the module constant.
+        prec: PrecisionParams of the perturbation solve; required to jit or
+            differentiate (fixes the Bessel table's x-range from pt_k_max_cl
+            and hr_tau0_max, both static). Without prec, eager calls work
+            (k_bound read from pt.k_grid, the default hr_tau0_max), and a
+            traced call raises a TypeError asking for prec.
 
     Accuracy (Oct 2026 sweep, massless RECFAST reference, planck_cl-class
-    perturbations): with n_k_fine 20000 and the default table this path
-    matches the exact-j_l path (compute_cls_all_interp) to 0.011% for
-    l <= 500, 0.024% for l <= 1000, 0.17% for l <= 2000; n_k_fine 5000 is
-    percent-level above l ~ 500.
+    perturbations, measured with the earlier LINEAR lookup at 30 points per
+    unit x): with n_k_fine 20000 this path matches the exact-j_l path
+    (compute_cls_all_interp) to 0.011% for l <= 500, 0.024% for l <= 1000,
+    0.17% for l <= 2000; n_k_fine 5000 is percent-level above l ~ 500. The
+    Hermite lookup at 3 points per unit x moves C_l^TT by <= 1e-4 relative
+    to that linear lookup at fit_cl (it removes the linear lookup's amplitude
+    bias -(dx)^2/12 ~ -9.3e-5 at table spacing dx = 1/30), and C_l^EE at l = 2
+    by -0.80% (C_l^TE by
+    -0.40% of sqrt(TT EE)), which removes the linear table's +0.76% l = 2 EE
+    residual against the exact-j_l path (precision sweep finding 6; jobs
+    27208-27214). planck_cl EE at l = 2-4 against CLASS: 0.596% -> 0.151%
+    (jobs 30151/30152).
 
     Returns:
         dict with 'ell', 'tt', 'ee', 'te' (arrays of length l_max+1)
     """
+    n_k_fine = _resolve_n_k_fine(n_k_fine, prec)
+
     # 1. Source interpolation to fine k-grid
     log_k_coarse = jnp.log(pt.k_grid)
     log_k_fine = _fine_log_k_grid(log_k_coarse, n_k_fine)
@@ -849,7 +1023,12 @@ def compute_cls_all_fast(
     source_T2_fine = fine_sources[3]
 
     # 2. Setup grids
-    tau_0 = bg.conformal_age
+    k_bound, tau0_max = _table_bounds(pt, prec)
+    x_max, n_x = _table_grid(k_bound, tau0_max, x_per_unit)
+    tau_0 = eqx.error_if(
+        bg.conformal_age, bg.conformal_age > tau0_max,
+        f"compute_cls_all_fast: conformal age tau_0 exceeds PrecisionParams.hr_tau0_max "
+        f"= {tau0_max:g} Mpc, the Bessel table's design bound; raise hr_tau0_max.")
     chi_grid = tau_0 - pt.tau_grid
     n_tau = pt.tau_grid.shape[0]
     dtau = jnp.diff(pt.tau_grid)
@@ -860,6 +1039,11 @@ def compute_cls_all_fast(
     src_T1_dtau = source_T1_fine * dtau_mid[None, :]           # T1: * j_l'
     src_T2_dtau = (source_T2_fine / 8.0) * dtau_mid[None, :]  # T2/8: * radial_T2
     x_query = k_fine[:, None] * chi_grid[None, :]              # (n_k, n_tau)
+    x_query = eqx.error_if(
+        x_query, jnp.max(x_query) > x_max,
+        f"compute_cls_all_fast: k*chi exceeds the Bessel table (x_max = {x_max:g}); "
+        "prec.pt_k_max_cl is smaller than the perturbation grid's k_max -- pass the "
+        "prec used for the perturbation solve.")
     x_safe = jnp.where(jnp.abs(x_query) < 1e-30, 1e-30, x_query)
     src_E_dtau = source_E_fine * dtau_mid[None, :] / (x_safe * x_safe)
 
@@ -869,19 +1053,13 @@ def compute_cls_all_fast(
     inv_x_flat = 1.0 / x_safe_flat
     inv_x2_flat = inv_x_flat * inv_x_flat
 
-    # 3. Build j_l and j_l' tables for all sparse l-values
-    x_max = float(jnp.max(k_fine) * tau_0 * 1.05)
-    n_x = max(30000, int(x_max * x_per_unit))  # see JL_TABLE_X_PER_UNIT
-    x_table, jl_table, jlp_table = _build_jl_table(l_max + L_SPLINE_PAD, n_x=n_x, x_max=x_max)  # rows match _sparse_l_padded
+    # 3. j_l and j_l' tables on the fixed x-range (#54): independent of cosmology;
+    #    rows match _sparse_l_padded(l_max)
+    x_table, jl_table, jlp_table = _jl_tables(l_max + L_SPLINE_PAD, n_x, x_max)
+    dx_tab = x_max / (n_x - 1)
 
-    # 4. Precompute interpolation indices (shared across all l and both tables)
-    idx_right = jnp.searchsorted(x_table, x_flat_query)
-    idx_left = jnp.clip(idx_right - 1, 0, n_x - 2)
-    idx_right_safe = jnp.clip(idx_right, 1, n_x - 1)
-    dx = x_table[idx_right_safe] - x_table[idx_left]
-    dx_safe = jnp.where(dx < 1e-30, 1e-30, dx)
-    frac = (x_flat_query - x_table[idx_left]) / dx_safe
-    frac = jnp.clip(frac, 0.0, 1.0)
+    # 4. Table positions (shared across all l and both tables)
+    i_left, t_pos = _table_position(x_flat_query, dx_tab, n_x)
 
     # 5. Compute transfer functions via table lookup (scan over l)
     l_sparse = _sparse_l_padded(l_max)
@@ -895,18 +1073,13 @@ def compute_cls_all_fast(
         (l_sparse_jnp - 1.0) * (l_sparse_jnp + 2.0)
     )
 
+    # jax.checkpoint: the backward pass recomputes each l's lookups instead of
+    # storing ~(n_l x n_k x n_tau) residuals (~46 GB at fit_cl; #54).
+    @jax.checkpoint
     def scan_body(carry, l_idx):
-        # Interpolate j_l from table
-        jl_row = jl_table[l_idx]                            # (n_x,)
-        jl_left = jl_row[idx_left]                          # (n_k*n_tau,)
-        jl_right = jl_row[idx_right_safe]
-        jl_flat = jl_left + frac * (jl_right - jl_left)
-
-        # Interpolate j_l' from table
-        jlp_row = jlp_table[l_idx]                          # (n_x,)
-        jlp_left = jlp_row[idx_left]
-        jlp_right = jlp_row[idx_right_safe]
-        jlp_flat = jlp_left + frac * (jlp_right - jlp_left)
+        jl_flat, jlp_flat = _lookup_jl(
+            jl_table[l_idx], jlp_table[l_idx], l_sparse_jnp[l_idx], ll1[l_idx],
+            i_left, t_pos, dx_tab)
 
         # Compute radial_T2 on-the-fly from j_l and j_l':
         # j_l''(x) = [l(l+1)/x² - 1]*j_l - 2/x*j_l'

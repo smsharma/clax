@@ -208,6 +208,18 @@ recomb_cosmology = _make_cosmology_fixture(COSMOLOGY_GRID_RECOMB)
 recomb_downstream_cosmology = _make_cosmology_fixture(
     {k: COSMOLOGY_GRID_RECOMB[k] for k in ("lcdm_fiducial", "omega_b_high", "YHe_028")})
 
+# C_l value gates (smsharma/clax#54): cosmologies with CLASS cls.npz and
+# cls_lensed.npz references (scripts/generate_multipoint_reference.py VARIATIONS;
+# massive_nu_015 from the m_ncdm grid). Names match reference_data/<name>/.
+CL_VALUE_GRID = {
+    "lcdm_fiducial": {},
+    "omega_b_high": {"omega_b": 0.02237 * 1.20},
+    "h_high": {"h": 0.6736 * 1.10},
+    "h_low": {"h": 0.6736 * 0.90},
+    "massive_nu_015": {"m_ncdm": 0.15},
+}
+cl_value_cosmology = _make_cosmology_fixture(CL_VALUE_GRID)
+
 
 @pytest.fixture
 def lcdm_bg_ref():

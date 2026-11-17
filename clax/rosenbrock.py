@@ -16,6 +16,34 @@ Mathematical formulation (transformed W-form):
                   + sum_j (C_{ij}/h)*k_j
     y_{n+1} = y_n + sum_i b_i * k_i
 
+Reverse-mode AD and the h = 0 step (found while making C_l differentiable,
+smsharma/clax#54; V100 job 26946).  Under ``jax.vmap`` (the perturbation solve
+vmaps the k-modes) diffrax's step loop runs until the slowest member finishes; a
+member that has already reached t1 executes masked steps with h = 0 exactly.  With
+the divisions by h above, W and the C_ij/h couplings were inf on those steps; the
+forward pass discarded them, but the backward pass multiplied their zero cotangent
+by inf, and 0*inf = NaN made jax.grad of every C_l and source functional NaN at
+fit_cl in every parameter.  Every division by h therefore uses
+``dt_div = where(h == 0, 1, h)``: equal to h on every real step, so the arithmetic
+and the accepted-step sequence are those of the unguarded solver to the bit, and
+finite on a masked h = 0 step, whose result is discarded and whose cotangent is
+then 0 * finite = 0.  Edge case: on a masked step the substituted
+W = I/gamma - J is singular only if J has the real eigenvalue +1/gamma ~ +5.26
+(growth on a 0.19 time-unit scale; 1/Mpc for the perturbations).  The masked step
+would then be inf and the NaN would return, in reverse mode only.  At fit_cl the
+end-time Jacobians of all 100 k-modes have Re(lambda) <= 4.5e-4/Mpc and
+|lambda| <= 1.4/Mpc, so |lambda - 1/gamma| >= 5.26 (job 27662).
+
+An equivalent alternative removes the divisions algebraically: multiply each
+stage equation by h*gamma, W' = h*gamma*W = I - h*gamma*J and
+    W' * k_i = h*gamma*(f(...) + h*d_i*dT) + gamma * sum_j C_{ij}*k_j,
+the same k_i in exact arithmetic, with W' = I and all k_i = 0 at h = 0.  It
+also gives finite gradients, but its different rounding flipped step
+accept/reject decisions in 31 of 100 fit_cl k-modes and moved source_T0 by
+1.9e-4 of its peak, a re-sampling of the rtol 1e-4 integration error (V100
+job 27641, Oct 22, 2026).  The guard was chosen because it keeps the
+accepted-step sequence and arithmetic to the bit (job 27656).
+
 Dense output (state between accepted steps): both solvers return
 ``dense_info = dict(y0, y1, k0=dt*f(t0,y0), k1=dt*f(t1,y1))`` and use
 diffrax's ``ThirdOrderHermitePolynomialInterpolation`` (cubic Hermite, the
@@ -133,7 +161,9 @@ class Rodas5(AbstractAdaptiveSolver):
 
     Uses the transformed W-formulation where:
         W = I/(h*gamma) - J
-    and the error estimate is simply k_8 (the last stage).
+    with every division by h guarded against the masked h = 0 steps of a
+    vmapped solve (see the module docstring), and the error estimate is
+    simply k_8 (the last stage).
 
     This is the method used by DISCO-EB for the Einstein-Boltzmann system.
     It is L-stable and stiffly accurate, making it suitable for the stiff
@@ -165,6 +195,11 @@ class Rodas5(AbstractAdaptiveSolver):
 
     def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
         dt = t1 - t0
+        # Divisor for every 1/dt below: equal to dt on every real step (bit for
+        # bit), 1 on the masked dt = 0 steps vmap runs after a member reaches
+        # t1, so their discarded result and its cotangent stay finite (module
+        # docstring).  dt itself still sets the stage times and dense output.
+        dt_div = jnp.where(dt == 0, 1.0, dt)
         f = lambda t, y: terms.vf(t, y, args)
 
         # -- f(t0, y0): carried from the previous step unless it is invalid --
@@ -179,8 +214,8 @@ class Rodas5(AbstractAdaptiveSolver):
         J = jax.jacfwd(lambda y: f(t0, y))(y0)
         dT = jax.jacfwd(lambda t: f(t, y0))(t0)
 
-        # -- Form W = I/(dt*gamma) - J and LU factorize --
-        dtgamma = dt * _R5_GAMMA
+        # -- Form W = I/(dt*gamma) - J and LU factorize (guarded divisor) --
+        dtgamma = dt_div * _R5_GAMMA
         W = jnp.eye(n) / dtgamma - J
         lu_piv = jla.lu_factor(W)
 
@@ -190,52 +225,52 @@ class Rodas5(AbstractAdaptiveSolver):
 
         # -- Stage 2 --
         u2 = y0 + _R5_A21 * k1
-        rhs2 = f(t0 + _R5_C2 * dt, u2) + dt * _R5_D2 * dT + _R5_C21 / dt * k1
+        rhs2 = f(t0 + _R5_C2 * dt, u2) + dt * _R5_D2 * dT + _R5_C21 / dt_div * k1
         k2 = _lu_solve(lu_piv, rhs2)
 
         # -- Stage 3 --
         u3 = y0 + _R5_A31 * k1 + _R5_A32 * k2
         rhs3 = (f(t0 + _R5_C3 * dt, u3) + dt * _R5_D3 * dT
-                + _R5_C31 / dt * k1 + _R5_C32 / dt * k2)
+                + _R5_C31 / dt_div * k1 + _R5_C32 / dt_div * k2)
         k3 = _lu_solve(lu_piv, rhs3)
 
         # -- Stage 4 --
         u4 = y0 + _R5_A41 * k1 + _R5_A42 * k2 + _R5_A43 * k3
         rhs4 = (f(t0 + _R5_C4 * dt, u4) + dt * _R5_D4 * dT
-                + _R5_C41 / dt * k1 + _R5_C42 / dt * k2 + _R5_C43 / dt * k3)
+                + _R5_C41 / dt_div * k1 + _R5_C42 / dt_div * k2 + _R5_C43 / dt_div * k3)
         k4 = _lu_solve(lu_piv, rhs4)
 
         # -- Stage 5 --
         u5 = y0 + _R5_A51 * k1 + _R5_A52 * k2 + _R5_A53 * k3 + _R5_A54 * k4
         rhs5 = (f(t0 + _R5_C5 * dt, u5) + dt * _R5_D5 * dT
-                + _R5_C51 / dt * k1 + _R5_C52 / dt * k2
-                + _R5_C53 / dt * k3 + _R5_C54 / dt * k4)
+                + _R5_C51 / dt_div * k1 + _R5_C52 / dt_div * k2
+                + _R5_C53 / dt_div * k3 + _R5_C54 / dt_div * k4)
         k5 = _lu_solve(lu_piv, rhs5)
 
         # -- Stage 6 (at t0 + dt) --
         u6 = (y0 + _R5_A61 * k1 + _R5_A62 * k2 + _R5_A63 * k3
               + _R5_A64 * k4 + _R5_A65 * k5)
         rhs6 = (f(t0 + dt, u6)
-                + _R5_C61 / dt * k1 + _R5_C62 / dt * k2
-                + _R5_C63 / dt * k3 + _R5_C64 / dt * k4
-                + _R5_C65 / dt * k5)
+                + _R5_C61 / dt_div * k1 + _R5_C62 / dt_div * k2
+                + _R5_C63 / dt_div * k3 + _R5_C64 / dt_div * k4
+                + _R5_C65 / dt_div * k5)
         k6 = _lu_solve(lu_piv, rhs6)
 
         # -- Stage 7 (at t0 + dt, accumulating) --
         u7 = u6 + k6
         rhs7 = (f(t0 + dt, u7)
-                + _R5_C71 / dt * k1 + _R5_C72 / dt * k2
-                + _R5_C73 / dt * k3 + _R5_C74 / dt * k4
-                + _R5_C75 / dt * k5 + _R5_C76 / dt * k6)
+                + _R5_C71 / dt_div * k1 + _R5_C72 / dt_div * k2
+                + _R5_C73 / dt_div * k3 + _R5_C74 / dt_div * k4
+                + _R5_C75 / dt_div * k5 + _R5_C76 / dt_div * k6)
         k7 = _lu_solve(lu_piv, rhs7)
 
         # -- Stage 8 (at t0 + dt, accumulating — error stage) --
         u8 = u7 + k7
         rhs8 = (f(t0 + dt, u8)
-                + _R5_C81 / dt * k1 + _R5_C82 / dt * k2
-                + _R5_C83 / dt * k3 + _R5_C84 / dt * k4
-                + _R5_C85 / dt * k5 + _R5_C86 / dt * k6
-                + _R5_C87 / dt * k7)
+                + _R5_C81 / dt_div * k1 + _R5_C82 / dt_div * k2
+                + _R5_C83 / dt_div * k3 + _R5_C84 / dt_div * k4
+                + _R5_C85 / dt_div * k5 + _R5_C86 / dt_div * k6
+                + _R5_C87 / dt_div * k7)
         k8 = _lu_solve(lu_piv, rhs8)
 
         # -- Solution and error --
@@ -295,43 +330,46 @@ class Rodas5Batched(AbstractAdaptiveSolver):
 
         n = y0[0].shape[0]  # state dimension from first batch element
         dt = terms.contr(t0, t1)
+        # Guarded divisor, as in Rodas5.step: dt on every real step, 1 on a
+        # masked dt = 0 step (a vmap over batched solves).
+        dt_div = jnp.where(dt == 0, 1.0, dt)
 
-        # Pre-compute scaled coupling coefficients
-        dtC21 = _R5_C21 / dt
-        dtC31 = _R5_C31 / dt
-        dtC32 = _R5_C32 / dt
-        dtC41 = _R5_C41 / dt
-        dtC42 = _R5_C42 / dt
-        dtC43 = _R5_C43 / dt
-        dtC51 = _R5_C51 / dt
-        dtC52 = _R5_C52 / dt
-        dtC53 = _R5_C53 / dt
-        dtC54 = _R5_C54 / dt
-        dtC61 = _R5_C61 / dt
-        dtC62 = _R5_C62 / dt
-        dtC63 = _R5_C63 / dt
-        dtC64 = _R5_C64 / dt
-        dtC65 = _R5_C65 / dt
-        dtC71 = _R5_C71 / dt
-        dtC72 = _R5_C72 / dt
-        dtC73 = _R5_C73 / dt
-        dtC74 = _R5_C74 / dt
-        dtC75 = _R5_C75 / dt
-        dtC76 = _R5_C76 / dt
-        dtC81 = _R5_C81 / dt
-        dtC82 = _R5_C82 / dt
-        dtC83 = _R5_C83 / dt
-        dtC84 = _R5_C84 / dt
-        dtC85 = _R5_C85 / dt
-        dtC86 = _R5_C86 / dt
-        dtC87 = _R5_C87 / dt
+        # Pre-compute scaled coupling coefficients C_ij/dt (guarded divisor)
+        dtC21 = _R5_C21 / dt_div
+        dtC31 = _R5_C31 / dt_div
+        dtC32 = _R5_C32 / dt_div
+        dtC41 = _R5_C41 / dt_div
+        dtC42 = _R5_C42 / dt_div
+        dtC43 = _R5_C43 / dt_div
+        dtC51 = _R5_C51 / dt_div
+        dtC52 = _R5_C52 / dt_div
+        dtC53 = _R5_C53 / dt_div
+        dtC54 = _R5_C54 / dt_div
+        dtC61 = _R5_C61 / dt_div
+        dtC62 = _R5_C62 / dt_div
+        dtC63 = _R5_C63 / dt_div
+        dtC64 = _R5_C64 / dt_div
+        dtC65 = _R5_C65 / dt_div
+        dtC71 = _R5_C71 / dt_div
+        dtC72 = _R5_C72 / dt_div
+        dtC73 = _R5_C73 / dt_div
+        dtC74 = _R5_C74 / dt_div
+        dtC75 = _R5_C75 / dt_div
+        dtC76 = _R5_C76 / dt_div
+        dtC81 = _R5_C81 / dt_div
+        dtC82 = _R5_C82 / dt_div
+        dtC83 = _R5_C83 / dt_div
+        dtC84 = _R5_C84 / dt_div
+        dtC85 = _R5_C85 / dt_div
+        dtC86 = _R5_C86 / dt_div
+        dtC87 = _R5_C87 / dt_div
 
         dtd1 = dt * _R5_D1
         dtd2 = dt * _R5_D2
         dtd3 = dt * _R5_D3
         dtd4 = dt * _R5_D4
         dtd5 = dt * _R5_D5
-        dtgamma = dt * _R5_GAMMA
+        dtgamma = dt_div * _R5_GAMMA
 
         I = jnp.eye(n)
 

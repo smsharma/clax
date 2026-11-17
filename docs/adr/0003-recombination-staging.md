@@ -516,3 +516,16 @@ static shape. The ADR 0001 caveat (forward mode needs
   below z ~ 700 within 1.1e-5 to 6.2e-5 / 5.1e-5 to 1.7e-4 of CLASS on 20000 /
   3000 points, from 2.7e-4 / 1.8e-3), together with the
   four `1 - 0.75 Y_He` sites of D4.
+
+## Note (Oct 25, 2026, smsharma/clax#54)
+
+The S4 item above is done in ADR 0005: `compute_cls_all_fast` and the lensing
+corrections are differentiable at `fit_cl` (fixed-range Bessel table, cubic
+Hermite lookup, 20000 fine k points). Forward-mode d(sum ln C_l^TT)/dtheta along h,
+omega_b and omega_cdm matches finite differences to <= 6.2e-4 at three cosmologies (at
+100x tighter perturbation tolerance; at `fit_cl`'s own, AD sits within 2.8e-4 of
+that), and dF/dh is smooth along h to <= 7.4e-6, a smoothness that rests on this
+ADR's staging. Reverse mode through Rodas5 at `fit_cl` still needs a separate NaN fix,
+and its default recursive-checkpoint adjoint is off by 2e-4 to 7.2e-3 (ADR 0005,
+Consequences), so "a C_l-based NUTS fit cannot run today" now holds only for
+reverse mode.

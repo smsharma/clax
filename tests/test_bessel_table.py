@@ -1,14 +1,21 @@
-"""Resolution of the fast-path Bessel lookup table (precision sweep, Oct 2026).
+"""Resolution of the fast-path Bessel lookup table (precision sweep, Oct 2026;
+lookup changed to cubic Hermite in #54).
 
-``compute_cls_all_fast`` tabulates j_l(x) on a uniform x grid and interpolates
-linearly. Linear interpolation of an oscillation of period 2*pi at spacing h
-biases the amplitude by about -h^2/12 on average: at the historical 3 points
-per unit x (h ~ 0.33 for k_max = 1/Mpc) that is -0.9% in Delta_l, which the
-Oct 2026 sweep measured as a -1% TT offset at l < 50, +20% in EE at l = 2 and a
-k_max-dependent C_l. At 30 points per unit x the bias is below 1e-4 and the
-fast path matches the exact-j_l path to 0.01% for l <= 500. This test pins the
-module default and the bias law. Cosmology-independent numerics: exempt from the
-multi-cosmology rule.
+``compute_cls_all_fast`` tabulates j_l(x) and j_l'(x) on a uniform x grid. It
+used to interpolate j_l linearly. Linear interpolation of an oscillation of
+period 2*pi at spacing h biases the amplitude by about -h^2/12 on average: at 3
+points per unit x (h ~ 0.33 for k_max = 1/Mpc) that is -0.9% in Delta_l, which
+the Oct 2026 sweep measured as a -1% TT offset at l < 50, +20% in EE at l = 2
+and a k_max-dependent C_l; #50 raised the density to 30 points per unit x,
+where the bias is below 1e-4. #54 replaced the lookup by a cubic Hermite
+interpolant (value and slope at both nodes), whose error scales as h^4: the
+default is back at 3 points per unit x and agrees with the 30-point table to
+the bar of ``test_default_hermite_table_matches_30_points_per_unit_x``.
+
+``test_linear_interpolation_bias_follows_h2_over_12`` still tests the linear
+bias law, with its own helper (``_table_bias``), independent of the fast path;
+it documents why a linear lookup would need 30 points per unit x. Cosmology-
+independent numerics: exempt from the multi-cosmology rule.
 """
 import numpy as np
 import pytest
@@ -46,9 +53,79 @@ def _table_bias(x_per_unit, l_values, x_max=15000.0):
 L_VALUES = (2, 10, 50, 200)
 
 
-def test_default_table_resolution_is_fine():
-    """The module default must be the measured-adequate 30 points per unit x."""
-    assert harmonic.JL_TABLE_X_PER_UNIT >= 30.0
+# Hermite lookup at the module default density against the same lookup at 30
+# points per unit x, for j_l and j_l' at the l below, on the production tables
+# of fit_cl's fixed range: harmonic._table_grid(1.0, 20000.0, density), i.e.
+# x in [0, 21000] for k_max = 1/Mpc and tau_0 <= hr_tau0_max = 20000 Mpc, rows
+# of _sparse_l_padded(1500). The tables come from harmonic._jl_tables with the
+# same arguments as the fixture of tests/test_cl_bessel_lookup.py, so within one
+# pytest process the two files share one build (functools.lru_cache). The
+# separate [0, 15000] tables this test used to build took 45 s of CPU per run;
+# sharing them takes the two files from 159 s to 112 s (CPU jobs 30243, 30246).
+# Bars = 2x the measured worst difference over these l, rounded up to 2
+# significant figures: worst |dj_l| 3.626e-6 and |dj_l'| 3.302e-6, both at
+# l = 2, on the [0, 15000] tables (CPU job 27633; l = 30, 300, 1200: 3.0e-7,
+# 3.2e-8, 8.1e-9 in j_l) and the same on the production tables (CPU job 30246;
+# the l = 2 worst sits in the first table interval). They equal
+# the Hermite lookup's own error at the default density against the exact j_l
+# (tests/test_cl_bessel_lookup.py), since the 30-point table is 1e4 times closer
+# to exact.
+L_MAX = 1500
+HERMITE_ELLS = (2, 30, 300, 1200)
+BAR_JL = 7.3e-6
+BAR_JLP = 6.7e-6
+
+
+@pytest.fixture(scope="module")
+def hermite_tables():
+    """{x_per_unit: (x_max, n_x, jl_table, jlp_table)} for the default density and
+    30: the production tables (harmonic._jl_tables) on fit_cl's fixed range, the
+    same call as the L0 test's fixture, so the build is shared within a process."""
+    out = {}
+    for dens in sorted({harmonic.JL_TABLE_X_PER_UNIT, 30.0}):
+        x_max, n_x = harmonic._table_grid(1.0, 20000.0, dens)
+        _, jl_t, jlp_t = harmonic._jl_tables(L_MAX + harmonic.L_SPLINE_PAD, n_x, x_max)
+        out[dens] = (x_max, n_x, jl_t, jlp_t)
+    return out
+
+
+def _hermite_lookup(table, ell, x):
+    """harmonic._lookup_jl (the fast path's lookup) on one table row."""
+    import jax.numpy as jnp
+    x_max, n_x, jl_t, jlp_t = table
+    row = int(np.nonzero(harmonic._sparse_l_padded(L_MAX) == ell)[0][0])
+    dx_tab = x_max / (n_x - 1)
+    i_left, t = harmonic._table_position(jnp.asarray(x), dx_tab, n_x)
+    jl, jlp = harmonic._lookup_jl(jl_t[row], jlp_t[row], jnp.float64(ell),
+                                  jnp.float64(ell * (ell + 1.0)), i_left, t, dx_tab)
+    return np.asarray(jl), np.asarray(jlp)
+
+
+def test_default_hermite_table_matches_30_points_per_unit_x(hermite_tables):
+    """The cubic Hermite lookup at the module default density agrees with the
+    same lookup at 30 points per unit x (a table ten times larger) to the bars
+    above, for l = 2, 30, 300, 1200 at 20000 seeded-uniform x over the
+    production table's range [0, 21000] plus 2000 x within +-2 of l (where
+    the table switches from backward to upward recurrence). This is what lets
+    the default stay at 3 points per unit x. Mutation check (CPU job 27636, on
+    the [0, 15000] tables): a linear lookup at 3 points per unit x in its
+    place differs from the 30-point table by 2.0e-3 in j_l at l = 2, 270
+    times the bar.
+    Cosmology-independent numerics: exempt from the multi-cosmology rule."""
+    dens = harmonic.JL_TABLE_X_PER_UNIT
+    x_max = hermite_tables[dens][0]
+    for ell in HERMITE_ELLS:
+        rng = np.random.default_rng(ell)
+        near = np.clip(rng.uniform(ell - 2.0, ell + 2.0, 2000), 0.0, None)
+        x = np.concatenate([rng.uniform(0.0, x_max, 20000), near])
+        jl_a, jlp_a = _hermite_lookup(hermite_tables[dens], ell, x)
+        jl_b, jlp_b = _hermite_lookup(hermite_tables[30.0], ell, x)
+        e_jl = float(np.max(np.abs(jl_a - jl_b)))
+        e_jlp = float(np.max(np.abs(jlp_a - jlp_b)))
+        print(f"{dens:g} vs 30 pts/unit-x, l={ell}: |dj_l| {e_jl:.3e} (bar {BAR_JL:.1e}), "
+              f"|dj_l'| {e_jlp:.3e} (bar {BAR_JLP:.1e})")
+        assert e_jl <= BAR_JL, f"ERROR j_l {dens:g} vs 30 pts/unit-x: {e_jl:.2e} > {BAR_JL:.1e} (l={ell})"
+        assert e_jlp <= BAR_JLP, f"ERROR j_l' {dens:g} vs 30 pts/unit-x: {e_jlp:.2e} > {BAR_JLP:.1e} (l={ell})"
 
 
 def test_linear_interpolation_bias_follows_h2_over_12():
@@ -64,8 +141,9 @@ def test_linear_interpolation_bias_follows_h2_over_12():
     assert np.all(max3 > 20 * max30)
 
 
-def test_fast_path_default_uses_fine_table():
-    """compute_cls_all_fast must default to the module constant."""
+def test_fast_path_default_is_module_density():
+    """compute_cls_all_fast's x_per_unit default is the module constant
+    JL_TABLE_X_PER_UNIT (3 points per unit x with the Hermite lookup)."""
     import inspect
     sig = inspect.signature(harmonic.compute_cls_all_fast)
     assert sig.parameters["x_per_unit"].default == harmonic.JL_TABLE_X_PER_UNIT

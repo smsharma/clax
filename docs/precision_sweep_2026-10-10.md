@@ -14,6 +14,7 @@ below are left as written, and the outcomes are:
   `JL_TABLE_X_PER_UNIT = 30` in `clax/harmonic.py` ("default 3 unchanged"
   below describes the sweep branch), and `L_SPLINE_PAD = 100` pads the
   sparse-l spline past the requested l_max (#50).
+  Superseded by #54 (cubic Hermite lookup at 3 points per unit x; see ADR 0005).
 - Implications: #50 chose rodas5 rather than the Kvaerno5 recommended here
   for `planck_cl` (l_max 17/17/17, rtol 1e-4, atol 1e-6, max_steps 8192,
   hr_n_k_fine 20000) and kept th_n_points 100000 for `planck_cl` (20000 in

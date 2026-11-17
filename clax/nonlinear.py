@@ -123,26 +123,16 @@ def _bisect_sigma_body(carry, _):
     return (xlogr1, xlogr2, lnk, pk, tol), None
 
 
-def halofit_parameters(
-    lnk: Float[Array, "N"],
-    pk: Float[Array, "N"],
-) -> tuple[float, float, float]:
-    """Find the non-linear scale k_sigma, effective slope n_eff, and curvature C.
+@jax.custom_jvp
+def _log10_r_nl(lnk, pk):
+    """log10 R_nl, the root of sigma(R_nl) = 1, by 60 bisection steps.
 
-    Uses bisection to find R_nl where sigma(R_nl) = 1, then computes:
-        k_sigma = 1 / R_nl
-        n_eff = -3 - d1  (effective spectral index at k_sigma)
-        C = -d2           (curvature of the spectrum at k_sigma)
-
-    where d1 = -sum2/sum1 and d2 = -sum2^2/sum1^2 - sum3/sum1.
-    cf. halofit.c:394-401
-
-    Args:
-        lnk: log wavenumbers, shape (N,)
-        pk: linear power spectrum P(k) [Mpc^3], shape (N,)
-
-    Returns:
-        (k_sigma, n_eff, C)
+    The value is the bisection CLASS uses (cf. halofit.c:315-358). Its tangent is
+    defined by the implicit-function theorem (``_log10_r_nl_jvp``): the bisection's
+    jnp.where updates carry no derivative, so differentiating through them gives
+    dR_nl/dtheta = 0 and drops the response of k_sigma, n_eff and C to cosmology
+    (smsharma/clax#54: d k_sigma / dA was 0 by AD against -0.19 by finite
+    differences, for P_lin scaled by A).
     """
     k = jnp.exp(lnk)
     tol = 1e-6  # cf. CLASS: halofit_tol_sigma
@@ -163,9 +153,49 @@ def halofit_parameters(
     carry = (xlogr1, xlogr2, lnk, pk, tol)
     carry, _ = jax.lax.scan(_bisect_sigma_body, carry, None, length=60)
     xlogr1, xlogr2, _, _, _ = carry
+    return 0.5 * (xlogr1 + xlogr2)
 
-    # Final R
-    rmid = jnp.power(10.0, 0.5 * (xlogr1 + xlogr2))
+
+@_log10_r_nl.defjvp
+def _log10_r_nl_jvp(primals, tangents):
+    """Tangent of x = log10 R_nl from sigma(10^x; lnk, pk) = 1:
+    dx = -(d sigma along the (lnk, pk) tangent) / (d sigma / dx), both at the
+    bisection root. Linear in the tangents, so reverse mode transposes it."""
+    lnk, pk = primals
+    x = _log10_r_nl(lnk, pk)
+
+    def sig(x_, lnk_, pk_):
+        return jnp.sqrt(_sigma_integrals(jnp.power(10.0, x_), lnk_, pk_)[0])
+
+    dsig_dx = jax.grad(sig, argnums=0)(x, lnk, pk)
+    _, dsig = jax.jvp(lambda a, b: sig(x, a, b), (lnk, pk), tangents)
+    return x, -dsig / dsig_dx
+
+
+def halofit_parameters(
+    lnk: Float[Array, "N"],
+    pk: Float[Array, "N"],
+) -> tuple[float, float, float]:
+    """Find the non-linear scale k_sigma, effective slope n_eff, and curvature C.
+
+    Uses bisection to find R_nl where sigma(R_nl) = 1 (its derivative by the
+    implicit-function theorem, see ``_log10_r_nl``), then computes:
+        k_sigma = 1 / R_nl
+        n_eff = -3 - d1  (effective spectral index at k_sigma)
+        C = -d2           (curvature of the spectrum at k_sigma)
+
+    where d1 = -sum2/sum1 and d2 = -sum2^2/sum1^2 - sum3/sum1.
+    cf. halofit.c:394-401
+
+    Args:
+        lnk: log wavenumbers, shape (N,)
+        pk: linear power spectrum P(k) [Mpc^3], shape (N,)
+
+    Returns:
+        (k_sigma, n_eff, C)
+    """
+    # Final R: bisection value, implicit-function tangent (see _log10_r_nl)
+    rmid = jnp.power(10.0, _log10_r_nl(lnk, pk))
 
     # Compute all three integrals at this R
     sum1, sum2, sum3 = _sigma_integrals(rmid, lnk, pk)
