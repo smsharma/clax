@@ -40,7 +40,9 @@ Three tests, split so that one failing check cannot hide the others:
    seam between a recomputed segment and a stored state, counted a k-mode's end value
    twice or not at all (the pp cases passed, 1.9e-9 to 5.9e-5; CHANGELOG, Nov 17, 2026).
    Both are fixed on main's side of this branch (smsharma/clax#63, #64). Measured here:
-   TG5P_PENDING.
+   5.8e-9 to 8.1e-5 over the 36 cases (three cosmologies, h and omega_b, none / Halofit /
+   EPT), C_l^phiphi <= 2.1e-7, the largest lensed TT with EPT along omega_b at omega_b +
+   20% (jobs 38776-38778; 3.4 h and 105 GB host memory per cosmology).
 
 Finite-difference anchor (the same as the unlensed G4 test in tests/test_cl_gradients.py).
 At fit_cl tolerance (rtol 1e-4, atol 1e-6) sum ln C_l wobbles along omega_b at ~1e-8
