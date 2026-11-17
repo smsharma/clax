@@ -72,9 +72,14 @@ the lensing kernel's start, so dF_pp/dh missed FD by 0.55-2.9% (jobs 28542/28544
 linear interpolation of kappa = 1 in ln a (clax/thermodynamics.py:1050); this tree carries
 it, so the twelve pp cases that were xfail(strict) on the base, and the six lcdm_fiducial
 pp Rodas5 companions that passed only because the knot widened their allowance, are plain
-gates again. Measured on this tree: TG5F_PENDING. th.tau_star, also a knot, sets the
-perturbation save grid; its effect on unlensed TT was a single step of +4.6e-9 of |F|
-along h (scan job 28168).
+gates again. Measured on this tree: all 72 forward-FD cases pass, the Kvaerno5 gate at
+|AD/fd9 - 1| 2.5e-7 to 4.8e-4 (unc <= 1.2e-4) and the Rodas5 companion at |AD - fd9|/|AD|
+9.6e-7 to 3.8e-4 against allowances >= 1.0e-3; the twelve former ZREC_K5 cases sit at
+3.2e-6 to 2.1e-4 and the six former ZREC_R5 cases at 4.3e-5 to 1.6e-4; the largest values
+of all are C_l^phiphi along omega_b at YHe_028 (jobs 38796, 38800, 38804, 38922-38933;
+5.1-5.4 h per 8 none cases, 7.4-8.2 h per 4 Halofit or EPT cases). th.tau_star, also a
+knot, sets the perturbation save grid; its effect on unlensed TT was a single step of
++4.6e-9 of |F| along h (scan job 28168).
 """
 import jax
 import jax.numpy as jnp

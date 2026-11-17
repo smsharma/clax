@@ -1,6 +1,6 @@
 # ADR 0005: C_l, C_l^phiphi and lensed C_l are differentiable at fit_cl
 
-Date: 2026-10-25
+Date: 2026-10-25 (Addendum: 2026-11-17)
 Status: Accepted
 Issue: https://github.com/smsharma/clax/issues/54 (related: #53 / ADR 0003,
 #59 / ADR 0004, #57, #61)
@@ -9,7 +9,9 @@ Every number below was measured on the branch's base, upstream main at 5ac3df3
 (after #53, #49-#51 and #59; before #58, which gives `fit_cl` a massive-neutrino
 hierarchy, and before #60 and #61), on V100-32GB GPUs with JAX 0.9.2 unless a CPU
 job is named. Main has since moved to 6ff1303 with #58, #60 and #61 merged
-(Oct 25, 2026); nothing here has been re-measured on it (Not done). The lookup
+(Oct 25, 2026); the branch was rebased onto it, with #63 and #64, and every value of
+Consequences re-measured there: see the Addendum (Nov 17, 2026) before Status, which
+is the current record where it differs from the body. The lookup
 comparison of Decision 2 and some value measurements ran on 99b62fe, just before
 #59; #59 changes derivatives through the thermodynamics but leaves every value
 bit-identical (ADR 0004), and the lookup comparison sets two lookups against each
@@ -442,15 +444,17 @@ tolerance unless stated).
 
 - **The gradient's cost** (4.8x a forward evaluation, Decision 6): the
   checkpointed adjoint through Rodas5. A follow-up issue is drafted.
-- **The production adjoint's error through batched Rodas5** (Consequences).
-  Its strict expected failures record it. Issue to be filed.
+- **Done (Nov 17, 2026, Addendum).** The production adjoint's error through batched
+  Rodas5 (Consequences): fixed by #64 (the perturbation solves store every step), which
+  this branch carries; the strict expected failures are removed.
 - **Rodas5's step-sequence reproducibility** (Decision 7). At `fit_cl`
   tolerance it puts a ~1e-8 wobble on the primal, which floors finite
   differences along omega_b near 1e-3, and it limits agreement between two
   compilations of one derivative to ~1e-5. Candidates: acceptance hysteresis,
   error-norm rounding. A follow-up issue is drafted.
-- **The Rodas5 reverse-NaN fix** is its own PR. When it merges, the strict
-  expected failures flip to hard failures and their markers must be removed:
+- **Done (Nov 17, 2026, Addendum).** The Rodas5 reverse-NaN fix (#63) is carried by
+  this branch and the markers below are removed; the list stays as the record of what
+  was marked:
   - `tests/test_cl_gradients.py`: all 9 direct-adjoint reverse-vs-forward cases; the
     production-adjoint cases at lcdm_fiducial and omega_b_high for omega_cdm
     (2.1e-4 and 1.9e-4, under the 3e-4 bar); the jit-of-grad Rodas5 companion
@@ -458,9 +462,9 @@ tolerance unless stated).
     per case.
   - `tests/test_cl_lensing_gradients.py`: the 18 C_l^phiphi reverse-mode
     cases. The 18 lensed-TT cases stay marked.
-- **The rebase onto main 6ff1303.** #58, #60 and #61 are merged there (Oct 25,
-  2026), and every number in this record was measured at 5ac3df3, before them.
-  The rebase has to:
+- **Done (Nov 17, 2026, Addendum).** The rebase onto main 6ff1303. #58, #60 and #61
+  are merged there (Oct 25, 2026), and every number in the body was measured at
+  5ac3df3, before them. The rebase had to:
   - re-measure every `fit_cl` number: #58's neutrino hierarchy takes the
     perturbation state from 61 to 106 variables, which moves the forward time,
     the 4.8x gradient cost, the 6.2 GiB peak and the G1-G5 values;
@@ -469,15 +473,17 @@ tolerance unless stated).
   - remove the 18 z_rec expected-fail markers: #61 makes z_rec, tau_star and
     the other epochs continuous, so they pass (pytest reports an error until
     the markers go).
-- **The massless-neutrino treatment of `fit_cl`** (#57), which #58 changes; every
-  `fit_cl` number above predates #58.
+- **Done (Nov 17, 2026, Addendum).** The massless-neutrino treatment of `fit_cl`
+  (#57), which #58 changes; every `fit_cl` number in the body predates #58, every
+  number in the Addendum includes it.
 - **Memory and time of the lensed gradients** (Decision 6 asks for them). The
   overlay reverse jobs of C_l^phiphi and lensed TT (28549-28553, 28769-28771)
   ran to completion on V100-32GB; no per-case time or peak memory was recorded.
 - **The unlensed and lensed CLASS references** of lcdm_fiducial, omega_b_high
   and h_high are not regenerated on the current CLASS build.
-- **The generator of the C_l-versus-CLASS baseline**
-  (`tests/data/cl_vs_class_baseline.{json,npz}`) is not in the repository. It
+- **Done (Nov 17, 2026, Addendum: `scripts/cl_vs_class_baseline.py`).** The generator
+  of the C_l-versus-CLASS baseline
+  (`tests/data/cl_vs_class_baseline.{json,npz}`) was not in the repository. It
   is a scratch script, recorded in the JSON's `_provenance` by path and sha1,
   with the call recipe in `_provenance.calls`. Regenerating the baseline after
   #58 or #60 (Status) needs it committed; follow-up.
@@ -495,11 +501,63 @@ tolerance unless stated).
   - `tests/test_chebyshev_interpolation.py::test_cls_chebyshev_path_matches_spline_path`
     (TT ratio 1.0170 at l = 500 against a bar of 0.005; jobs 30166/30167).
 
+## Addendum (Nov 17, 2026): the rebase onto main 6ff1303 with #63 and #64
+
+Branch `fix/cl-differentiability-r2`: this ADR's branch merged with main 6ff1303 (#58,
+#60, #61) and with `fix/pt-adjoint-checkpoints` (#64, which carries the Rodas5 reverse-NaN
+fix #63). The three dependencies named under Not done and Status have landed, and the
+values of Consequences were re-measured on the merged tree (V100-32GB, JAX 0.9.2; fit_cl
+with #58's 5-bin neutrino hierarchy). Nothing in clax/ changed beyond the merges. Where a
+number differs from the body of this record, this addendum is the current one; the body
+keeps the Oct 25 measurements at 5ac3df3.
+
+- **Reverse mode is a hard pass.** The strict expected failures of Decision 7 and
+  Consequences are gone (commits e32177b, 32414d4). Production reverse mode (stable
+  thermodynamics, RecursiveCheckpointAdjoint storing every step, #64) against forward
+  mode: F_TT 9.1e-9 to 1.0e-5 over h, omega_b, omega_cdm at the three cosmologies; the
+  direct adjoint 1.9e-8 to 5.6e-6; F_pp and F_lTT (none / Halofit / EPT, h and omega_b)
+  5.8e-9 to 8.1e-5 over 36 cases, C_l^phiphi <= 2.1e-7 (jobs 38776-38778). The lensed-TT
+  misses of 3.4e-4 to 6.4e-3 and the 1e-4 to 1e-2 production defect were the recursive
+  adjoint's seam error (CHANGELOG, Nov 17, 2026, #64).
+- **The z_rec knot is gone** (#61, merged Oct 23, 2026). The 18 C_l^phiphi
+  finite-difference cases that were xfail(strict) pass: Kvaerno5 3.2e-6 to 2.1e-4 (bar
+  1e-3), Rodas5 companion 4.3e-5 to 1.6e-4 against allowances >= 1.0e-3 (jobs 38796,
+  38800, 38804, 38922-38933); the whole G5 forward-FD set of 72 cases passes at <= 4.8e-4
+  (Kvaerno5, unc <= 1.2e-4) and <= 3.8e-4 (Rodas5), the largest being C_l^phiphi along
+  omega_b at Y_He = 0.28. ZREC_K5 / ZREC_R5 and `_xfail_if_zrec` are removed from
+  tests/test_cl_lensing_gradients.py.
+- **G1-G4 re-measured:** G1 spreads <= 8.4e-6 (h), <= 2.4e-5 (omega_cdm), <= 1.9e-4
+  (omega_b; 1.65e-4 at 5ac3df3), bar 3e-4 (job 38813); G3 cubic residual 9.5e-6 / 3.3e-6 /
+  1.4e-5; G4 Kvaerno5 gate 1.2e-6 to 8.8e-5 (unc <= 7.1e-5), Rodas5 companion 1.7e-6 to
+  6.8e-5, all 18 cases (jobs 38795, 38799, 38803; 3.3e-4 and 6.2e-4 were the Oct 25
+  maxima); RF1 Rodas5 companion 2.6e-8 to 7.1e-8, RF4 Rodas5 companion <= 7.8e-10;
+  harmonic-stage RF1 / RF4 at 5.1e-14 / 1.9e-16.
+- **C_l versus CLASS (Decision 8).** The baseline is regenerated on 6ff1303 by
+  `scripts/cl_vs_class_baseline.py`, the generator now in the repository (Not done,
+  closed). All 10 cases pass against it, every band on the error branch; tightest margin
+  TT 30-100, 7.5e-7 (planck_cl, omega_b + 20%, l = 47) to 3.0e-6 (jobs 38814, 38815). The
+  two TE allowances of Consequences (fit_cl TE / lensed TE 2-30, 5e-3) are retired: on
+  6ff1303 the l = 2 TE shift (4.4e-3 to 5.3e-3 of sqrt(TT EE)) no longer sets the band
+  maximum, which #58/#60/#61 brought from 17% to 0.9%, and the fix's band error is 1.9e-5
+  below the base's at all five cosmologies. KNOWN_SHIFTS is empty.
+- **Cost (Decision 6)** at fiducial fit_cl, job 38812: eager forward 0.78x the base at
+  equal k-grid (gate <= 1.05x; 14.5 against 18.6 s), jitted forward 10.1 s (6.70 s at
+  5ac3df3: #58's 106-variable hierarchy), jit(grad) over the CosmoParams pytree 39.0 s =
+  3.83x the forward (31.8 s = 4.8x at 5ac3df3; the 3x budget stays waived), peak 7.59 GiB
+  with both programs alive (6.20 GiB).
+- **Still not done:** Rodas5's step-sequence reproducibility (Decision 7; follow-up issue
+  drafted), the Kvaerno5 reverse-vs-forward floor's origin, the gradient's 3.83x against
+  the 3x budget (Decision 6, waived; issue drafted), the old CLASS references of
+  lcdm_fiducial, omega_b_high and h_high, per-case memory and time of the lensed gradients
+  (measured per cosmology: 12 production-reverse cases in 3.4 h and 105 GB), and the
+  out-of-scope items listed above, CLAUDE.md's figures among them. The two pre-existing
+  test failures are unchanged.
+
 ## Status
 
-Accepted on branch `fix/cl-differentiability`, on main 5ac3df3. Main is now at
-6ff1303 with #58, #60 and #61 merged (Oct 25, 2026); every number here was
-measured at 5ac3df3, before them (Not done: the rebase). It closes #54.
+Accepted on branch `fix/cl-differentiability`, on main 5ac3df3; rebased Nov 17, 2026
+onto main 6ff1303 with #63 and #64 as `fix/cl-differentiability-r2`, with every value
+re-measured (Addendum). It closes #54.
 
 Depends on:
 - **ADR 0003** (#53, recombination staging). The h-gradient smoothness this ADR
@@ -510,10 +568,10 @@ Depends on:
   of F_TT along omega_cdm was 149% off finite differences and along omega_b had
   the wrong sign (jobs 27212-27214).
 
-Interacts with:
-- the Rodas5 reverse-NaN PR, which removes the NaN expected failures;
-- #61 (merged in main), which removes the z_rec ones;
-- #58 and #60 (merged in main), which move `fit_cl`'s spectra and, with #61, require
-  `tests/data/cl_vs_class_baseline.{json,npz}` (whose generator is not yet
-  committed, Not done) to be regenerated before the
-  C_l-versus-CLASS gate means anything.
+Interacts with (all landed in the rebased branch, Addendum):
+- #63, the Rodas5 reverse-NaN fix, and #64, the store-every-step adjoint, which turned
+  the NaN and production-adjoint expected failures into hard passes;
+- #61 (merged in main), which removed the z_rec ones;
+- #58 and #60 (merged in main), which moved `fit_cl`'s spectra and, with #61, required
+  `tests/data/cl_vs_class_baseline.{json,npz}` to be regenerated (done, with the
+  generator committed) before the C_l-versus-CLASS gate meant anything.

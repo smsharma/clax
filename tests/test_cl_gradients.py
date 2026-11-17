@@ -66,6 +66,16 @@ tests below are therefore hard passes, measured on this tree:
   dF/domega_b at omega_b_high (jobs 38768-38770).
 - test_rf1_jit_of_grad_equals_grad_rodas5_companion: eager and jitted reverse mode
   agree. Measured: 2.6e-8 to 7.1e-8 at the three cosmologies (jobs 38768-38770).
+
+Forward-mode gates measured on the same tree (bars 3e-4; G4 1e-3 with the FD's own spread
+unc <= 3e-4): G1 step-placement spread <= 8.4e-6 (h), <= 2.4e-5 (omega_cdm), 3.0e-5 /
+1.9e-4 / 1.1e-4 (omega_b at lcdm_fiducial / omega_b_high / YHe_028: the Rodas5
+step-sequence wobble along omega_b; job 38813); G3 cubic residual of dF/dh along h 9.5e-6
+/ 3.3e-6 / 1.4e-5 (jobs 38768-38770); G4 Kvaerno5 gate |AD/fd9 - 1| 1.2e-6 to 8.8e-5 with
+unc <= 7.1e-5 and the Rodas5 companion |AD - fd9|/|AD| 1.7e-6 to 6.8e-5 against allowances
+>= 1.0e-3, all 18 cases; AD at fit_cl's own tolerance within 3.4e-4 of the converged
+derivative (omega_b at omega_b_high; <= 3.1e-5 for h and omega_cdm) (jobs 38795, 38799,
+38803; 4 h per cosmology).
 """
 from dataclasses import replace
 
